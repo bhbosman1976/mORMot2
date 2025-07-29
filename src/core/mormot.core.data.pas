@@ -372,6 +372,7 @@ type
   TSynList = class(TSynPersistent)
   protected
     fCount: integer;
+    fOwnObjects: boolean; // used by TSynObjectList - here for CPU64 alignment
     fList: TPointerDynArray;
     function Get(index: integer): pointer;
       {$ifdef HASINLINE}inline;{$endif}
@@ -412,9 +413,9 @@ type
   TSynListClass = class of TSynList;
 
   /// simple and efficient TObjectList, without any notification
+  // - see TSynObjectListLocked for a locked/thread-safe variant
   TSynObjectList = class(TSynList)
   protected
-    fOwnObjects: boolean;
     fItemClass: TClass;
   public
     /// initialize the object list
@@ -424,6 +425,7 @@ type
     /// add one TObject to the list and a variable slot, or release it
     // - return true and store item into sharedslot if it is nil
     // - return false and call item.Free if sharedslot <> nil
+    // - typically used as a local/private garbage collection
     function AddOnceInto(item: TObject; sharedslot: PObject): boolean; virtual;
     /// delete one object from the list
     // - will also Free the item if OwnObjects was set, and dontfree is false
@@ -509,7 +511,7 @@ type
     /// add one item to the list using Safe.WriteLock
     function Add(item: pointer): PtrInt; override;
     /// add one TObject to the list and a variable slot using Safe.WriteLock
-    // - can be used e.g. for thread-safe garbage collection of TObject instances
+    // - typically used as a local/private thread-safe garbage collection
     function AddOnceInto(item: TObject; sharedslot: PObject): boolean; override;
     /// delete all items of the list using Safe.WriteLock
     procedure Clear; override;
@@ -535,9 +537,6 @@ type
   TSynObjectListSorted = class(TSynObjectListLocked)
   protected
     fCompare: TOnObjectCompare;
-    // returns TRUE and the index of existing Item, or FALSE and the index
-    // where the Item is to be inserted so that the array remains sorted
-    function Locate(item: pointer; out index: PtrInt): boolean;
   public
     /// initialize the object list to be sorted with the supplied function
     constructor Create(const aCompare: TOnObjectCompare;
@@ -550,6 +549,9 @@ type
     // - this overriden version won't search for the item pointer itself,
     // but will use the Compare() function until it is 0
     function IndexOf(item: pointer): PtrInt; override;
+    /// returns TRUE and the index of existing Item, or FALSE and the index
+    // where the Item is to be inserted so that the array remains sorted
+    function Locate(item: pointer; out index: PtrInt): boolean;
     /// fast retrieve one item in the list using O(log(n)) binary search
     // - supplied item should have enough information for fCompare to work
     function Find(item: TObject): TObject;
@@ -1098,42 +1100,42 @@ type
   /// internal enumeration used to specify some standard arrays
   // - mORMot 1.18 did have two serialization engines - we unified it
   // - defined only for backward compatible code; use TRttiParserType instead
-  TDynArrayKind = TRttiParserType;
+  TDynArrayKind  = TRttiParserType;
   TDynArrayKinds = TRttiParserTypes;
 
 const
   /// deprecated TDynArrayKind enumerate mapping
   // - defined only for backward compatible code; use TRttiParserType instead
-  djNone = ptNone;
-  djboolean = ptboolean;
-  djByte = ptByte;
-  djWord = ptWord;
-  djInteger = ptInteger;
-  djCardinal = ptCardinal;
-  djSingle = ptSingle;
-  djInt64 = ptInt64;
-  djQWord = ptQWord;
-  djDouble = ptDouble;
-  djCurrency = ptCurrency;
-  djTimeLog = ptTimeLog;
-  djDateTime = ptDateTime;
-  djDateTimeMS = ptDateTimeMS;
-  djRawUtf8 = ptRawUtf8;
-  djRawJson = ptRawJson;
-  djWinAnsi = ptWinAnsi;
-  djString = ptString;
-  djRawByteString = ptRawByteString;
-  djWideString = ptWideString;
-  djSynUnicode = ptSynUnicode;
-  djHash128 = ptHash128;
-  djHash256 = ptHash256;
-  djHash512 = ptHash512;
-  djVariant = ptVariant;
-  djCustom = ptCustom;
-  djPointer = ptPtrInt;
-  djObject = ptPtrInt;
+  djNone           = ptNone;
+  djboolean        = ptboolean;
+  djByte           = ptByte;
+  djWord           = ptWord;
+  djInteger        = ptInteger;
+  djCardinal       = ptCardinal;
+  djSingle         = ptSingle;
+  djInt64          = ptInt64;
+  djQWord          = ptQWord;
+  djDouble         = ptDouble;
+  djCurrency       = ptCurrency;
+  djTimeLog        = ptTimeLog;
+  djDateTime       = ptDateTime;
+  djDateTimeMS     = ptDateTimeMS;
+  djRawUtf8        = ptRawUtf8;
+  djRawJson        = ptRawJson;
+  djWinAnsi        = ptWinAnsi;
+  djString         = ptString;
+  djRawByteString  = ptRawByteString;
+  djWideString     = ptWideString;
+  djSynUnicode     = ptSynUnicode;
+  djHash128        = ptHash128;
+  djHash256        = ptHash256;
+  djHash512        = ptHash512;
+  djVariant        = ptVariant;
+  djCustom         = ptCustom;
+  djPointer        = ptPtrInt;
+  djObject         = ptPtrInt;
   djUnmanagedTypes = ptUnmanagedTypes;
-  djStringTypes = ptStringTypes;
+  djStringTypes    = ptStringTypes;
 
 {$endif PUREMORMOT2}
 
@@ -11491,7 +11493,8 @@ begin
     end;
   // setup internal function wrappers
   GetDataFromJson := _GetDataFromJson;
-  HashSeed := SharedRandom.Generator.Next; // avoid hash flooding
+  // in-memory hashing are seeded from random to avoid hash flooding
+  HashSeed := SharedRandom.Generator.Next xor StartupEntropy.c0;
 end;
 
 

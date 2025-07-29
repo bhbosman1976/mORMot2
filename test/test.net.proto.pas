@@ -1614,12 +1614,12 @@ end;
 
 procedure TNetworkProtocols.IPAddresses;
 var
-  i, n: PtrInt;
+  i, n, n2: PtrInt;
   s: ShortString;
-  txt: RawUtf8;
+  txt, uri: RawUtf8;
   ip: THash128Rec;
   sub: TIp4SubNets;
-  bin: RawByteString;
+  bin, bin2: RawByteString;
   timer: TPrecisionTimer;
 begin
   FillZero(ip.b);
@@ -1705,8 +1705,8 @@ begin
   try
     CheckEqual(sub.AfterAdd, 0);
     bin := sub.SaveToBinary;
-    if CheckEqual(length(bin), 4) then
-      CheckEqual(PInteger(bin)^, 0);
+    if CheckEqual(length(bin), 8) then
+      CheckEqual(PInt64(bin)^, IP4SUBNET_MAGIC);
     Check(not sub.Match('190.16.1.1'));
     Check(not sub.Match('190.16.1.135'));
     Check(not sub.Match('190.16.1.250'));
@@ -1725,7 +1725,7 @@ begin
     Check(not sub.Match('190.16.1.1'));
     Check(not sub.Match('190.16.1.135'));
     Check(not sub.Match('190.16.1.250'));
-    Check(sub.LoadFromBinary(bin), 'load1');
+    CheckEqual(sub.LoadFromBinary(bin), 1, 'load1');
     CheckEqual(sub.AfterAdd, 1);
     Check(sub.Match('190.16.1.1'));
     Check(sub.Match('190.16.1.135'));
@@ -1749,7 +1749,7 @@ begin
     bin := sub.SaveToBinary;
     sub.Clear;
     Check(not sub.Match('190.16.43.1'));
-    Check(sub.LoadFromBinary(bin), 'load2');
+    CheckEqual(sub.LoadFromBinary(bin), 2, 'load');
     CheckEqual(sub.AfterAdd, 2);
     Check(sub.Match('190.16.1.1'));
     Check(sub.Match('190.16.1.135'));
@@ -1778,13 +1778,15 @@ begin
       'refs/heads/master/firehol_level1.netset', 'firehol.netset');
     if txt <> '' then
     begin
+      Make(['file://', WorkDir, 'firehol.netset'], uri);
+      CheckUtf8(DownloadFile(uri) = txt, uri);
       sub.Clear;
       timer.Start;
       n := sub.AddFromText(txt);
       NotifyTestSpeed('parse TIp4SubNets', n, length(txt), @timer);
-      Check(n > 4000);
+      Check(n > 4000); // typically 4520 subnets, 612,853,888 unique IPs
       CheckEqual(sub.AfterAdd, n);
-      CheckEqual(length(sub.SubNet), 18);
+      CheckUtf8(length(sub.SubNet) in [17 .. 18], 'sub=%', [length(sub.SubNet)]);
       Check(not sub.Match('1.2.3.4'));
       Check(not sub.Match('1.2.3.5'));
       Check(not sub.Match('192.168.1.1'), '192'); // only IsPublicIP() was added
@@ -1819,14 +1821,20 @@ begin
         Check(sub.AddFromText(txt) < 1000, 'spamhaus within firehol');
         sub.Clear;
         Check(not sub.Match('10.18.1.1'), '10');
-        Check(sub.AddFromText(txt) > 1000, 'spamhaus=1525');
+        n2 := sub.AddFromText(txt);
+        Check(n2 > 1000, 'spamhaus=1525');
+        Check(not sub.Match('62.210.254.173'), 'cauterets.site');
         Check(sub.Match('223.254.0.1') ,'a2'); // 223.254.0.0/16
         Check(sub.Match('223.254.1.1'), 'b2');
         Check(sub.Match('223.254.200.129'), 'c2');
+        bin2 := sub.SaveToBinary;
         CheckEqual(sub.AddFromText(txt), 0, 'twice');
+        CheckEqual(sub.SaveToBinary, bin2);
+        sub.Clear;
+        CheckEqual(sub.LoadFrom(txt), n2, 'loadtxt');
+        Check(sub.SaveToBinary = bin2, 'savebin');
       end;
-      sub.Clear;
-      Check(sub.LoadFromBinary(bin), 'loadbin');
+      CheckEqual(sub.LoadFrom(bin), n, 'loadfrom');
       Check(sub.SaveToBinary = bin, 'savebin');
       Check(sub.Match('223.254.0.1') ,'a3'); // 223.254.0.0/16
       Check(sub.Match('223.254.1.1'), 'b3');
@@ -2286,17 +2294,24 @@ begin
   CheckEqual(StatusCodeToText(499)^, 'Invalid Request');
   CheckEqual(StatusCodeToText(666)^, 'Client Side Connection Error');
   // validate TUri data structure
+  U.Clear;
+  Check(U.UriScheme = usUnknown);
+  CheckEqual(U.Uri, '');
   Check(U.From('toto.com'));
   CheckEqual(U.Uri, 'http://toto.com/');
+  Check(U.UriScheme = usHttp);
   Check(not U.Https);
   Check(U.From('toto.com:123'));
   CheckEqual(U.Uri, 'http://toto.com:123/');
+  Check(U.UriScheme = usHttp);
   Check(not U.Https);
   Check(U.From('https://toto.com:123/tata/titi'));
   CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
+  Check(U.UriScheme = usHttps);
   Check(U.Https);
   CheckEqual(U.Address, 'tata/titi');
   Check(U.From('https://toto.com:123/tata/tutu:tete'));
+  Check(U.UriScheme = usHttps);
   CheckEqual(U.Address, 'tata/tutu:tete');
   CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
   Check(U.From('http://user:password@server:port/address'));
@@ -2311,17 +2326,66 @@ begin
   CheckEqual(U.User, 'user');
   CheckEqual(U.Password, '');
   Check(U.From('toto.com/tata/tutu:tete'));
+  Check(U.UriScheme = usHttp);
   CheckEqual(U.Uri, 'http://toto.com/tata/tutu:tete');
   CheckEqual(U.User, '');
   CheckEqual(U.Password, '');
+  CheckEqual(U.URI, 'http://toto.com/tata/tutu:tete');
   Check(U.From('file://server/path/to%20image.jpg'));
   CheckEqual(U.Scheme, 'file');
+  Check(U.UriScheme = usFile);
   CheckEqual(U.Server, 'server');
   CheckEqual(U.Address, 'path/to%20image.jpg');
-  Check(not U.From('file:///path/to%20image.jpg'), 'false if valid');
+  CheckEqual(U.Uri, 'file://server/path/to%20image.jpg');
+  Check(U.From('file://server/c:\path\to'));
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, 'server');
+  CheckEqual(U.Address, 'c:\path\to');
+  Check(U.From('file:////server/folder/data.xml'));
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, 'server');
+  CheckEqual(U.Address, 'folder/data.xml');
+  Check(not U.From('file:///C:/DirA/DirB/With%20Spaces.txt'));
   CheckEqual(U.Scheme, 'file');
   CheckEqual(U.Server, '');
+  CheckEqual(U.Address, 'C:/DirA/DirB/With%20Spaces.txt');
+  Check(not U.From('FILE:///path/to%20image.jpg'), 'false if valid');
+  CheckEqual(U.Scheme, 'FILE');
+  Check(U.UriScheme = usFile);
+  CheckEqual(U.Server, '');
+  CheckEqual(U.User, '');
+  CheckEqual(U.Password, '');
   CheckEqual(U.Address, 'path/to%20image.jpg');
+  CheckEqual(U.Uri, 'file:///path/to%20image.jpg');
+  Check(U.From('ftp://user:password@host:port/path'), 'ftp');
+  CheckEqual(U.Scheme, 'ftp');
+  Check(U.UriScheme = usFtp);
+  CheckEqual(U.Server, 'host');
+  CheckEqual(U.Port, 'port');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, 'password');
+  CheckEqual(U.Address, 'path');
+  CheckEqual(U.Uri, 'ftp://host:port/path');
+  Check(U.From('ftpS://user:password@host/path'), 'ftps');
+  CheckEqual(U.Scheme, 'ftpS');
+  Check(U.UriScheme = usFtps);
+  CheckEqual(U.Server, 'host');
+  CheckEqual(U.Port, '989');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, 'password');
+  CheckEqual(U.Address, 'path');
+  CheckEqual(U.Uri, 'ftps://host/path');
+  s := '?subject=This%20is%20the%20subject' +
+       '&cc=someone_else@example.com&body=This%20is%20the%20body';
+  Check(U.From('mailto://someone@example.com' + s));
+  CheckEqual(U.Scheme, 'mailto');
+  Check(U.UriScheme = usUnknown);
+  CheckEqual(U.Server, 'example.com');
+  CheckEqual(U.Port, '');
+  CheckEqual(U.User, 'someone');
+  CheckEqual(U.Password, '');
+  CheckEqual(U.Address, s);
+  CheckEqual(U.Uri, 'mailto://example.com/' + s);
   // validate THttpCookies and CookieFromHeaders()
   hc.ParseServer('');
   CheckEqual(length(hc.Cookies), 0);

@@ -5024,36 +5024,36 @@ type
 {$ifndef PUREMORMOT2}
 
 type
-  TSqlRecord = TOrm;
-  PSqlRecord = POrm;
-  TSqlRecordArray = TOrmArray;
-  PSqlRecordArray = POrmArray;
-  TSqlRecordObjArray = TOrmObjArray;
-  TSqlRecordClass = TOrmClass;
-  TSqlRecordClassDynArray = TOrmClassDynArray;
-  PSqlClass = POrmClass;
-  TSqlTable = TOrmTable;
-  TSqlTableJson = TOrmTableJson;
-  TSqlInitializeTableOption = TOrmInitializeTableOption;
-  TSqlInitializeTableOptions = TOrmInitializeTableOptions;
-  TSqlAccessRights = TOrmAccessRights;
-  PSqlAccessRights = POrmAccessRights;
-  TSqlFieldType = TOrmFieldType;
-  TSqlFieldTables = TOrmTableBits;
-  TSqlModel = TOrmModel;
-  TSqlModelProperties = TOrmModelProperties;
-  TSqlModelPropertiesObjArray = TOrmModelPropertiesObjArray;
-  TSqlProperties = TOrmProperties;
-  TSqlPropInfo = TOrmPropInfo;
-  TSqlPropInfoObjArray = TOrmPropInfoObjArray;
-  TSqlPropInfoClass = TOrmPropInfoClass;
-  TSqlPropInfoListOptions = TOrmPropInfoListOptions;
-  TSqlPropInfoAttribute = TOrmPropInfoAttribute;
-  TSqlPropInfoAttributes = TOrmPropInfoAttributes;
-  TSqlRestCache = TOrmCache;
-  TSqlRestBatch = TRestBatch;
-  TSqlRestBatchLocked = TRestBatchLocked;
-  TOrmPropertiesMapping = TOrmMapping;
+  TSqlRecord                   = TOrm;
+  PSqlRecord                   = POrm;
+  TSqlRecordArray              = TOrmArray;
+  PSqlRecordArray              = POrmArray;
+  TSqlRecordObjArray           = TOrmObjArray;
+  TSqlRecordClass              = TOrmClass;
+  TSqlRecordClassDynArray      = TOrmClassDynArray;
+  PSqlClass                    = POrmClass;
+  TSqlTable                    = TOrmTable;
+  TSqlTableJson                = TOrmTableJson;
+  TSqlInitializeTableOption    = TOrmInitializeTableOption;
+  TSqlInitializeTableOptions   = TOrmInitializeTableOptions;
+  TSqlAccessRights             = TOrmAccessRights;
+  PSqlAccessRights             = POrmAccessRights;
+  TSqlFieldType                = TOrmFieldType;
+  TSqlFieldTables              = TOrmTableBits;
+  TSqlModel                    = TOrmModel;
+  TSqlModelProperties          = TOrmModelProperties;
+  TSqlModelPropertiesObjArray  = TOrmModelPropertiesObjArray;
+  TSqlProperties               = TOrmProperties;
+  TSqlPropInfo                 = TOrmPropInfo;
+  TSqlPropInfoObjArray         = TOrmPropInfoObjArray;
+  TSqlPropInfoClass            = TOrmPropInfoClass;
+  TSqlPropInfoListOptions      = TOrmPropInfoListOptions;
+  TSqlPropInfoAttribute        = TOrmPropInfoAttribute;
+  TSqlPropInfoAttributes       = TOrmPropInfoAttributes;
+  TSqlRestCache                = TOrmCache;
+  TSqlRestBatch                = TRestBatch;
+  TSqlRestBatchLocked          = TRestBatchLocked;
+  TOrmPropertiesMapping        = TOrmMapping;
   TOrmPropertiesMappingOptions = TOrmMappingOptions;
 
 {$endif PUREMORMOT2}
@@ -9265,9 +9265,6 @@ begin
   result := pointer(fTableObjArrayRtti);
 end;
 
-const // the most ambigous keywords - others may be used as column names
-  SQLITE3_KEYWORDS = ' from where group in as ';
-
 constructor TOrmProperties.Create(aTable: TOrmClass);
 var
   i, j, nProps: PtrInt;
@@ -9292,7 +9289,10 @@ begin
   fModelMax := -1;
   fTable := aTable;
   fSqlTableName := GetDisplayNameFromClass(aTable);
-  fSqlTableNameUpperWithDot := UpperCase(SqlTableName) + '.';
+  if IsSqlReserved(fSqlTableName) then
+    EModelException.RaiseUtf8('% derivated table name ''%'' conflicts ' +
+      'with a SQL keyword: please rename the class', [Table, fSqlTableName]);
+  fSqlTableNameUpperWithDot := UpperCase(fSqlTableName) + '.';
   isTOrmMany := aTable.InheritsFrom(TOrmMany);
   // add properties to internal Fields list
   nProps := ClassFieldCountWithParents(aTable);
@@ -9325,9 +9325,9 @@ begin
     if IsRowID(pointer(F.Name)) then
       EModelException.RaiseUtf8('ID is already defined in TOrm: ' +
         '%.% field name is not allowed as published property', [Table, F.Name]);
-    if PosEx(' ' + LowerCase(F.Name) + ' ', SQLITE3_KEYWORDS) > 0 then
-      EModelException.RaiseUtf8(
-        '%.% field name conflicts with a SQL keyword', [Table, F.Name]);
+    if IsSqlReserved(F.Name) then
+      EModelException.RaiseUtf8('%.% field name conflicts with a SQL keyword:' +
+        ' please rename this published property', [Table, F.Name]);
     //  handle unique fields, i.e. if marked as "stored false"
     if aIsUnique in F.Attributes then
     begin

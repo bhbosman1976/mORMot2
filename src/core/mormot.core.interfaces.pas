@@ -115,12 +115,15 @@ type
   // - vIsDynArrayString is set for ValueType=imvDynArray of string values
   // - vIsInterfaceJson is set for an interface with custom JSON serializers
   // - vIsOnStack is set when the Value is to be located on stack
+  // - vIsHFA is set for Homogeneous Floating-point Aggregate records (at most
+  // four continuous floating point members on SYSVABI) - pointless on x86
   TInterfaceMethodValueAsm = set of (
     vPassedByReference,
     vIsQword,
     vIsDynArrayString,
     vIsInterfaceJson,
-    vIsOnStack);
+    vIsOnStack,
+    vIsHFA);
 
   /// a pointer to an interface-based service provider method description
   // - since TInterfaceFactory instances are shared in a global list, we
@@ -171,7 +174,8 @@ type
     // - may be -1 if pure register parameter with no backup on stack (x86)
     InStackOffset: SmallInt;
     /// how TInterfaceMethodExecuteRaw.RawExecute should handle this value
-    RawExecute: (reValReg, reValStack, reRefReg, reRefStack, reValFpReg, reNone);
+    RawExecute: (reValReg, reValRegs, reValStack, reRefReg, reRefStack,
+                 reValFpReg, reValFpRegs, reNone);
     /// 64-bit aligned position in TInterfaceMethod.ArgsSizeAsValue memory
     OffsetAsValue: cardinal;
     /// serialize the argument into the TServiceContainer.Contract JSON format
@@ -316,7 +320,8 @@ type
     /// contains all used kind of arguments
     ArgsUsed: TInterfaceMethodValueTypes;
     /// 64-bit aligned cumulative size for all arguments values
-    // - follow Args[].OffsetAsValue distribution
+    // - follow Args[].OffsetAsValue distribution, and used to allocate/reset
+    // the stack memory buffer before execution
     ArgsSizeAsValue: cardinal;
     /// the RawUtf8 names of all arguments, as declared in object pascal
     ArgsName: TRawUtf8DynArray;
@@ -387,18 +392,18 @@ type
 {$ifndef PUREMORMOT2}
 
 type
-  TServiceMethodValueType = TInterfaceMethodValueType;
-  TServiceMethodValueTypes = TInterfaceMethodValueTypes;
-  TServiceMethodValueVar = TInterfaceMethodValueVar;
-  TServiceMethodValueDirection = TInterfaceMethodValueDirection;
-  TServiceMethodValueDirections = TInterfaceMethodValueDirections;
-  TServiceMethodArgument = TInterfaceMethodArgument;
-  PServiceMethodArgument = PInterfaceMethodArgument;
-  TServiceMethodArgumentDynArray = TInterfaceMethodArgumentDynArray;
+  TServiceMethodValueType            = TInterfaceMethodValueType;
+  TServiceMethodValueTypes           = TInterfaceMethodValueTypes;
+  TServiceMethodValueVar             = TInterfaceMethodValueVar;
+  TServiceMethodValueDirection       = TInterfaceMethodValueDirection;
+  TServiceMethodValueDirections      = TInterfaceMethodValueDirections;
+  TServiceMethodArgument             = TInterfaceMethodArgument;
+  PServiceMethodArgument             = PInterfaceMethodArgument;
+  TServiceMethodArgumentDynArray     = TInterfaceMethodArgumentDynArray;
   TServiceMethodParamsDocVariantKind = TInterfaceMethodParamsDocVariantKind;
-  TServiceMethod = TInterfaceMethod;
-  TServiceMethodDynArray = TInterfaceMethodDynArray;
-  PServiceMethod = PInterfaceMethod;
+  TServiceMethod                     = TInterfaceMethod;
+  TServiceMethodDynArray             = TInterfaceMethodDynArray;
+  PServiceMethod                     = PInterfaceMethod;
 
 const
   // TServiceMethodValueType = TInterfaceMethodValueType items
@@ -488,7 +493,7 @@ const
   SERVICE_PSEUDO_METHOD_COUNT = length(SERVICE_PSEUDO_METHOD);
 
 var
-  /// default value for TInterfaceFactory.JsonParserOptions
+  /// default value for TInterfaceFactory.JsonParserOptions - tolerant enough
   JSONPARSER_SERVICE: TJsonParserOptions =
     [jpoHandleCustomVariants,
      jpoIgnoreUnknownEnum,
@@ -1797,43 +1802,35 @@ function ToText(op: TInterfaceStubRuleOperator): PShortString; overload;
 { ************ TInterfacedObjectFake with JITted Methods Execution }
 
 { some reference material
- WIN32 (Delphi + FPC register calling convention):
+WIN32 i386 (Delphi + FPC "register" calling convention):
  http://docwiki.embarcadero.com/RADStudio/en/Program_Control
- WIN64INTEL:
+WIN64 x64:
  https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention#parameter-passing
- WINARM64:
+WIN aarch64:
  https://learn.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions#parameter-passing
- SYSVAMD64:
+SYSV x64:
  https://gitlab.com/x86-psABIs/x86-64-ABI/-/jobs/artifacts/master/raw/x86-64-ABI/abi.pdf?job=build
- SYSVARM64:
+SYSV aarch64:
  https://c9x.me/compile/bib/abi-arm64.pdf
 }
 
 const
-{$ifdef CPU64}
-  // maximum stack size at method execution must match .PARAMS 64 (minus 4 regs)
-  MAX_EXECSTACK = 60 * 8;
-{$else}
-  // maximum stack size at method execution
-  {$ifdef CPUARM}
-  MAX_EXECSTACK = 60 * 4;
-  {$else}
-  MAX_EXECSTACK = 1024;
-  {$endif CPUARM}
-{$endif CPU64}
-
 {$ifdef CPUX86}
-  // 32-bit integer param registers (in "register" calling convention)
+  MAX_EXECSTACK = 1024;
+  VMTSTUBSIZE = 24 {$ifdef OSPOSIX} + 4 {$endif};
+  // 32-bit integer param registers (in Delphi + FPC calling convention)
   REGEAX = 1;
   REGEDX = 2;
   REGECX = 3;
   PARAMREG_FIRST = REGEAX;
   PARAMREG_LAST  = REGECX;
-  // floating-point params are passed by reference
-  VMTSTUBSIZE = 24 {$ifdef OSPOSIX} + 4 {$endif};
+  // x87 floating-point params are passed by reference, but result with fstp
+  {$undef HAS_FPREG}
 {$endif CPUX86}
 
 {$ifdef CPUX64}
+  MAX_EXECSTACK = MAX_METHOD_ARGS * 8; // match .PARAMS 32
+  VMTSTUBSIZE = 24;
   // 64-bit integer param registers
   {$ifdef SYSVABI}
   REGRDI = 1;
@@ -1854,6 +1851,7 @@ const
   {$endif SYSVABI}
   PARAMREG_LAST = REGR9;
   // 64-bit floating-point (double) registers
+  {$define HAS_FPREG} // XMM0..XMM3 (WIN64ABI) or XMM0..XMM7 (SYSVABI)
   REGXMM0 = 1;
   REGXMM1 = 2;
   REGXMM2 = 3;
@@ -1867,13 +1865,13 @@ const
   FPREG_LAST  = REGXMM7;
   {$else}
   FPREG_FIRST = REGXMM0;
-  FPREG_LAST = REGXMM3;
+  FPREG_LAST  = REGXMM3;
   {$endif SYSVABI}
-  {$define HAS_FPREG}
-  VMTSTUBSIZE = 24;
 {$endif CPUX64}
 
 {$ifdef CPUARM}
+  MAX_EXECSTACK = (MAX_METHOD_ARGS - 4) * 8; // may store only doubles on stack
+  VMTSTUBSIZE = 16;
   // 32-bit integer param registers
   REGR0 = 1;
   REGR1 = 2;
@@ -1883,6 +1881,7 @@ const
   PARAMREG_LAST   = REGR3;
   PARAMREG_RESULT = REGR1;
   // 64-bit floating-point (double) registers
+  {$define HAS_FPREG} // D0..D7
   {$ifdef CPUARMHF}
   REGD0 = 1;
   REGD1 = 2;
@@ -1894,12 +1893,12 @@ const
   REGD7 = 8;
   FPREG_FIRST = REGD0;
   FPREG_LAST  = REGD7;
-  {$define HAS_FPREG}
   {$endif CPUARMHF}
-  VMTSTUBSIZE = 16;
 {$endif CPUARM}
 
 {$ifdef CPUAARCH64}
+  MAX_EXECSTACK = (MAX_METHOD_ARGS - 8) * 8;
+  VMTSTUBSIZE = 28;
   // 64-bit integer param registers
   REGX0 = 1;
   REGX1 = 2;
@@ -1913,6 +1912,7 @@ const
   PARAMREG_LAST   = REGX7;
   PARAMREG_RESULT = REGX1;
   // 64-bit floating-point (double) registers
+  {$define HAS_FPREG} // D0..D7
   REGD0 = 1; // map REGV0 128-bit NEON register
   REGD1 = 2; // REGV1
   REGD2 = 3; // REGV2
@@ -1923,8 +1923,6 @@ const
   REGD7 = 8; // REGV7
   FPREG_FIRST = REGD0;
   FPREG_LAST  = REGD7;
-  {$define HAS_FPREG}
-  VMTSTUBSIZE = 28;
 {$endif CPUAARCH64}
 
   // ordinal values are stored within 64-bit buffer, and records in a RawUtf8
@@ -1995,7 +1993,7 @@ type
     EDX, ECX, MethodIndex, EBP, Ret: cardinal;
     {$else}
     {$ifdef OSPOSIX}
-    ParamRegs: packed array[PARAMREG_FIRST..PARAMREG_LAST] of pointer;
+    ParamRegs: packed array[PARAMREG_FIRST .. PARAMREG_LAST] of pointer;
     {$endif OSPOSIX}
     {$ifdef HAS_FPREG}
     FPRegs: packed array[FPREG_FIRST..FPREG_LAST] of double;
@@ -2004,7 +2002,7 @@ type
     Frame: pointer;
     Ret: pointer;
     {$ifndef OSPOSIX}
-    ParamRegs: packed array[PARAMREG_FIRST..PARAMREG_LAST] of pointer;
+    ParamRegs: packed array[PARAMREG_FIRST .. PARAMREG_LAST] of pointer;
     {$endif OSPOSIX}
     {$endif CPUX86}
     {$ifdef CPUARM}
@@ -2505,12 +2503,12 @@ implementation
 
 { ************ IInvokable Interface Methods and Parameters RTTI Extraction }
 
-procedure TInterfaceMethodArgument.SerializeToContract(WR: TJsonWriter);
 const
-  ARGDIRTOJSON: array[TInterfaceMethodValueDirection] of string[4] = (
   // convert into generic in/out direction (assume result is out)
+  ARGDIRTOJSON: array[TInterfaceMethodValueDirection] of string[4] = (
     'in', 'both', 'out', 'out');
-  // AnsiString (Delphi <2009) may loose data depending on the client
+  // normalize simple type names e.g. int64=qword or all strings to "utf8"
+  // - note: AnsiString (Delphi <2009) may loose data depending on the client
   ARGTYPETOJSON: array[TInterfaceMethodValueType] of string[8] = (
     '??',       // imvNone
     'self',     // imvSelf
@@ -2533,6 +2531,8 @@ const
     'json',     // imvRawJson
     '',         // imvDynArray
     '');        // imvInterface
+
+procedure TInterfaceMethodArgument.SerializeToContract(WR: TJsonWriter);
 begin
   WR.AddShort('{"argument":"');
   WR.AddShort(ParamName^);
@@ -2540,11 +2540,11 @@ begin
   WR.AddShort(ARGDIRTOJSON[ValueDirection]);
   WR.AddShort('","type":"');
   if ARGTYPETOJSON[ValueType] = '' then
-    WR.AddShort(ArgRtti.Info.Name^)
+    WR.AddString(ArgRtti.Name) // use pascal type name
   else
-    WR.AddShort(ARGTYPETOJSON[ValueType]);
-{$ifdef SOA_DEBUG}
-  WR.Add('"', ',');
+    WR.AddShort(ARGTYPETOJSON[ValueType]); // normalized
+  {$ifdef SOA_DEBUG}
+  WR.AddDirect('"', ',');
   WR.AddPropInt64('index', IndexVar);
   WR.AddPropJsonString('var',
     GetEnumNameTrimed(TypeInfo(TInterfaceMethodValueVar), ValueVar));
@@ -2555,9 +2555,9 @@ begin
   WR.AddPropName('asm');
   WR.AddString(GetSetNameJsonArray(TypeInfo(TInterfaceMethodValueAsm), ValueKindAsm));
   WR.AddDirect('}', ',');
-{$else}
+  {$else}
   WR.AddDirect('"', '}', ',');
-{$endif SOA_DEBUG}
+  {$endif SOA_DEBUG}
 end;
 
 function TInterfaceMethodArgument.SetFromJson(var Ctxt: TJsonParserContext;
@@ -3689,16 +3689,34 @@ begin
   Rtti.RegisterUnsafeSpiType(Types);
 end;
 
+function RecordIsHfa(const Props: TRttiCustomProps): boolean;
+var
+  i: PtrInt;
+begin
+  result := false;
+  if not (Props.Count in [1 .. 4]) then
+    exit;
+  for i := 0 to Props.Count - 1 do
+    with Props.List[i] do
+      if (Value.Cache.Kind <> rkFloat) or
+         (Value.Cache.RttiFloat <> rfDouble) or
+         (OffsetGet <> i * SizeOf(double)) then
+        exit; // we only support records of packed double/TDateTime fields
+  result := true;
+end;
+
 constructor TInterfaceFactory.Create(aInterface: PRttiInfo);
 var
-  m, a, reg: integer;
+  nm, na, reg: integer;
+  a: PInterfaceMethodArgument;
+  m: PInterfaceMethod;
   WR: TJsonWriter;
   vt: TInterfaceMethodValueType;
   used: array[TInterfaceMethodValueType] of word;
   u: PRawUtf8;
   ErrorMsg: RawUtf8;
   {$ifdef HAS_FPREG}
-  ValueIsInFPR: boolean;
+  SizeInFPR: integer; // 0 if not in FPR, or the number of FPR involved
   {$endif HAS_FPREG}
   {$ifdef CPUX86}
   offs: integer;
@@ -3741,170 +3759,177 @@ begin
   fMethodIndexCurrentFrameCallback := -1;
   fMethodIndexCallbackReleased := -1;
   SetLength(fMethods, MethodsCount);
-  FillCharFast(used, SizeOf(used), 0);
   // compute additional information for each method
-  for m := 0 to MethodsCount - 1 do
-  with fMethods[m] do
+  FillCharFast(used, SizeOf(used), 0);
+  m := pointer(fMethods);
+  for nm := 0 to MethodsCount - 1 do
   begin
-    Join([fInterfaceUri, '.', URI], InterfaceDotMethodName);
-    if HierarchyLevel <> fAddMethodsLevel then
-      include(Flags, imfIsInherited);
-    ExecutionMethodIndex := m + RESERVED_VTABLE_SLOTS;
-    ArgsInFirst := -1;
-    ArgsInLast := -2;
-    ArgsOutFirst := -1;
-    ArgsOutLast := -2;
-    ArgsNotResultLast := -2;
-    ArgsOutNotResultLast := -2;
-    ArgsResultIndex := -1;
-    ArgsManagedFirst := -1;
-    Args[0].ValueType := imvSelf;
-    for a := 1 to length(Args) - 1 do
-    with Args[a] do
+    // setup method information
+    Join([fInterfaceUri, '.', m^.URI], m^.InterfaceDotMethodName);
+    if m^.HierarchyLevel <> fAddMethodsLevel then
+      include(m^.Flags, imfIsInherited);
+    m^.ExecutionMethodIndex := nm + RESERVED_VTABLE_SLOTS;
+    // first pass to recognize the parameters layout
+    m^.ArgsInFirst := -1;
+    m^.ArgsInLast := -2;
+    m^.ArgsOutFirst := -1;
+    m^.ArgsOutLast := -2;
+    m^.ArgsNotResultLast := -2;
+    m^.ArgsOutNotResultLast := -2;
+    m^.ArgsResultIndex := -1;
+    m^.ArgsManagedFirst := -1;
+    a := pointer(m^.Args);
+    a^.ValueType := imvSelf;
+    inc(a);
+    for na := 1 to length(m^.Args) - 1 do
     begin
-      ValueType := _FROM_RTTI[ArgRtti.Parser];
-      ValueVar := ARGS_TO_VAR[ValueType];
+      a^.ValueType := _FROM_RTTI[a^.ArgRtti.Parser];
+      a^.ValueVar := ARGS_TO_VAR[a^.ValueType];
       ErrorMsg := ''; // seems supported
-      inc(used[ValueType]);
-      case ValueType of
+      inc(used[a^.ValueType]);
+      case a^.ValueType of
         imvNone:
-          case ArgRtti.Info^.Kind of
+          case a^.ArgRtti.Info^.Kind of
             rkInteger:
               ErrorMsg := ' - use integer/cardinal instead';
             rkFloat:
               ErrorMsg := ' - use double/currency instead';
           else
-            FormatUtf8(' (%)', [ToText(ArgRtti.Info^.Kind)^], ErrorMsg);
+            FormatUtf8(' (%)', [ToText(a^.ArgRtti.Info^.Kind)^], ErrorMsg);
           end;
         imvObject:
-          if ArgRtti.ValueRtlClass = vcList then
+          if a^.ArgRtti.ValueRtlClass = vcList then
             ErrorMsg := ' - use TObjectList or T*ObjArray instead'
-          else if (ArgRtti.ValueRtlClass = vcCollection) and
-                  (ArgRtti.CollectionItem = nil) then
+          else if (a^.ArgRtti.ValueRtlClass = vcCollection) and
+                  (a^.ArgRtti.CollectionItem = nil) then
             ErrorMsg := ' - inherit from TInterfacedCollection or ' +
               'call Rtti.RegisterCollection() first'
-          else if ValueDirection = imdResult then
+          else if a^.ValueDirection = imdResult then
             ErrorMsg := ' - class not allowed as function result: ' +
               'use a var/out parameter';
         imvInterface:
-          if Assigned(ArgRtti.JsonWriter.Code) then
-            include(ValueKindAsm, vIsInterfaceJson) // e.g. IDocList
-          else if ValueDirection <> imdConst then
+          if Assigned(a^.ArgRtti.JsonWriter.Code) then
+            include(a^.ValueKindAsm, vIsInterfaceJson) // e.g. IDocList
+          else if a^.ValueDirection <> imdConst then
             ErrorMsg := ' - interface not allowed as output: ' +
               'use a const parameter';
       end;
       if ErrorMsg <> '' then
         EInterfaceFactory.RaiseUtf8(
-          '%.Create: %.% [%] parameter has unexpected type %%',
-          [self, aInterface^.RawName, URI, ParamName^, ArgRtti.Name, ErrorMsg]);
-      if ValueDirection = imdResult then
-        ArgsResultIndex := a
+          '%.Create: %.% [%] parameter has unexpected type %%', [self,
+          aInterface^.RawName, m^.URI, a^.ParamName^, a^.ArgRtti.Name, ErrorMsg]);
+      if a^.ValueDirection = imdResult then
+        m^.ArgsResultIndex := na
       else
       begin
-        ArgsNotResultLast := a;
-        if ValueDirection <> imdOut then
+        m^.ArgsNotResultLast := na;
+        if a^.ValueDirection <> imdOut then
         begin
-          inc(ArgsInputValuesCount);
-          if ArgsInFirst < 0 then
-            ArgsInFirst := a;
-          ArgsInLast := a;
+          inc(m^.ArgsInputValuesCount);
+          if m^.ArgsInFirst < 0 then
+            m^.ArgsInFirst := na;
+          m^.ArgsInLast := na;
         end;
-        if ValueDirection <> imdConst then
-          ArgsOutNotResultLast := a;
+        if a^.ValueDirection <> imdConst then
+          m^.ArgsOutNotResultLast := na;
       end;
-      if ValueDirection <> imdConst then
+      if a^.ValueDirection <> imdConst then
       begin
-        if ArgsOutFirst < 0 then
-          ArgsOutFirst := a;
-        ArgsOutLast := a;
-        inc(ArgsOutputValuesCount);
+        if m^.ArgsOutFirst < 0 then
+          m^.ArgsOutFirst := na;
+        m^.ArgsOutLast := na;
+        inc(m^.ArgsOutputValuesCount);
       end;
-      if ValueVar >= imvvRawUtf8 then
+      if a^.ValueVar >= imvvRawUtf8 then
       begin
-        if ArgsManagedFirst < 0 then
-          ArgsManagedFirst := a;
-        inc(ArgsManagedCount);
+        if m^.ArgsManagedFirst < 0 then
+          m^.ArgsManagedFirst := na;
+        inc(m^.ArgsManagedCount);
       end;
-      if rcfSpi in ArgRtti.Flags then
+      if rcfSpi in a^.ArgRtti.Flags then
         // as defined by Rtti.RegisterUnsafeSpiType()
-        include(HasSpiParams, ValueDirection);
+        include(m^.HasSpiParams, a^.ValueDirection);
+      inc(a);
     end;
-    if ArgsOutputValuesCount = 0 then
+    if m^.ArgsOutputValuesCount = 0 then
       // plain procedure with no out param -> recognize some known signatures
-      case ArgsInputValuesCount of
+      case m^.ArgsInputValuesCount of
         1:
-          if Args[1].ValueType = imvBoolean then
-            if PropNameEquals(URI, 'CurrentFrame') then
-              fMethodIndexCurrentFrameCallback := m;
+          if m^.Args[1].ValueType = imvBoolean then
+            if PropNameEquals(m^.URI, 'CurrentFrame') then
+              fMethodIndexCurrentFrameCallback := nm;
         2:
-          if (Args[1].ValueType = imvInterface) and
-             (Args[1].ArgRtti.Info = TypeInfo(IInvokable)) and
-             (Args[2].ValueType = imvRawUtf8) and
-             PropNameEquals(URI, 'CallbackReleased') then
-            fMethodIndexCallbackReleased := m;
+          if (m^.Args[1].ValueType = imvInterface) and
+             (m^.Args[1].ArgRtti.Info = TypeInfo(IInvokable)) and
+             (m^.Args[2].ValueType = imvRawUtf8) and
+             PropNameEquals(m^.URI, 'CallbackReleased') then
+            fMethodIndexCallbackReleased := nm;
       end;
-    if ArgsResultIndex >= 0 then
-      with Args[ArgsResultIndex] do
-      case ValueType of
+    if m^.ArgsResultIndex >= 0 then
+    begin
+      a := @m^.Args[m^.ArgsResultIndex];
+      case a^.ValueType of
         imvNone,
         imvObject,
         imvInterface:
           EInterfaceFactory.RaiseUtf8('%.Create: I% unexpected result type %',
-            [self, InterfaceDotMethodName, ArgTypeName^]);
+            [self, m^.InterfaceDotMethodName, a^.ArgTypeName^]);
         imvCardinal:
-          if ArgRtti.Info = TypeInfo(TServiceCustomStatus) then
-            include(Flags, imfResultIsServiceCustomStatus);
+          if a^.ArgRtti.Info = TypeInfo(TServiceCustomStatus) then
+            include(m^.Flags, imfResultIsServiceCustomStatus);
         imvRecord:
-          if ArgRtti.Info = TypeInfo(TServiceCustomAnswer) then
+          if a^.ArgRtti.Info = TypeInfo(TServiceCustomAnswer) then
           begin
-            for a := ArgsOutFirst to ArgsOutLast do
-              if Args[a].ValueDirection in [imdVar, imdOut] then
+            for na := m^.ArgsOutFirst to m^.ArgsOutLast do
+              if m^.Args[na].ValueDirection in [imdVar, imdOut] then
                 EInterfaceFactory.RaiseUtf8('%.Create: I% var/out ' +
                   'parameter [%] not allowed with TServiceCustomAnswer result',
-                  [self, InterfaceDotMethodName, Args[a].ParamName^]);
-            include(Flags, imfResultIsServiceCustomAnswer);
+                  [self, m^.InterfaceDotMethodName, m^.Args[na].ParamName^]);
+            include(m^.Flags, imfResultIsServiceCustomAnswer);
           end
         {$ifdef CPUAARCH64}
         // FPC uses registers for managed records, but follows the ABI otherwise
         // which requires the result to be in X8 which is not handled yet
         // - see aarch64/cpupara.pas: tcpuparamanager.create_paraloc_info_intern
-        else if not (rcfIsManaged in ArgRtti.Flags) then
+        else if not (rcfIsManaged in a^.ArgRtti.Flags) then
           EInterfaceFactory.RaiseUtf8(
             '%.Create: I% record result type % is unsupported on aarch64:' +
             'use an OUT parameter instead, or include a managed field',
-            [self, InterfaceDotMethodName, ArgTypeName^]);
+            [self, m^.InterfaceDotMethodName, a^.ArgTypeName^]);
         {$endif CPUAARCH64}
       end;
-    if (ArgsInputValuesCount = 1) and
-       (Args[1].ValueType = imvRawByteString) then
-      include(Flags, imfInputIsOctetStream);
+    end;
+    if (m^.ArgsInputValuesCount = 1) and
+       (m^.Args[1].ValueType = imvRawByteString) then
+      include(m^.Flags, imfInputIsOctetStream);
+    inc(m);
   end;
   for vt := low(vt) to high(vt) do
     SetLength(fArgUsed[vt], used[vt]);
-  FillCharFast(used, SizeOf(used), 0); // used as index below
   // compute asm low-level layout of the parameters for each method
-  for m := 0 to MethodsCount - 1 do
-  with fMethods[m] do
+  FillCharFast(used, SizeOf(used), 0); // used as fArgUsed[] index below
+  m := pointer(fMethods);
+  for nm := 0 to MethodsCount - 1 do
   begin
     // setup parameter names
-    SetLength(ArgsName, length(Args));
-    SetLength(ArgsInputName, ArgsInputValuesCount);
-    SetLength(ArgsOutputName, ArgsOutputValuesCount);
-    u := pointer(ArgsInputName);
-    for a := ArgsInFirst to ArgsInLast do
-      if Args[a].ValueDirection in [imdConst, imdVar] then
+    SetLength(m^.ArgsInputName, m^.ArgsInputValuesCount);
+    u := pointer(m^.ArgsInputName);
+    for na := m^.ArgsInFirst to m^.ArgsInLast do
+      if m^.Args[na].ValueDirection in [imdConst, imdVar] then
       begin
-        ShortStringToAnsi7String(Args[a].ParamName^, u^);
+        ShortStringToAnsi7String(m^.Args[na].ParamName^, u^);
         inc(u);
       end;
-    u := pointer(ArgsOutputName);
-    for a := ArgsOutFirst to ArgsOutLast do
-      if Args[a].ValueDirection <> imdConst then
+    SetLength(m^.ArgsOutputName, m^.ArgsOutputValuesCount);
+    u := pointer(m^.ArgsOutputName);
+    for na := m^.ArgsOutFirst to m^.ArgsOutLast do
+      if m^.Args[na].ValueDirection <> imdConst then
       begin
-        ShortStringToAnsi7String(Args[a].ParamName^, u^);
+        ShortStringToAnsi7String(m^.Args[na].ParamName^, u^);
         inc(u);
       end;
-    u := pointer(ArgsName);
+    SetLength(m^.ArgsName, length(m^.Args));
+    u := pointer(m^.ArgsName);
     // prepare stack and register layout
     reg := PARAMREG_FIRST;
     {$ifdef HAS_FPREG}
@@ -3912,95 +3937,111 @@ begin
     fpreg := FPREG_FIRST;
     {$endif OSPOSIX}
     {$endif HAS_FPREG}
-    for a := 0 to high(Args) do
-    with Args[a] do
+    a := pointer(m^.Args);
+    for na := 0 to high(m^.Args) do
     begin
-      ShortStringToAnsi7String(Args[a].ParamName^, u^);
+      ShortStringToAnsi7String(a^.ParamName^, u^);
       inc(u);
-      if a <> 0 then
+      if na <> 0 then
       begin
-        with fArgUsed[ValueType, used[ValueType]] do
+        with fArgUsed[a^.ValueType, used[a^.ValueType]] do
         begin
-          MethodIndex := m;
-          ArgIndex := a;
+          MethodIndex := nm;
+          ArgIndex := na;
         end;
-        inc(used[ValueType]);
+        inc(used[a^.ValueType]);
       end;
-      RegisterIdent := 0;
+      a^.RegisterIdent := 0;
       {$ifdef HAS_FPREG}
-      FPRegisterIdent := 0;
-      ValueIsInFPR := false;
+      a^.FPRegisterIdent := 0;
+      SizeInFPR := 0;
       {$endif HAS_FPREG}
-      IndexVar := ArgsUsedCount[ValueVar];
-      inc(ArgsUsedCount[ValueVar]);
-      include(ArgsUsed, ValueType);
-      if (ValueType in [imvRecord, imvVariant]) or
-         (ValueDirection in [imdVar, imdOut]) or
-         ((ValueDirection = imdResult) and
-          (ValueType in ARGS_RESULT_BY_REF)) then
-        include(ValueKindAsm, vPassedByReference);
-      case ValueType of
+      a^.IndexVar := m^.ArgsUsedCount[a^.ValueVar];
+      inc(m^.ArgsUsedCount[a^.ValueVar]);
+      include(m^.ArgsUsed, a^.ValueType);
+      if (a^.ValueType in [imvRecord, imvVariant]) or
+         (a^.ValueDirection in [imdVar, imdOut]) or
+         ((a^.ValueDirection = imdResult) and
+          (a^.ValueType in ARGS_RESULT_BY_REF)) then
+        include(a^.ValueKindAsm, vPassedByReference);
+      case a^.ValueType of
         imvInteger,
         imvCardinal,
         imvInt64:
-          if rcfQWord in ArgRtti.Cache.Flags then
-            include(ValueKindAsm, vIsQword);
+          if rcfQWord in a^.ArgRtti.Cache.Flags then
+            include(a^.ValueKindAsm, vIsQword);
         {$ifdef HAS_FPREG}
         imvDouble,
         imvDateTime:
-          ValueIsInFPR := not (vPassedByReference in ValueKindAsm);
+          if not (vPassedByReference in a^.ValueKindAsm) then
+            SizeInFPR := 1; // stored in one double
         {$endif HAS_FPREG}
         imvDynArray:
-          if (ArgRtti.ArrayRtti <> nil) and
-             ((rcfBinary in ArgRtti.ArrayRtti.Flags) or
-              (_FROM_RTTI[ArgRtti.ArrayRtti.Parser] in _SMV_STRING)) then
-            include(ValueKindAsm, vIsDynArrayString);
+          if (a^.ArgRtti.ArrayRtti <> nil) and
+             ((rcfBinary in a^.ArgRtti.ArrayRtti.Flags) or
+              (_FROM_RTTI[a^.ArgRtti.ArrayRtti.Parser] in _SMV_STRING)) then
+            include(a^.ValueKindAsm, vIsDynArrayString);
         imvSet:
-          if not (ArgRtti.Size in [1, 2, 4, 8]) then
+          if not (a^.ArgRtti.Size in [1, 2, 4, 8]) then
             EInterfaceFactory.RaiseUtf8(
               '%.Create: unexpected RTTI size = % in %.% method % parameter ' +
               'for % set - should match byte/word/integer/Int64 (1,2,4,8) sizes',
-              [self, ArgRtti.Size, fInterfaceName, URI, ParamName^, ArgTypeName^]);
+              [self, a^.ArgRtti.Size, fInterfaceName, m^.URI,
+               a^.ParamName^, a^.ArgTypeName^]);
         imvRecord:
-          if ArgRtti.Size <= POINTERBYTES then
-            // handle records only when passed by ref
-            EInterfaceFactory.RaiseUtf8(
-              '%.Create: % record too small in %.% method % parameter: it ' +
-              'should be at least % bytes (i.e. bigger than a pointer) to be on stack',
-              [self, ArgTypeName^, fInterfaceName, URI, ParamName^, POINTERBYTES + 1]);
-            // to be fair, both WIN64ABI and SYSVABI could handle those and
-            // transmit them within a register
+          begin
+            if a^.ArgRtti.Size <= POINTERBYTES then
+              // handle records only when passed by ref
+              EInterfaceFactory.RaiseUtf8(
+                '%.Create: % record too small in %.% method % parameter: it ' +
+                'should be at least % bytes (i.e. bigger than a pointer) to be on stack',
+                [self, a^.ArgTypeName^, fInterfaceName, m^.URI,
+                 a^.ParamName^, POINTERBYTES + 1]);
+              // to be fair, both WIN64ABI and SYSVABI could handle those and
+              // transmit them within a register
+            if RecordIsHfa(a^.ArgRtti.Props) then
+            begin
+              include(a^.ValueKindAsm, vIsHFA); // e.g. record x, y: double end;
+              {$ifdef HAS_FPREG}
+              SizeInFPR := a^.ArgRtti.Size shr 3;
+              {$endif HAS_FPREG}
+            end;
+         end;
       end;
-      OffsetAsValue := ArgsSizeAsValue;
-      inc(ArgsSizeAsValue, ArgRtti.Size);
-      while ArgsSizeAsValue and 7 <> 0 do
-        inc(ArgsSizeAsValue); // align to 64-bit
-      if ValueDirection = imdResult then
+      a^.OffsetAsValue := m^.ArgsSizeAsValue;
+      inc(m^.ArgsSizeAsValue, a^.ArgRtti.Size);
+      while m^.ArgsSizeAsValue and 7 <> 0 do
+        inc(m^.ArgsSizeAsValue); // align to 64-bit
+      if a^.ValueDirection = imdResult then
       begin
-        if not (ValueType in ARGS_RESULT_BY_REF) then
+        if not (a^.ValueType in ARGS_RESULT_BY_REF) then
+        begin
+          inc(a);
           continue; // ordinal/real/class results are returned in CPU/FPU registers
+        end;
         {$ifndef CPUX86}
-        InStackOffset := -1;
-        RegisterIdent := PARAMREG_RESULT;
+        a^.InStackOffset := -1;
+        a^.RegisterIdent := PARAMREG_RESULT;
+        inc(a);
         continue;
         {$endif CPUX86}
         // CPUX86 will add an additional by-ref parameter
       end;
       {$ifdef CPU32}
-      if ValueDirection = imdConst then
-        SizeInStack := ARGS_IN_STACK_SIZE[ValueType]
+      if a^.ValueDirection = imdConst then
+        a^.SizeInStack := ARGS_IN_STACK_SIZE[a^.ValueType]
       else
       {$endif CPU32}
-        SizeInStack := POINTERBYTES; // always 8 bytes aligned on 64-bit
+        a^.SizeInStack := POINTERBYTES; // always 8 bytes aligned on 64-bit
       if
         {$ifndef CPUARM}
         // on ARM, ordinals>POINTERBYTES can also be placed in the normal registers !!
-        (SizeInStack <> POINTERBYTES) or
+        (a^.SizeInStack <> POINTERBYTES) or
         {$endif CPUARM}
         {$ifdef HAS_FPREG}
         {$ifdef OSPOSIX}  // Linux x64, armhf, aarch64
-        ((ValueIsInFPR) and (fpreg > FPREG_LAST)) or   // too many FP registers
-        ((not ValueIsInFPR) and (reg > PARAMREG_LAST)) // too many int registers
+        ((SizeInFPR = 1) and (fpreg > FPREG_LAST)) or // too many FP registers
+        ((SizeInFPR = 0) and (reg > PARAMREG_LAST))  // too many int registers
         {$else}
         (reg > PARAMREG_LAST) // Win64: XMMs overlap regular registers
         {$endif OSPOSIX}
@@ -4008,9 +4049,9 @@ begin
         (reg > PARAMREG_LAST) // Win32, Linux x86, armel
         {$endif HAS_FPREG}
         {$ifdef FPC}
-        or ((ValueType in [imvRecord]) and
+        or ((a^.ValueType in [imvRecord]) and
           // trunk i386/x86_64\cpupara.pas: DynArray const is passed as register
-           not (vPassedByReference in ValueKindAsm))
+           not (vPassedByReference in a^.ValueKindAsm))
         {$endif FPC} then
       begin
         // this parameter will go on the stack
@@ -4019,37 +4060,37 @@ begin
         // https://developer.apple.com/documentation/xcode/
         //    writing-arm64-code-for-apple-platforms#Pass-arguments-to-functions-correctly
         // "arguments may consume slots on the stack that are not multiples of 8 bytes"
-        if ValueDirection = imdConst then
-          SizeInStack := ArgRtti.Size;
+        if a^.ValueDirection = imdConst then
+          a^.SizeInStack := a^.ArgRtti.Size;
         {$else}
         {$ifdef CPUARM}
         // parameter must be aligned on a SizeInStack boundary
-        if SizeInStack > POINTERBYTES then
-          Inc(ArgsSizeInStack, ArgsSizeInStack mod cardinal(SizeInStack));
+        if a^.SizeInStack > POINTERBYTES then
+          inc(m^.ArgsSizeInStack, m^.ArgsSizeInStack mod cardinal(a^.SizeInStack));
         {$endif CPUARM}
         {$endif OSDARWINARM}
-        InStackOffset := ArgsSizeInStack;
-        inc(ArgsSizeInStack, SizeInStack);
+        a^.InStackOffset := m^.ArgsSizeInStack;
+        inc(m^.ArgsSizeInStack, a^.SizeInStack);
       end
       else
       begin
         // this parameter will go in a register
-        InStackOffset := -1;
+        a^.InStackOffset := -1;
         {$ifndef CPUX86}
-        if (ArgsResultIndex >= 0) and
+        if (m^.ArgsResultIndex >= 0) and
            (reg = PARAMREG_RESULT) and
-           (Args[ArgsResultIndex].ValueType in ARGS_RESULT_BY_REF) then
+           (m^.Args[m^.ArgsResultIndex].ValueType in ARGS_RESULT_BY_REF) then
           inc(reg); // this register is reserved for method result pointer
         {$endif CPUX86}
         {$ifdef HAS_FPREG}
-        if ValueIsInFPR then
+        if SizeInFPR = 1 then
         begin
-          // put in a floating-point register
+          // put in next floating-point register
           {$ifdef OSPOSIX}
-          FPRegisterIdent := fpreg;
+          a^.FPRegisterIdent := fpreg; // SYSVABI has its own FP registers index
           inc(fpreg);
           {$else}
-          FPRegisterIdent := reg; // Win64 ABI: reg and fpreg do overlap
+          a^.FPRegisterIdent := reg; // Win64 ABI: reg and fpreg do overlap
           inc(reg);
           {$endif OSPOSIX}
         end
@@ -4059,119 +4100,136 @@ begin
           // put in an integer register
           {$ifdef CPUARM}
           // on 32-bit ARM, ordinals>POINTERBYTES are also placed in registers
-          if (SizeInStack > POINTERBYTES) and
+          if (a^.SizeInStack > POINTERBYTES) and
              ((reg and 1) = 0) then
             inc(reg); // must be aligned on even boundary
           // check if we have still enough registers, after previous increments
-          if ((PARAMREG_LAST - reg + 1) * POINTERBYTES) < SizeInStack then
+          if ((PARAMREG_LAST - reg + 1) * POINTERBYTES) < a^.SizeInStack then
           begin
             // no space, put on stack
-            InStackOffset := ArgsSizeInStack;
-            inc(ArgsSizeInStack, SizeInStack);
+            a^.InStackOffset := m^.ArgsSizeInStack;
+            inc(m^.ArgsSizeInStack, a^.SizeInStack);
             // all params following the current one, must also be placed on stack
             reg := PARAMREG_LAST + 1;
+            inc(a);
             continue;
           end;
-          RegisterIdent := reg;
-          if SizeInStack > POINTERBYTES then
-            inc(reg, SizeInStack shr POINTERSHR)
+          a^.RegisterIdent := reg;
+          if a^.SizeInStack > POINTERBYTES then
+            inc(reg, a^.SizeInStack shr POINTERSHR)
           else
             inc(reg);
           {$else}
-          RegisterIdent := reg;
+          a^.RegisterIdent := reg;
           inc(reg);
           {$endif CPUARM}
         end;
       end;
+      inc(a);
     end;
     // pre-compute the TInterfaceMethodExecuteRaw.RawExecute expectations
-    for a := 0 to high(Args) do
-    with Args[a] do
+    a := pointer(m^.Args);
+    for na := 0 to high(m^.Args) do
     begin
       {$ifdef HAS_FPREG}
-      if FPRegisterIdent > 0 then
-        if (RegisterIdent > 0) or
-           (vPassedByReference in ValueKindAsm) then
+      if a^.FPRegisterIdent > 0 then
+        if (a^.RegisterIdent > 0) or
+           (vPassedByReference in a^.ValueKindAsm) then
           EInterfaceFactory.RaiseUtf8('Unexpected I% % Reg=% FPReg=%',
-            [InterfaceDotMethodName, ParamName^, RegisterIdent, FPRegisterIdent]);
+            [m^.InterfaceDotMethodName, a^.ParamName^,
+             a^.RegisterIdent, a^.FPRegisterIdent]);
       {$endif HAS_FPREG}
-      if (RegisterIdent = 0) and
-         (FPRegisterIdent = 0) and
-         (SizeInStack > 0) then
-        include(ValueKindAsm, vIsOnStack);
-      if vPassedByReference in ValueKindAsm then
-        if vIsOnStack in ValueKindAsm then
-          if SizeInStack <> POINTERBYTES then
+      if (a^.RegisterIdent = 0) and
+         (a^.FPRegisterIdent = 0) and
+         (a^.SizeInStack > 0) then
+        include(a^.ValueKindAsm, vIsOnStack);
+      if vPassedByReference in a^.ValueKindAsm then
+        if vIsOnStack in a^.ValueKindAsm then
+          if a^.SizeInStack <> POINTERBYTES then
             EInterfaceFactory.RaiseUtf8('Unexpected I% % ref with no pointer',
-              [InterfaceDotMethodName, ParamName^])
+              [m^.InterfaceDotMethodName, a^.ParamName^])
           else
-            RawExecute := reRefStack
-        else if RegisterIdent > 0 then
-          RawExecute := reRefReg
+            a^.RawExecute := reRefStack
+        else if a^.RegisterIdent > 0 then
+          a^.RawExecute := reRefReg
         else
           EInterfaceFactory.RaiseUtf8('Unexpected I% % reference with no slot',
-            [InterfaceDotMethodName, ParamName^])
+            [m^.InterfaceDotMethodName, a^.ParamName^])
       else // pass by value
-        if vIsOnStack in ValueKindAsm then
-          RawExecute := reValStack
-        else if RegisterIdent > 0 then
-          RawExecute := reValReg
+        if vIsOnStack in a^.ValueKindAsm then
+          a^.RawExecute := reValStack
+        else if a^.RegisterIdent > 0 then
+          if a^.SizeInStack = POINTERBYTES then
+            a^.RawExecute := reValReg   // use a single register
+          else
+            a^.RawExecute := reValRegs  // several registers (e.g. SYSVABI TGuid)
         {$ifdef HAS_FPREG}
-        else if FPRegisterIdent > 0 then
-          RawExecute := reValFpReg
+        else if a^.FPRegisterIdent > 0 then
+          if a^.SizeInStack = SizeOf(double) then
+            a^.RawExecute := reValFpReg  // use a single FP register
+          else
+            a^.RawExecute := reValFpRegs // several FP registers (e.g. SYSVABI HFA)
         {$endif HAS_FPREG}
         else
-          RawExecute := reNone; // e.g. for a result register
+          a^.RawExecute := reNone; // e.g. for a result register
+      inc(a);
     end;
     {$ifdef OSDARWINARM}
     // the Mac M1 does NOT follow the ARM ABI standard on stack :(
-    while ArgsSizeInStack and 7 <> 0 do
-      inc(ArgsSizeInStack); // ensure pointer-aligned
+    while m^.ArgsSizeInStack and 7 <> 0 do
+      inc(m^.ArgsSizeInStack); // ensure pointer-aligned
     {$endif OSDARWINARM}
-    if ArgsSizeInStack > MAX_EXECSTACK then
+    if m^.ArgsSizeInStack > MAX_EXECSTACK then
       EInterfaceFactory.RaiseUtf8(
-        '%.Create: Stack size % > % for %.% method parameters',
-        [self, ArgsSizeInStack, MAX_EXECSTACK, fInterfaceName, URI]);
+        '%.Create: Stack size % > % for %.% method % parameters',
+        [self, m^.ArgsSizeInStack, MAX_EXECSTACK, fInterfaceName, m^.URI,
+         m^.ArgsInputValuesCount]);
     {$ifdef CPUX86}
     // pascal/register convention are passed left-to-right -> reverse order
-    offs := ArgsSizeInStack;
-    for a := 0 to high(Args) do
-      with Args[a] do
-      if InStackOffset >= 0 then
+    offs := m^.ArgsSizeInStack;
+    a := pointer(m^.Args);
+    for na := 0 to high(m^.Args) do
+    begin
+      if a^.InStackOffset >= 0 then
       begin
-        dec(offs,SizeInStack);
-        InStackOffset := offs;
+        dec(offs, a^.SizeInStack);
+        a^.InStackOffset := offs;
       end;
+      inc(a);
+    end;
     //assert(offs=0);
     {$endif CPUX86}
+    inc(m);
   end;
   WR := TJsonWriter.CreateOwnedStream;
   try
     // compute the default results JSON array for all methods
-    for m := 0 to MethodsCount - 1 do
-      with fMethods[m] do
-      begin
-        WR.CancelAll;
-        WR.AddDirect('[');
-        for a := ArgsOutFirst to ArgsOutLast do
-          with Args[a] do
+    m := pointer(fMethods);
+    for nm := 0 to MethodsCount - 1 do
+    begin
+      WR.CancelAll;
+      WR.AddDirect('[');
+      for na := m^.ArgsOutFirst to m^.ArgsOutLast do
+        with m^.Args[na] do
           if ValueDirection <> imdConst then
             AddDefaultJson(WR);
-        WR.CancelLastComma(']');
-        WR.SetText(DefaultResult);
-      end;
+      WR.CancelLastComma(']');
+      WR.SetText(m^.DefaultResult);
+      inc(m);
+    end;
     // compute the service contract as a JSON array
     WR.CancelAll;
     WR.AddDirect('[');
-    for m := 0 to MethodsCount - 1 do
-      with fMethods[m] do
-      begin
-        WR.Add('{"method":"%","arguments":[', [URI]);
-        for a := 0 to High(Args) do
-          Args[a].SerializeToContract(WR);
-        WR.CancelLastComma;
-        WR.AddDirect(']', '}', ',');
-      end;
+    m := pointer(fMethods);
+    for nm := 0 to MethodsCount - 1 do
+    begin
+      WR.Add('{"method":"%","arguments":[', [m^.URI]);
+      for na := 0 to High(m^.Args) do
+        m^.Args[na].SerializeToContract(WR);
+      WR.CancelLastComma;
+      WR.AddDirect(']', '}', ',');
+      inc(m);
+    end;
     WR.CancelLastComma(']');
     WR.SetText(fContract);
     {$ifdef SOA_DEBUG}
@@ -6467,9 +6525,9 @@ type
   TCallMethodArgs = record
     StackSize: PtrInt;
     StackAddr, method: PtrInt;
-    ParamRegs: array[PARAMREG_FIRST..PARAMREG_LAST] of PtrInt;
+    ParamRegs: array[PARAMREG_FIRST .. PARAMREG_LAST] of PtrInt;
     {$ifdef HAS_FPREG}
-    FPRegs: array[FPREG_FIRST..FPREG_LAST] of Double;
+    FPRegs: array[FPREG_FIRST .. FPREG_LAST] of Double;
     {$endif HAS_FPREG}
     res64: Int64Rec;
     resKind: TInterfaceMethodValueType;
@@ -6523,7 +6581,7 @@ asm
    // point a2 to bottom of stack.
    mov  a2, sp
    // load a3 with CallMethod stack address
-   ldr  a3, [v2,#TCallMethodArgs.StackAddr]
+   ldr  a3, [v2, #TCallMethodArgs.StackAddr]
 stack_loop:
    // copy a3 to a4 and increment a3 (a3 = StackAddr)
    ldmia a3!, {a4}
@@ -6533,21 +6591,21 @@ stack_loop:
    subs  a1, a1, #1
    bne  stack_loop
 load_regs:
-   ldr   r0, [v2,#TCallMethodArgs.ParamRegs+REGR0*4-4]
-   ldr   r1, [v2,#TCallMethodArgs.ParamRegs+REGR1*4-4]
-   ldr   r2, [v2,#TCallMethodArgs.ParamRegs+REGR2*4-4]
-   ldr   r3, [v2,#TCallMethodArgs.ParamRegs+REGR3*4-4]
+   ldr   r0, [v2, #TCallMethodArgs.ParamRegs + REGR0 * 4 - 4]
+   ldr   r1, [v2, #TCallMethodArgs.ParamRegs + REGR1 * 4 - 4]
+   ldr   r2, [v2, #TCallMethodArgs.ParamRegs + REGR2 * 4 - 4]
+   ldr   r3, [v2, #TCallMethodArgs.ParamRegs + REGR3 * 4 - 4]
    {$ifdef HAS_FPREG}
-   vldr  d0, [v2,#TCallMethodArgs.FPRegs+REGD0*8-8]
-   vldr  d1, [v2,#TCallMethodArgs.FPRegs+REGD1*8-8]
-   vldr  d2, [v2,#TCallMethodArgs.FPRegs+REGD2*8-8]
-   vldr  d3, [v2,#TCallMethodArgs.FPRegs+REGD3*8-8]
-   vldr  d4, [v2,#TCallMethodArgs.FPRegs+REGD4*8-8]
-   vldr  d5, [v2,#TCallMethodArgs.FPRegs+REGD5*8-8]
-   vldr  d6, [v2,#TCallMethodArgs.FPRegs+REGD6*8-8]
-   vldr  d7, [v2,#TCallMethodArgs.FPRegs+REGD7*8-8]
+   vldr  d0, [v2, #TCallMethodArgs.FPRegs + REGD0 * 8 - 8]
+   vldr  d1, [v2, #TCallMethodArgs.FPRegs + REGD1 * 8 - 8]
+   vldr  d2, [v2, #TCallMethodArgs.FPRegs + REGD2 * 8 - 8]
+   vldr  d3, [v2, #TCallMethodArgs.FPRegs + REGD3 * 8 - 8]
+   vldr  d4, [v2, #TCallMethodArgs.FPRegs + REGD4 * 8 - 8]
+   vldr  d5, [v2, #TCallMethodArgs.FPRegs + REGD5 * 8 - 8]
+   vldr  d6, [v2, #TCallMethodArgs.FPRegs + REGD6 * 8 - 8]
+   vldr  d7, [v2, #TCallMethodArgs.FPRegs + REGD7 * 8 - 8]
    {$endif HAS_FPREG}
-   ldr   v1, [v2,#TCallMethodArgs.method]
+   ldr   v1, [v2, #TCallMethodArgs.method]
    {$ifdef CPUARM_HAS_BLX}
    blx   v1
    {$else}
@@ -6558,10 +6616,10 @@ load_regs:
    mov pc, v1
    {$endif CPUARM_HAS_BX}
    {$endif CPUARM_HAS_BLX}
-   str   r0, [v2,#TCallMethodArgs.res64.Lo]
-   str   r1, [v2,#TCallMethodArgs.res64.Hi]
+   str   r0, [v2, #TCallMethodArgs.res64.Lo]
+   str   r1, [v2, #TCallMethodArgs.res64.Hi]
 {$ifdef HAS_FPREG}
-   ldr   r2, [v2,#TCallMethodArgs.resKind]
+   ldr   r2, [v2, #TCallMethodArgs.resKind]
    cmp   r2, imvDouble
    beq   float_result
    cmp   r2, imvDateTime
@@ -6570,7 +6628,7 @@ load_regs:
    bne   asmcall_end
    // store double result in res64
 float_result:
-   vstr  d0, [v2,#TCallMethodArgs.res64]
+   vstr  d0, [v2, #TCallMethodArgs.res64]
 asmcall_end:
 {$endif HAS_FPREG}
    // epilog
@@ -6588,7 +6646,6 @@ asm
    // fp       x29
    // lr       x30
    // sp       sp
-
    // sometimes, the entry-point is not exact ... give some room for errors
    nop
    nop
@@ -6601,18 +6658,18 @@ asm
    //and  sp, sp, #-16   // Always align sp.
    mov  x19, Args
    // prepare to copy (push) stack content (if any)
-   ldr  x2, [x19,#TCallMethodArgs.StackSize]
+   ldr  x2, [x19, #TCallMethodArgs.StackSize]
    // if there is no stack content, do nothing
    cmp	x2, #0
    b.eq	load_regs
    // point x3 to bottom of stack.
    mov	x3, sp
    // load x4 with CallMethod stack address
-   ldr	x4, [x19,#TCallMethodArgs.StackAddr]
+   ldr	x4, [x19, #TCallMethodArgs.StackAddr]
 stack_loop:
    // load x5 and x6 with stack contents
    ldr  x5, [x4]
-   ldr  x6, [x4,#8]
+   ldr  x6, [x4, #8]
    // store contents at "real" stack and increment address counter x3
    stp	x5, x6, [x3], #16
    // with update of flags for loop
@@ -6624,24 +6681,24 @@ stack_loop:
    subs	x2, x2, #2
    b.ne stack_loop
 load_regs:
-   ldr  x0, [x19,#TCallMethodArgs.ParamRegs+REGX0*8-8]
-   ldr  x1, [x19,#TCallMethodArgs.ParamRegs+REGX1*8-8]
-   ldr  x2, [x19,#TCallMethodArgs.ParamRegs+REGX2*8-8]
-   ldr  x3, [x19,#TCallMethodArgs.ParamRegs+REGX3*8-8]
-   ldr  x4, [x19,#TCallMethodArgs.ParamRegs+REGX4*8-8]
-   ldr  x5, [x19,#TCallMethodArgs.ParamRegs+REGX5*8-8]
-   ldr  x6, [x19,#TCallMethodArgs.ParamRegs+REGX6*8-8]
-   ldr  x7, [x19,#TCallMethodArgs.ParamRegs+REGX7*8-8]
-   ldr  d0, [x19,#TCallMethodArgs.FPRegs+REGD0*8-8]
-   ldr  d1, [x19,#TCallMethodArgs.FPRegs+REGD1*8-8]
-   ldr  d2, [x19,#TCallMethodArgs.FPRegs+REGD2*8-8]
-   ldr  d3, [x19,#TCallMethodArgs.FPRegs+REGD3*8-8]
-   ldr  d4, [x19,#TCallMethodArgs.FPRegs+REGD4*8-8]
-   ldr  d5, [x19,#TCallMethodArgs.FPRegs+REGD5*8-8]
-   ldr  d6, [x19,#TCallMethodArgs.FPRegs+REGD6*8-8]
-   ldr  d7, [x19,#TCallMethodArgs.FPRegs+REGD7*8-8]
+   ldr  x0, [x19, #TCallMethodArgs.ParamRegs + REGX0 * 8 - 8]
+   ldr  x1, [x19, #TCallMethodArgs.ParamRegs + REGX1 * 8 - 8]
+   ldr  x2, [x19, #TCallMethodArgs.ParamRegs + REGX2 * 8 - 8]
+   ldr  x3, [x19, #TCallMethodArgs.ParamRegs + REGX3 * 8 - 8]
+   ldr  x4, [x19, #TCallMethodArgs.ParamRegs + REGX4 * 8 - 8]
+   ldr  x5, [x19, #TCallMethodArgs.ParamRegs + REGX5 * 8 - 8]
+   ldr  x6, [x19, #TCallMethodArgs.ParamRegs + REGX6 * 8 - 8]
+   ldr  x7, [x19, #TCallMethodArgs.ParamRegs + REGX7 * 8 - 8]
+   ldr  d0, [x19, #TCallMethodArgs.FPRegs    + REGD0 * 8 - 8]
+   ldr  d1, [x19, #TCallMethodArgs.FPRegs    + REGD1 * 8 - 8]
+   ldr  d2, [x19, #TCallMethodArgs.FPRegs    + REGD2 * 8 - 8]
+   ldr  d3, [x19, #TCallMethodArgs.FPRegs    + REGD3 * 8 - 8]
+   ldr  d4, [x19, #TCallMethodArgs.FPRegs    + REGD4 * 8 - 8]
+   ldr  d5, [x19, #TCallMethodArgs.FPRegs    + REGD5 * 8 - 8]
+   ldr  d6, [x19, #TCallMethodArgs.FPRegs    + REGD6 * 8 - 8]
+   ldr  d7, [x19, #TCallMethodArgs.FPRegs    + REGD7 * 8 - 8]
    // call TCallMethodArgs.method
-   ldr  x15, [x19,#TCallMethodArgs.method]
+   ldr  x15, [x19, #TCallMethodArgs.method]
    blr  x15
    // store normal result
    str  x0, [x19, #TCallMethodArgs.res64]
@@ -6654,11 +6711,11 @@ load_regs:
    b.ne asmcall_end
    // store double result in res64
 float_result:
-   str  d0, [x19,#TCallMethodArgs.res64]
+   str  d0, [x19, #TCallMethodArgs.res64]
 asmcall_end:
    add  sp, sp, #MAX_EXECSTACK
-   ldr  x19,[sp], #16
-   ldp  x29,x30,[sp], #16
+   ldr  x19, [sp], #16
+   ldp  x29, x30, [sp], #16
    ret
 end;
 
@@ -6672,13 +6729,13 @@ asm
         push    rbp
         push    r12
         mov     rbp, rsp
-        // simulate .params 60 ... size for 60 parameters
+        // simulate .params 32
         lea     rsp, [rsp - MAX_EXECSTACK]
         // align stack to 16 bytes
         and     rsp, -16
 {$else DELPHI} // ensure we use regular .params command for easier debugging
 asm
-        .params 64     // size for 64 parameters
+        .params 32    // size for MAX_METHOD_ARG = 32 parameters
         .pushnv r12   // generate prolog+epilog to save and restore non-volatile r12
 {$endif FPC}
         // get Args
@@ -6699,8 +6756,8 @@ asm
         mov     rsi, [r12 + TCallMethodArgs.ParamRegs + REGRSI * 8 - 8]
         mov     rdx, [r12 + TCallMethodArgs.ParamRegs + REGRDX * 8 - 8]
         mov     rcx, [r12 + TCallMethodArgs.ParamRegs + REGRCX * 8 - 8]
-        mov     r8, [r12 + TCallMethodArgs.ParamRegs + REGR8 * 8 - 8]
-        mov     r9, [r12 + TCallMethodArgs.ParamRegs + REGR9 * 8 - 8]
+        mov     r8,  [r12 + TCallMethodArgs.ParamRegs + REGR8  * 8 - 8]
+        mov     r9,  [r12 + TCallMethodArgs.ParamRegs + REGR9  * 8 - 8]
         movsd   xmm0, qword ptr [r12 + TCallMethodArgs.FPRegs + REGXMM0 * 8 - 8]
         movsd   xmm1, qword ptr [r12 + TCallMethodArgs.FPRegs + REGXMM1 * 8 - 8]
         movsd   xmm2, qword ptr [r12 + TCallMethodArgs.FPRegs + REGXMM2 * 8 - 8]
@@ -6714,8 +6771,8 @@ asm
         // Win64 ABI
         mov     rcx, [r12 + TCallMethodArgs.ParamRegs + REGRCX * 8 - 8]
         mov     rdx, [r12 + TCallMethodArgs.ParamRegs + REGRDX * 8 - 8]
-        mov     r8, [r12 + TCallMethodArgs.ParamRegs + REGR8 * 8 - 8]
-        mov     r9, [r12 + TCallMethodArgs.ParamRegs + REGR9 * 8 - 8]
+        mov     r8,  [r12 + TCallMethodArgs.ParamRegs + REGR8  * 8 - 8]
+        mov     r9,  [r12 + TCallMethodArgs.ParamRegs + REGR9  * 8 - 8]
         movsd   xmm0, qword ptr [r12 + TCallMethodArgs.FPRegs + REGXMM0 * 8 - 8]
         movsd   xmm1, qword ptr [r12 + TCallMethodArgs.FPRegs + REGXMM1 * 8 - 8]
         movsd   xmm2, qword ptr [r12 + TCallMethodArgs.FPRegs + REGXMM2 * 8 - 8]
@@ -6950,14 +7007,10 @@ begin
     inc(pv);
     case arg^.RawExecute of
       reValReg:
-        begin
-          call.ParamRegs[arg^.RegisterIdent] := PPtrInt(pv^)^;
-          {$ifdef CPUARM}
-          // e.g. Int64 on 32-bit ARM systems are passed in two registers
-          if arg^.SizeInStack > POINTERBYTES then
-            call.ParamRegs[arg^.RegisterIdent + 1] := PPtrInt(pv^ + POINTERBYTES)^;
-          {$endif CPUARM}
-        end;
+        call.ParamRegs[arg^.RegisterIdent] := PPtrInt(pv^)^;
+      reValRegs:
+        // e.g. Int64 on 32-bit ARM systems are passed in two registers
+        MoveFast(pv^^, call.ParamRegs[arg^.RegisterIdent], arg^.SizeInStack);
       reValStack:
         MoveFast(pv^^, Stack[arg^.InStackOffset], arg^.SizeInStack);
       reRefReg:
@@ -6966,7 +7019,10 @@ begin
         PPointer(@Stack[arg^.InStackOffset])^ := pv^;
       {$ifdef HAS_FPREG}
       reValFpReg:
-        call.FPRegs[arg^.FPRegisterIdent] := unaligned(PDouble(pv^)^);
+        PInt64(@call.FPRegs[arg^.FPRegisterIdent])^ := PInt64(pv^)^;
+      reValFpRegs:
+        // e.g. HFA on SYSVABI systems are passed in several FP registers
+        MoveFast(pv^^, call.FPRegs[arg^.FPRegisterIdent], arg^.SizeInStack);
       {$endif HAS_FPREG}
     end;
   end;

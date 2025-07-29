@@ -381,8 +381,10 @@ type
 // backward compatibility types redirections
 {$ifndef PUREMORMOT2}
 
-  TSqlRestServerAuthenticationClientSetUserPassword = TRestClientSetUserPassword;
-  TSqlRestServerAuthenticationSignedUriAlgo = TRestAuthenticationSignedUriAlgo;
+  TSqlRestServerAuthenticationClientSetUserPassword  =
+     TRestClientSetUserPassword;
+  TSqlRestServerAuthenticationSignedUriAlgo =
+     TRestAuthenticationSignedUriAlgo;
   TSqlRestServerAuthenticationSignedUriComputeSignature  =
     TOnRestAuthenticationSignedUriComputeSignature;
   // TRestServerAuthentication* classes have client-side only corresponding
@@ -1126,7 +1128,7 @@ type
 {$ifndef PUREMORMOT2}
 
 type
-  TSqlRestClientUri = TRestClientUri;
+  TSqlRestClientUri    = TRestClientUri;
   TSqlRestClientUriDll = TRestClientLibraryRequest;
 
 {$endif PUREMORMOT2}
@@ -1341,7 +1343,7 @@ begin
   aServerNonce := Sender.CallBackGetResult('auth', ['username', User.LogonName]);
   if aServerNonce = '' then
     exit;
-  SharedRandom.Fill(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
+  SharedRandom.Fill(@rnd, SizeOf(rnd)); // public and unique: use Lecuyer
   Join([CardinalToHex(OSVersionInt32), '_', BinToHexLower(@rnd, SizeOf(rnd))],
     aClientNonce); // 160-bit nonce
   result := ClientGetSessionKey(Sender, User, [

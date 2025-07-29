@@ -5304,7 +5304,7 @@ begin
     exit;
   if IVAtBeginning then
   begin
-    SharedRandom.Fill(@fIV, SizeOf(fIV)); // enough for public randomness
+    SharedRandom.Fill(@fIV, SizeOf(fIV)); // IV should be unique: use Lecuyer
     PAesBlock(Output)^ := fIV;
     inc(PAesBlock(Output));
   end;
@@ -5516,7 +5516,7 @@ begin
   // our non-standard mCfc/mOfc/mCtc modes with 256-bit crc32c
   if Encrypt then
   begin
-    SharedRandom.Fill(@nonce, SizeOf(nonce)); // enough for public randomness
+    SharedRandom.Fill(@nonce, SizeOf(nonce)); // should be unique: use Lecuyer
     if not MacSetNonce({encrypt=}true, nonce, Associated) then
       // leave ASAP if this class doesn't support AEAD process
       exit;
@@ -5899,7 +5899,7 @@ begin
   p := pointer(result);
   if IVAtBeginning then
   begin
-    SharedRandom.Fill(@fIV, SizeOf(fIV)); // Lecuyer is enough for public random
+    SharedRandom.Fill(@fIV, SizeOf(fIV)); // IV should be unique: use Lecuyer
     p^ := fIV;
     inc(p);
   end;
@@ -7620,15 +7620,15 @@ begin
     // 512-bit randomness and entropy from gsl_rng_taus2 current state
     SharedRandom.Fill(@data, SizeOf(data));
     sha3.Update(@data, SizeOf(data));
-    // 512-bit from _Fill256FromOs + RdRand/Rdtsc + Lecuyer + thread
-    XorEntropy(data);
-    sha3.Update(@data, SizeOf(data));
     // 512-bit from OpenSSL audited random generator (from mormot.crypt.openssl)
     if Assigned(OpenSslRandBytes) then
     begin
       OpenSslRandBytes(@data, SizeOf(data));
       sha3.Update(@data, SizeOf(data));
     end;
+    // 512-bit from _Fill256FromOs + RdRand/Rdtsc + Lecuyer + thread
+    XorEntropy(data);
+    sha3.Update(@data, SizeOf(data));
     // 512-bit from /dev/urandom or CryptGenRandom operating system PRNG
     with _OSEntropySeed do
     begin
@@ -11066,8 +11066,8 @@ begin
     // 32-128-bit aeshash as implemented in Go runtime, using aesenc opcode
     GetMemAligned(AesNiHashMem, nil, 16 * 4, AesNiHashKey, {align=}16);
     AesNiHashAntiFuzzTable := AesNiHashKey;
-    PHash128Rec(AesNiHashKey)^ := StartupEntropy; // some salt
-    SharedRandom.Fill(AesNiHashKey, 16 * 4);     // 512-bit seed using Lecuyer's
+    XorMemory(PHash128Rec(AesNiHashKey)^, StartupEntropy); // 128-bit salt
+    SharedRandom.Fill(AesNiHashKey, 16 * 4); // 512-bit seed using Lecuyer's
     AesNiHash32      := @_AesNiHash32;
     AesNiHash64      := @_AesNiHash64;
     AesNiHash128     := @_AesNiHash128;

@@ -2866,7 +2866,7 @@ var
          ord('0') + ord('0') shl 8 + ord('0') shl 16 + ord('1') shl 24) and
        (P[4] = ':') then
     begin
-      if not HexDisplayToBin(PAnsiChar(P) + 5, @Ptr, SizeOf(Ptr)) then
+      if not HexDisplayToCardinal(PAnsiChar(P) + 5, PCardinal(@Ptr)^) then
         exit;
       while (P < PEnd) and
             (P^ > ' ') do
@@ -2895,7 +2895,7 @@ var
       // we just need the unit names now for ReadSymbols to detect and trim them
       // final Unit[] will be filled in ReadLines with potential nested files
       if GetCode(U.Symbol.Start) and
-         HexDisplayToBin(PAnsiChar(P), @U.Symbol.Stop, 4) then
+         HexDisplayToCardinal(PAnsiChar(P), PCardinal(@U.Symbol.Stop)^) then
       begin
         while PWord(P)^ <> ord('M') + ord('=') shl 8 do
           if P + 10 > PEnd then
@@ -4616,7 +4616,7 @@ begin
   // pre-compute GetBitPtr() constants for SetThreadInfoAndThreadName()
   dec(num);
   nfo^.ThreadBitLo := 1 shl (num and 31); // 32-bit fThreadNameLogged[] value
-  nfo^.ThreadBitHi := num shr 5; // index in fThreadNameLogged[]
+  nfo^.ThreadBitHi := num shr 5;          // index in fThreadNameLogged[]
 end;
 
 function GetThreadInfo: PSynLogThreadInfo; {$ifdef HASINLINE} inline; {$endif}

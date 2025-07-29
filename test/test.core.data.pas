@@ -5125,6 +5125,17 @@ var
   end;
 
 begin
+  CheckEqual(SizeOf(TDecimal128), 16);
+  CheckEqual(ord(betEof), $00);
+  CheckEqual(ord(betInt64), $12);
+  CheckEqual(ord(betDecimal128), $13);
+  CheckEqual(ord(bbtGeneric), $00);
+  CheckEqual(ord(bbtMD5), $05);
+  CheckEqual(ord(bbtEncryptedBsonValue), $06);
+  CheckEqual(ord(bbtCompressedBsonColumn), $07);
+  CheckEqual(ord(bbtUser), $80);
+  CheckEqual(SizeOf(TBsonObjectID), 12);
+  CheckEqual(SizeOf(TBsonVariantData), SizeOf(variant));
   Check(@PBsonVariantData(nil)^.VBlob = @PVarData(nil)^.VAny);
   Check(@PBsonVariantData(nil)^.VText = @PVarData(nil)^.VAny);
   // see http://docs.mongodb.org/manual/reference/object-id
@@ -6979,7 +6990,7 @@ begin
   end;
   str := Utf8ToString(UrlEncode(StringToUtf8('https://test3.diavgeia.gov.gr/doc/')));
   check(str = 'https%3A%2F%2Ftest3.diavgeia.gov.gr%2Fdoc%2F');
-  Check(UrlDecode('where=name%20like%20:(%27Arnaud%%27):') =
+  CheckEqual(UrlDecode('where=name%20like%20:(%27Arnaud%%27):'),
     'where=name like :(''Arnaud%''):', 'URI from browser');
   P := UrlDecodeNextNameValue('where=name+like+%3A%28%27Arnaud%25%27%29%3A', name, value);
   Check(P <> nil);
