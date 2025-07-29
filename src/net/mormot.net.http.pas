@@ -3692,19 +3692,21 @@ end;
 
 function THttpRequestContext.ProcessParseLine(var st: TProcessParseLine): boolean;
 var
-  Len: PtrInt;
+  Len13: PtrInt;
+  Len10: PtrInt;
   P: PUtf8Char;
 begin
-  Len := ByteScanIndex(pointer(st.P), st.Len, 13); // fast SSE2 or FPC IndexByte
-  if PtrUInt(Len) < PtrUInt(st.Len) then // handle st.Len=0 and/or Len=-1
+  Len13 := ByteScanIndex(pointer(st.P), st.Len, 13); // fast SSE2 or FPC IndexByte
+  Len10 := ByteScanIndex(pointer(st.P), st.Len, 10); // fast SSE2 or FPC IndexByte
+  if (PtrUInt(Len13) < PtrUInt(st.Len)) and (PtrUInt(Len10) < PtrUInt(st.Len)) then // handle st.Len=0 and/or Len=-1
   begin
     P := st.P;
     st.Line := P;
-    P[Len] := #0; // replace ending #13 by #0 - HTTP expects #13#10 not #10
-    st.LineLen := Len;
-    inc(Len, 2);  // if char after #13 is not #10, parsing will fail as expected
-    inc(st.P, Len);
-    dec(st.Len, Len);
+    P[Len13] := #0; // replace ending #13 by #0 - HTTP expects #13#10 not #10
+    st.LineLen := Len13;
+    inc(Len13, 2);  // if char after #13 is not #10, parsing will fail as expected
+    inc(st.P, Len13);
+    dec(st.Len, Len13);
     result := true;
     // now we have the next full line in st.Line/st.LineLen
   end
