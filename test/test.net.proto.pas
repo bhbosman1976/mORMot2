@@ -217,20 +217,21 @@ const
 const
   // some reference OpenAPI/Swagger definitions
   // - downloaded as openapi-ref.zip since some of those endpoints are unstable
-  OpenApiName: array[0 .. 5] of RawUtf8 = (
+  OpenApiName: array[0 .. 6] of RawUtf8 = (
     'FinTrack',
     'Nakama',  // https://github.com/heroiclabs/nakama
     'Pets2',   // https://petstore.swagger.io/v2/swagger.json
     'Pets3',   // https://petstore3.swagger.io/api/v3/openapi.json
     'Qdrant',  // https://qdrant.github.io/qdrant/redoc/v1.8.x/openapi.json
-    'VAS');    // https://platform-api-staging.vas.com/api/v1/swagger.json
+    'VAS',     // https://platform-api-staging.vas.com/api/v1/swagger.json
+    'JTL');    // https://developer.jtl-software.com/_spec/products/erpapi/@1.1-onprem/openapi.json?download
 
 procedure TNetworkProtocols.OpenAPI;
 var
   i: PtrInt;
   fn: TFileName;
   key, prev, dto, client: RawUtf8;
-  ref: RawByteString;
+  refzip: RawByteString;
   api: TRawUtf8DynArray;
   oa: TOpenApiParser;
   timer: TPrecisionTimer;
@@ -262,9 +263,13 @@ begin
       api[i] := StringFromFile(fn);
       if api[i] <> '' then
         continue; // already downloaded
-      ref := DownloadFile('https://synopse.info/files/openapi-ref.zip');
-      if UnZipMemAll(ref, WorkDir) then // one url to rule them all
-        api[i] := StringFromFile(fn);  // try now
+      if refzip <> '' then
+        continue; // download .zip once
+      refzip := DownloadFile('https://synopse.info/files/openapi-ref.zip');
+      if refzip = '' then
+        refzip := 'none'
+      else if UnZipMemAll(refzip, WorkDir) then // one url to rule them all
+        api[i] := StringFromFile(fn); // try once
     end;
   for i := 0 to high(api) do
     if api[i] <> '' then
@@ -966,6 +971,7 @@ begin
   CheckEqual(DnsLookup('LocalHost'), '127.0.0.1');
   CheckEqual(DnsLookup('::1'), '127.0.0.1');
   CheckEqual(DnsLookup('1.2.3.4'), '1.2.3.4');
+  CheckEqual(NetAddrResolve('1.2.3.4'), '1.2.3.4');
   if hasinternet then
   begin
     endtix := GetTickSec + 5; // never wait forever
@@ -976,6 +982,7 @@ begin
         break;
       Sleep(100); // some DNS servers may fail at first: wait a little
     until GetTickSec > endtix;
+    CheckEqual(NetAddrResolve('synopse.info'), ip, 'NetAddrResolve');
     rev := '62.210.254.173';
     CheckEqual(ip, rev, 'dns1');
     repeat
@@ -2249,10 +2256,17 @@ var
     CheckEqual(hc.Value(2), 'value 2');
     CheckEqual(hc.Name(3), 'name3');
     CheckEqual(hc.Value(3), 'value3');
+    {$ifdef HASINLINE}
     CheckEqual(hc.Cookie['name'], 'value');
     CheckEqual(hc.Cookie['name 1'], 'value1');
     CheckEqual(hc.Cookie['name 2'], 'value 2');
     CheckEqual(hc.Cookie['name3'], 'value3');
+    {$else}
+    CheckEqual(hc.GetCookie('name'), 'value');
+    CheckEqual(hc.GetCookie('name 1'), 'value1');
+    CheckEqual(hc.GetCookie('name 2'), 'value 2');
+    CheckEqual(hc.GetCookie('name3'), 'value3');
+    {$endif HASINLINE}
   end;
 
 begin
@@ -2295,7 +2309,7 @@ begin
   CheckEqual(StatusCodeToText(666)^, 'Client Side Connection Error');
   // validate TUri data structure
   U.Clear;
-  Check(U.UriScheme = usUnknown);
+  Check(U.UriScheme = usUndefined);
   CheckEqual(U.Uri, '');
   Check(U.From('toto.com'));
   CheckEqual(U.Uri, 'http://toto.com/');
@@ -2379,13 +2393,29 @@ begin
        '&cc=someone_else@example.com&body=This%20is%20the%20body';
   Check(U.From('mailto://someone@example.com' + s));
   CheckEqual(U.Scheme, 'mailto');
-  Check(U.UriScheme = usUnknown);
+  Check(U.UriScheme = usCustom);
   CheckEqual(U.Server, 'example.com');
   CheckEqual(U.Port, '');
   CheckEqual(U.User, 'someone');
   CheckEqual(U.Password, '');
   CheckEqual(U.Address, s);
   CheckEqual(U.Uri, 'mailto://example.com/' + s);
+  U.Clear; // TUri may be used to create an URI from some parameters
+  U.Server := '127.0.0.1';
+  U.Port := '991';
+  U.Address := 'endpoint';
+  CheckEqual(U.Uri, 'http://127.0.0.1:991/endpoint');
+  U.Clear;
+  U.Https := true;
+  U.Server := '127.0.0.1';
+  U.Address := 'endpoint';
+  CheckEqual(U.Port, '');
+  CheckEqual(U.Uri, 'https://127.0.0.1/endpoint');
+  CheckEqual(U.Port, '');
+  U.Port := '443';
+  CheckEqual(U.Uri, 'https://127.0.0.1/endpoint');
+  U.Port := '444';
+  CheckEqual(U.Uri, 'https://127.0.0.1:444/endpoint');
   // validate THttpCookies and CookieFromHeaders()
   hc.ParseServer('');
   CheckEqual(length(hc.Cookies), 0);
@@ -2393,20 +2423,20 @@ begin
   CheckEqual(hc.Name(0), 'name');
   CheckEqual(hc.Value(0), 'value');
   CheckEqual(length(hc.Cookies), 1);
-  CheckEqual(hc.Cookie['name'], 'value');
+  CheckEqual(hc.GetCookie('name'), 'value');
   CheckEqual(hc.Cookies[0].NameLen, 4);
   CheckEqual(hc.Cookies[0].ValueLen, 5);
-  Check(hc.Cookie['name2'] <> 'value');
+  Check(hc.GetCookie('name2') <> 'value');
   hc.Clear;
   CheckEqual(length(hc.Cookies), 0);
   hc.ParseServer(HDR2);
   CheckEqual(hc.Name(0), 'name');
   CheckEqual(hc.Value(0), 'value');
   CheckEqual(length(hc.Cookies), 1);
-  CheckEqual(hc.Cookie['name'], 'value');
+  CheckEqual(hc.GetCookie('name'), 'value');
   CheckEqual(hc.Cookies[0].NameLen, 4);
   CheckEqual(hc.Cookies[0].ValueLen, 5);
-  Check(hc.Cookie['name2'] <> 'value');
+  Check(hc.GetCookie('name2') <> 'value');
   hc.ParseServer(HDR3);
   CheckEqual(length(hc.Cookies), 4);
   Check4;

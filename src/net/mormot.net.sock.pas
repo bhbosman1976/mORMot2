@@ -417,6 +417,10 @@ function NewRawSockets(family: TNetFamily; layer: TNetLayer;
 /// delete a hostname from TNetAddr.SetFrom internal short-living cache
 procedure NetAddrFlush(const hostname: RawUtf8);
 
+/// return the IP (v4 or v6) address of a given hostname
+// - just a wrapper around TNetAddr.SetFrom and TNetAddr.IP
+function NetAddrResolve(const hostname: RawUtf8): RawUtf8;
+
 /// resolve the TNetAddr of the address:port layer - maybe from NewSocketAddressCache
 function GetSocketAddressFromCache(const address, port: RawUtf8;
   layer: TNetLayer; out addr: TNetAddr; var fromcache, tobecached: boolean): TNetResult;
@@ -874,7 +878,7 @@ type
     // openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
     CertificateFile: RawUtf8;
     /// input: PEM/PFX content of a certificate to be loaded
-    // - on OpenSSL client or server, calls SSL_CTX_use_certificat() API
+    // - on OpenSSL client or server, calls SSL_CTX_use_certificate() API
     // - not used on SChannel client
     // - on SChannel server, expects a .pfx / PKCS#12 binary content
     CertificateBin: RawByteString;
@@ -956,23 +960,23 @@ type
     // - typically one X509_V_ERR_* integer constant
     LastError: RawUtf8;
     /// called by INetTls.AfterConnection to fully customize peer validation
-    // - not used on SChannel
+    // - not implemented on SChannel
     OnPeerValidate: TOnNetTlsPeerValidate;
     /// called by INetTls.AfterConnection for each peer validation
     // - allow e.g. to verify CN or DNSName fields of each peer certificate
     // - see also ClientCertificateAuthentication and ClientVerifyOnce options
-    // - not used on SChannel
+    // - not implemented on SChannel
     OnEachPeerVerify: TOnNetTlsEachPeerVerify;
     /// called by INetTls.AfterConnection after standard peer validation
     // - allow e.g. to verify CN or DNSName fields of the peer certificate
-    // - not used on SChannel
+    // - not implemented on SChannel
     OnAfterPeerValidate: TOnNetTlsAfterPeerValidate;
     /// called by INetTls.AfterConnection to retrieve a private password
-    // - not used on SChannel
+    // - not implemented on SChannel
     OnPrivatePassword: TOnNetTlsGetPassword;
     /// called by INetTls.AfterAccept to set a server/host-specific certificate
     // - used e.g. by TAcmeLetsEncryptServer to allow SNI per-host certificate
-    // - not used on SChannel
+    // - not implemented on SChannel
     OnAcceptServerName: TOnNetTlsAcceptServerName;
     /// opaque pointer used by INetTls.AfterBind/AfterAccept to propagate the
     // bound server certificate context into each accepted connection
@@ -1563,14 +1567,15 @@ type
 
 type
   /// the main URI schemes recognized by TUri.UriScheme
-  TUriScheme = (
-    usUnknown, usHttp, usWs, usHttps, usWss, usUdp, usFile, usFtp, usFtps);
+  TUriScheme = (usUndefined, usCustom,
+    usHttp, usWs, usHttps, usWss, usUdp, usFile, usFtp, usFtps);
 
   /// structure used to parse an URI into its components
   // - ready to be supplied e.g. to a THttpRequest sub-class
   // - used e.g. by class function THttpRequest.Get()
   // - will decode standard HTTP/HTTPS urls or our custom Unix sockets URI like
   // 'http://unix:/path/to/socket.sock:/url/path'
+  // - could also be used to generate an URI e.g. from Server/Address info
   {$ifdef USERECORDWITHMETHODS}
   TUri = record
   {$else}
@@ -2558,6 +2563,15 @@ var
 procedure NetAddrFlush(const hostname: RawUtf8);
 begin
   NetAddrCache.SafeFlush(hostname);
+end;
+
+function NetAddrResolve(const hostname: RawUtf8): RawUtf8;
+var
+  addr: TNetAddr;
+begin
+  result := '';
+  if addr.SetFrom(hostname, '80', nlTcp) = nrOK then
+    addr.IP(result);
 end;
 
 function TNetAddr.SetFromIP4(const address: RawUtf8;
@@ -5525,15 +5539,15 @@ procedure TUri.Clear;
 begin
   Https := false;
   Layer := nlTcp;
-  UriScheme := usUnknown;
+  UriScheme := usUndefined;
   Finalize(self); // reset all RawUtf8 fields
 end;
 
 const
-  _US: array[succ(low(TUriScheme)) .. high(TUriScheme)] of RawUtf8 = (
+  _US: array[usHttp .. high(TUriScheme)] of RawUtf8 = (
     'http', 'ws', 'https', 'wss', 'udp', 'file', 'ftp', 'ftps');
   _US_PORT: array[TUriScheme] of RawUtf8 = (
-    '', '80', '80', '443', '443', '', '', '20', '989');
+    '', '', '80', '80', '443', '443', '', '', '20', '989');
 
 function TUri.From(aUri: RawUtf8; const DefaultPort: RawUtf8): boolean;
 var
@@ -5554,7 +5568,7 @@ begin
   if PInteger(s)^ and $ffffff = ord(':') + ord('/') shl 8 + ord('/') shl 16 then
   begin
     FastSetString(Scheme, p, s - p);
-    UriScheme := TUriScheme(FindPropName(@_US, Scheme, length(_US)) + 1);
+    UriScheme := TUriScheme(FindPropName(@_US, Scheme, length(_US)) + ord(low(_US)));
     case UriScheme of
       usHttps,
       usWss:  // wss:// is just an upgraded https:
@@ -5649,12 +5663,22 @@ end;
 
 function TUri.ServerPort: RawUtf8;
 begin
+  result := '';
   if layer = nlUnix then
   begin
     Join(['http://unix:', Server, ':/'], result); // our own layout
     exit;
   end;
-  if UriScheme = usUnknown then
+  if UriScheme = usUndefined then // fields directly set, without any From()
+    if Layer = nlUdp then
+      UriScheme := usUdp
+    else if Server = '' then
+      exit // void e.g. just after Clear - http/https requires a server anyway
+    else if Https then
+      UriScheme := usHttps
+    else
+      UriScheme := usHttp;
+  if UriScheme = usCustom then
     result := Scheme // as specified
   else
     result := _US[UriScheme]; // normalized or default 'http://'
@@ -6417,10 +6441,9 @@ procedure TCrtSocket.SockSend(const Values: array of const);
 var
   v: PVarRec;
   i: PtrInt;
-  {$ifdef HASVARUSTRING}
   j, l: PtrInt;
+  w: PWordArray;
   p: PByteArray;
-  {$endif HASVARUSTRING}
   t: PAnsiChar;
   tmp: TTemp24;
 begin
@@ -6431,22 +6454,34 @@ begin
       vtString:
         SockSend(@v^.VString^[1], PByte(v^.VString)^);
       vtAnsiString:
-        SockSend(v^.VAnsiString, Length(RawByteString(v^.VAnsiString)));
+        if v^.VAnsiString <> nil then
+          SockSend(v^.VAnsiString, PStrLen(v^.VPChar - _STRLEN)^);
+      vtPWideChar,
       {$ifdef HASVARUSTRING}
-      vtUnicodeString:
-        begin // constant text is expected to be pure ASCII-7
-          l := length(UnicodeString(v^.VUnicodeString));
-          p := EnsureSockSend(l);
-          for j := 0 to l - 1 do
-            p[j] := PWordArray(v^.VUnicodeString)[j];
-        end;
+      vtUnicodeString,
       {$endif HASVARUSTRING}
+      vtWideString:
+        begin // constant text is expected to be pure ASCII-7
+          w := v^.VWideString;
+          if w <> nil then
+          begin
+            {$ifdef HASVARUSTRING}
+            if v^.VType = vtUnicodeString then
+              l := PStrLen(v^.VPChar - _STRLEN)^
+            else
+            {$endif HASVARUSTRING}
+              l := StrLenW(pointer(w));
+            p := EnsureSockSend(l);
+            for j := 0 to l - 1 do
+              p[j] := w[j];
+          end;
+        end;
       vtPChar:
         SockSend(v^.VPChar, StrLen(v^.VPChar));
       vtChar:
         SockSend(@v^.VChar, 1);
       vtWideChar:
-        SockSend(@v^.VWideChar, 1); // only ansi part of the character
+        SockSend(@v^.VWideChar, 1); // expects a 7-bit ASCII character
       vtInteger:
         begin
           t := StrInt32(@tmp[23], v^.VInteger);

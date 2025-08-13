@@ -1226,7 +1226,7 @@ begin
     Check(Cities[i].Name = ''); // FindHashedForAdding left void content
     Cities[i] := City; // should fill Cities[i] content by hand
   end;
-  Check(ACities.Count = 3);
+  CheckEqual(ACities.Count, 3);
   Check(City.Name = 'Iasi');
   Check(ACities.FindHashed(City) >= 0);
   // add CITIES_MAX items
@@ -1235,8 +1235,8 @@ begin
     City.Name := IntToString(i);
     City.Latitude := i * 3.14;
     City.Longitude := i * 6.13;
-    Check(ACities.FindHashedAndUpdate(City, true) = i + 2, 'multiple ReHash');
-    Check(ACities.FindHashed(City) = i + 2);
+    CheckEqual(ACities.FindHashedAndUpdate(City, true), i + 2, 'multiple ReHash');
+    CheckEqual(ACities.FindHashed(City), i + 2);
   end;
   ACities.Capacity := CITIES_MAX + 30; // will trigger HASH_PO2
   for i := 2001 to CITIES_MAX do
@@ -1246,8 +1246,8 @@ begin
     City.Longitude := i * 6.13;
     if i = 8703 then
       City.Latitude := i * 3.14;
-    Check(ACities.FindHashedAndUpdate(City, true) = i + 2);
-    Check(ACities.FindHashed(City.Name) = i + 2);
+    CheckEqual(ACities.FindHashedAndUpdate(City, true), i + 2);
+    CheckEqual(ACities.FindHashed(City.Name), i + 2);
   end;
   for i := 1 to CITIES_MAX do
   begin
@@ -5262,11 +5262,12 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
   end;
 
 var
-  i, j, k, len, len120, lenup100, CP, L: integer;
+  i, j, k, len, len120, lenup100, CP, L, lcid: integer;
   bak, bakj: AnsiChar;
   W: WinAnsiString;
   WS: WideString;
   SU, SU2: SynUnicode;
+  WU: array[0..3] of WideChar;
   str: string;
   ss: ShortString;
   up4: RawUcs4;
@@ -5276,7 +5277,9 @@ var
   PB: PByte;
   q: RawUtf8;
   Unic: RawByteString;
+  Ucs4: RawUcs4;
   WA, HasValidUtf8Avx2: Boolean;
+  lng: TLanguage;
   rb1, rb2, rb3: RawByteString;
   eng: TSynAnsiConvert;
 const
@@ -5289,6 +5292,8 @@ const
     'TEST', 'TEST', 'TES', 'TEST', 'TESTE', 't', 'U', '2', 'TESTe');
   CHINESE_TEXT: array[0..8] of byte = (
     $e4, $b8, $ad, $e6, $96, $87, $61, $62, $63);
+  UTF8_UCS4: array[0..11] of cardinal = ($01, $81, $801, $fff, $ffff, $10000,
+    UNICODE_MAX, UNICODE_MAX + 1, $1000000, $2000000, $10000000, $7f000000);
 begin
   // Trim*() functions
   CheckEqual(TrimU(''), '');
@@ -6137,34 +6142,34 @@ begin
     Check(not IsZero(pointer(W), length(W)));
     FillCharFast(pointer(W)^, length(W), 0);
     Check(IsZero(pointer(W), length(W)));
-    Check(FormatUtf8(U, []) = U);
+    CheckEqual(FormatUtf8(U, []), U);
     res := FormatSql(U, [], []); // Delphi 5 bug with high([])>0 :(
-    Check(length(res) = Length(U));
-    Check(res = U);
-    Check(FormatUtf8('%', [U]) = U);
-    Check(FormatSql('%', [U], []) = U);
+    CheckEqual(length(res), Length(U));
+    CheckEqual(res, U);
+    CheckEqual(FormatUtf8('%', [U]), U);
+    CheckEqual(FormatSql('%', [U], []), U);
     q := ':(' + QuotedStr(U) + '):';
-    Check(FormatSql('?', [], [U]) = q);
+    CheckEqual(FormatSql('?', [], [U]), q);
     res := 'ab' + U;
     q := 'ab' + q;
-    Check(FormatUtf8('ab%', [U]) = res);
-    Check(FormatUtf8('%%', ['ab', U]) = res);
-    Check(FormatSql('ab%', [U], []) = res);
-    Check(FormatSql('%%', ['ab', U], []) = res);
-    Check(FormatSql('ab?', [], [U]) = q);
-    Check(FormatSql('%?', ['ab'], [U]) = q);
+    CheckEqual(FormatUtf8('ab%', [U]), res);
+    CheckEqual(FormatUtf8('%%', ['ab', U]), res);
+    CheckEqual(FormatSql('ab%', [U], []), res);
+    CheckEqual(FormatSql('%%', ['ab', U], []), res);
+    CheckEqual(FormatSql('ab?', [], [U]), q);
+    CheckEqual(FormatSql('%?', ['ab'], [U]), q);
     res := res + 'cd';
     q := q + 'cd';
-    Check(FormatUtf8('ab%cd', [U]) = res);
-    Check(FormatSql('ab%cd', [U], []) = res);
-    Check(FormatUtf8('a%%cd', ['b', U]) = res);
-    Check(FormatSql('a%%cd', ['b', U], []) = res);
-    Check(FormatUtf8('%%%', ['ab', U, 'cd']) = res);
-    Check(FormatSql('ab?cd', [], [U]) = q);
-    Check(FormatSql('%?cd', ['ab'], [U]) = q);
-    Check(FormatSql('%?%', ['ab', 'cd'], [U]) = q);
-    Check(FormatSql('%?c%', ['ab', 'd'], [U]) = q);
-    Check(FormatSql('a%?%d', ['b', 'c'], [U]) = q);
+    CheckEqual(FormatUtf8('ab%cd', [U]), res);
+    CheckEqual(FormatSql('ab%cd', [U], []), res);
+    CheckEqual(FormatUtf8('a%%cd', ['b', U]), res);
+    CheckEqual(FormatSql('a%%cd', ['b', U], []), res);
+    CheckEqual(FormatUtf8('%%%', ['ab', U, 'cd']), res);
+    CheckEqual(FormatSql('ab?cd', [], [U]), q);
+    CheckEqual(FormatSql('%?cd', ['ab'], [U]), q);
+    CheckEqual(FormatSql('%?%', ['ab', 'cd'], [U]), q);
+    CheckEqual(FormatSql('%?c%', ['ab', 'd'], [U]), q);
+    CheckEqual(FormatSql('a%?%d', ['b', 'c'], [U]), q);
   end;
   SetLength(U, 4);
   U[1] := #$F0;
@@ -6176,6 +6181,9 @@ begin
     Check(PCardinal(SU)^ = $DCD2D863);
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
   Check(Utf8FirstLineToUtf16Length(Pointer(U)) = 2);
+  PCardinal(@WU)^ := 0;
+  if CheckEqual(Utf8ToWideChar(WU, pointer(U), SizeOf(WU), length(U), false), 4) then
+    Check(PCardinal(@WU)^ = $DCD2D863);
   U := SynUnicodeToUtf8(SU);
   if not CheckFailed(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
@@ -6194,6 +6202,14 @@ begin
   PB := pointer(res);
   FromVarString(PB, U2);
   check(U2 = U);
+  for i := 0 to high(UTF8_UCS4) do
+  begin
+    RawUcs4ToUtf8(@UTF8_UCS4[i], 1, U);
+    Check(U <> '');
+    Ucs4 := Utf8ToRawUcs4(U);
+    CheckEqual(length(Ucs4), 1);
+    CheckEqual(Ucs4[0], UTF8_UCS4[i]);
+  end;
   FastSetString(U, @CHINESE_TEXT, 9);
   CheckEqual(StrLen(pointer(U)), 9);
   SU := Utf8ToSynUnicode(U);
@@ -6242,10 +6258,53 @@ begin
     U2 := eng.AnsiToUtf8(RB1);
     CheckEqual(U2, U, 'AnsiToUtf8');
   end;
-  Check(CodePageToText(CP_UTF8) = 'utf8');
-  Check(CodePageToText(CP_UTF16) = 'utf16le');
-  Check(CodePageToText(CP_WINANSI) = 'ms1252');
-  Check(CodePageToText(54936) = 'gb18030');
+  CheckEqual(CodePageToText(CP_UTF8), 'utf8');
+  CheckEqual(CodePageToText(CP_UTF16), 'utf16le');
+  CheckEqual(CodePageToText(CP_WINANSI), 'ms1252');
+  CheckEqual(CodePageToText(54936), 'gb18030');
+  Check(LcidToLanguage(0) = lngUndefined);
+  CheckEqual(LANG_LCID[lngUndefined], LANG_ENGLISH_US);
+  CheckEqual(LANG_ISO[lngUndefined], '');
+  CheckEqual(LANG_TXT[lngUndefined], 'Undefined');
+  Check(LcidToLanguage(LANG_ENGLISH_US) = lngEnglish);
+  CheckEqual(LANG_LCID[lngEnglish], LANG_ENGLISH_US);
+  CheckEqual(LANG_TXT[lngEnglish], 'English');
+  Check(LcidToLanguage(LANG_CHINESE_SIMPLIFIED) = lngChinese);
+  CheckEqual(LANG_LCID[lngChinese], LANG_CHINESE_SIMPLIFIED);
+  CheckEqual(LANG_TXT[lngChinese], 'Chinese');
+  Check(LcidToLanguage(LANG_BOSNIAN_CYRILLIC) = lngBosnian);
+  CheckEqual(LANG_LCID[lngBosnian], LANG_BOSNIAN_CYRILLIC);
+  Check(LcidToLanguage(LANG_SERBIAN_NEUTRAL) = lngSerbian);
+  CheckEqual(LANG_LCID[lngSerbian], LANG_SERBIAN_NEUTRAL);
+  Check(LcidToLanguage(LANG_CROATIAN_NEUTRAL) = lngCroatian);
+  CheckEqual(LANG_LCID[lngCroatian], LANG_CROATIAN_NEUTRAL);
+  Check(IsoTextToLanguage('') = lngUndefined);
+  Check(IsoTextToLanguage('f') = lngUndefined);
+  Check(IsoTextToLanguage('fr') = lngFrench);
+  Check(IsoTextToLanguage('fre') = lngUndefined);
+  Check(IsoTextToLanguage(' fr') = lngUndefined);
+  for lng := succ(low(lng)) to high(lng) do
+  begin
+    lcid := LANG_LCID[lng];
+    Check(lcid <> 0);
+    CheckEqual(ord(LcidToLanguage(lcid)), ord(lng), 'lcid');
+    CheckEqual(ord(LcidToLanguage(lcid)), ord(lng), 'lcidcache');
+    if not (lng in lngBCS) then
+      CheckEqual(ord(LcidToLanguage(LANG_PRI[lng])), ord(lng), 'LANG_PRI');
+    U := LcidToText(lcid);
+    CheckUtf8(length(U) >= 3, U);
+    CheckEqual(U, LANG_TXT[lng]);
+    if lng <> high(lng) then
+      CheckUtf8(SortDynArrayAnsiString(U, LANG_TXT[succ(lng)]) < 0, U);
+    U := LANG_ISO[lng];
+    Check(U <> '');
+    Check(IdemPropNameU(U, @LANG_ISO_SHORT[lng], 2));
+    CheckEqual(ord(IsoTextToLanguage(U)), ord(lng), 'iso');
+    CheckEqual(ord(IsoTextToLanguage(U)), ord(lng), 'isocache');
+    UpperCaseSelf(U);
+    Check(IdemPropNameU(U, @LANG_ISO_SHORT[lng], 2));
+    CheckEqual(ord(IsoTextToLanguage(U)), ord(lng), 'isocache2');
+  end;
   Check(UnQuoteSqlStringVar('"one two"', U) <> nil);
   Check(U = 'one two');
   Check(UnQuoteSqlStringVar('one two', U) <> nil);
@@ -7607,9 +7666,10 @@ begin
   end;
   // some cross-platform Windows/Linux/BSD error detection
   Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
-  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb');
-  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecB');
-  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecB');
+  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb1');
+  Check(WinErrorConstant(1150)^ = 'OLD_WIN_VERSION', 'wecb2');
+  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecb3');
+  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecb4');
   Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
   Check(WinErrorConstant(234)^ = 'MORE_DATA', 'wecd');
   Check(WinErrorConstant(5)^ = 'ACCESS_DENIED', 'wece');
@@ -8706,7 +8766,7 @@ end;
 
 procedure TTestCoreBase.MimeTypes;
 const
-  MIMES: array[0 .. 27 * 2 - 1] of TFileName = (
+  MIM: array[0 .. 27 * 2 - 1] of RawUtf8 = (
     'png',      'image/png',
     'PNg',      'image/png',
     'gif',      'image/gif',
@@ -8759,7 +8819,6 @@ var
   fn: array[0..10] of TFileName;
   mp, mp2: TMultiPartDynArray;
   s, ct, mpc, mpct: RawUtf8;
-  b: RawByteString;
   st: THttpMultiPartStream;
   rfc2388: boolean;
 
@@ -8773,14 +8832,14 @@ var
     for i := 0 to high(mp2) do
       if i <= n then
       begin
-        CheckEqual(mp2[i].Name,    StringToUtf8(MIMES[i * 2]));
-        CheckEqual(mp2[i].Content, StringToUtf8(MIMES[i * 2 + 1]));
+        CheckEqual(mp2[i].Name,    MIM[i * 2]);
+        CheckEqual(mp2[i].Content, MIM[i * 2 + 1]);
       end
       else
       begin
         j := i - n - 1;
         CheckEqual(mp2[i].FileName, StringToUtf8(ExtractFileName(fn[j])));
-        CheckEqual(mp2[i].Content,  StringToUtf8(MIMES[j * 2 + 1]));
+        CheckEqual(mp2[i].Content,  MIM[j * 2 + 1]);
       end;
   end;
 
@@ -8899,9 +8958,9 @@ begin
   CheckEqual(GetMimeContentType('', 'toto.a', 'def3'), 'application/a');
   CheckEqual(GetMimeContentType('', 'toto.1', 'def4'), 'def4');
   CheckEqual(GetMimeContentType('', 'toto.ab', 'def5'), 'application/ab');
-  for i := 0 to high(MIMES) shr 1 do
-    CheckEqual(GetMimeContentType('', 'toto.' + MIMES[i * 2]),
-      ToUtf8(MIMES[i * 2 + 1]));
+  for i := 0 to high(MIM) shr 1 do
+    CheckEqual(GetMimeContentType('',
+      MakeString(['toto.', MIM[i * 2]])), MIM[i * 2 + 1]);
   FastSetString(s, 63);
   for i := 0 to high(BIN) do
   begin
@@ -9002,14 +9061,13 @@ begin
   begin
     mp := nil;
     mp2 := nil;
-    n := high(MIMES) shr 1;
+    n := high(MIM) shr 1;
     for i := 0 to n do
-      Check(MultiPartFormDataAddField(
-        StringToUtf8(MIMES[i * 2]), StringToUtf8(MIMES[i * 2 + 1]), mp));
+      Check(MultiPartFormDataAddField(MIM[i * 2], MIM[i * 2 + 1], mp));
     for i := 0 to high(fn) do
     begin
       fn[i] := WorkDir + 'mp' + IntToStr(i);
-      StringToUtf8(MIMES[i * 2 + 1], s);
+      s := MIM[i * 2 + 1];
       FileFromString(s, fn[i]);
       Check(MultiPartFormDataAddFile(fn[i], mp));
       fa := sysutils.FileAge(fn[i]);
@@ -9039,7 +9097,7 @@ begin
     st := THttpMultiPartStream.Create;
     st.Rfc2388NestedFiles := rfc2388;
     for i := 0 to n do
-      st.AddContent(StringToUtf8(MIMES[i * 2]), StringToUtf8(MIMES[i * 2 + 1]));
+      st.AddContent(MIM[i * 2], MIM[i * 2 + 1]);
     for i := 0 to high(fn) do
       st.AddFile('', fn[i]);
     st.Flush;
@@ -9662,11 +9720,12 @@ var
   end;
 
 var
-  v: tvalue;
+  v, kv: tvalue;
   s, k, key, val, u, json: RawUtf8;
   i, n: integer;
   i64: Int64;
   exists: boolean;
+  b: byte;
   sdk: TSDKey;
 begin
   SetDict;
@@ -9676,7 +9735,7 @@ begin
   finally
     dict.Free;
   end;
-  SetDict;
+  dict := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray), TypeInfo(TRawUtf8DynArray), True);
   try
     CheckEqual(dict.Count, 0);
     CheckEqual(dict.Capacity, 0);
@@ -9859,6 +9918,54 @@ begin
     Check(dict.FindAndCopy(sdk, v), 'ptInteger=search i only');
     Check(v = 10);
   finally
+    dict.Free;
+  end;
+  // validate variant as keys, with proper hashing of simple or complex types
+  {$ifdef HASGENERICS}
+  dict := TSynDictionary.New<variant, byte>;
+  {$else}
+  dict := TSynDictionary.Create(TypeInfo(TVariantDynArray), TypeInfo(TByteDynArray));
+  {$endif HASGENERICS}
+  try
+    kv := byte(1);
+    CheckEqual(TVarData(kv).VType, varByte);
+    b := 0;
+    Check(not dict.FindAndCopy(kv, b));
+    b := 255;
+    CheckEqual(dict.Add(kv, b), 0);
+    b := 0;
+    Check(dict.FindAndCopy(kv, b));
+    CheckEqual(b, 255);
+    kv := integer(1);
+    CheckEqual(TVarData(kv).VType, varInteger);
+    b := 0;
+    Check(dict.FindAndCopy(kv, b));
+    CheckEqual(b, 255);
+    RawUtf8ToVariant('toto', kv);
+    b := 0;
+    Check(not dict.FindAndCopy(kv, b));
+    b := 254;
+    CheckEqual(dict.Add(kv, b), 1);
+    b := 0;
+    Check(dict.FindAndCopy(kv, b));
+    CheckEqual(b, 254);
+    kv := word(1);
+    CheckEqual(TVarData(kv).VType, varWord);
+    Check(dict.FindAndCopy(kv, b));
+    CheckEqual(b, 255);
+    kv := _JsonFast('[1,2,{a:3}]');
+    b := 0;
+    Check(not dict.FindAndCopy(kv, b));
+    b := 253;
+    CheckEqual(dict.Add(kv, b), 2);
+    kv := WideString('toto');
+    CheckEqual(TVarData(kv).VType, varOleStr);
+    Check(dict.FindAndCopy(kv, b));
+    CheckEqual(b, 254);
+    kv := _JsonFast('[ 1, 2, {"a":3} ]');
+    Check(dict.FindAndCopy(kv, b), 'json should not matter');
+    CheckEqual(b, 253);
+finally
     dict.Free;
   end;
 end;
@@ -10299,6 +10406,7 @@ begin
   // validate Windows API error code recognition
   CheckEqualShort(WinApiErrorShort(122), 'ERROR_INSUFFICIENT_BUFFER');
   CheckEqualShort(WinApiErrorShort(1246), 'ERROR__CONTINUE');
+  CheckEqual(WinApiErrorUtf8(122), 'ERROR_INSUFFICIENT_BUFFER');
   Check(WinApiErrorString(122) = 'ERROR_INSUFFICIENT_BUFFER');
   Check(WinApiErrorString(1246) = 'ERROR__CONTINUE');
   // validate DotNet exceptions error code recognition

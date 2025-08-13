@@ -497,6 +497,12 @@ type
     // - otherwise, return false
     function GetItem(const V: variant; const Name: RawUtf8;
       out Value: variant; ValueAs: TBsonDocArrayConversion = asBsonVariant): boolean;
+    /// overriden method allowing direct TBsonVariant comparison
+    function IntCompare(const Instance, Another: TVarData;
+      CaseInsensitive: boolean): integer; override;
+    /// overriden method allowing direct TBsonVariant content hashing
+    function IntHash(Seed: cardinal; const V: TVarData; var Max: integer;
+      CaseInsensitive: boolean; Hasher: THasher): cardinal; override;
     /// convert a TBsonDocument binary content into a TBsonVariant of kind betDoc
     // - is the default property, so that you can write:
     // ! BsonVariantType[Bson(['BSON',_Arr(['awesome',5.05, 1986])])]
@@ -990,6 +996,9 @@ var
   // will be registered, since they are needed for any MongoDB / BSON process
   BsonVariantType: TBsonVariant;
 
+  /// copy of BsonVariantType.VarType value as 32-bit integer
+  BsonVariantVType: cardinal;
+
 /// ready-to-be displayed text of a TBsonElementType value
 function ToText(kind: TBsonElementType): PShortString; overload;
 
@@ -1239,8 +1248,7 @@ function BsonGetCount(BSON: PByte): integer;
 // - won't parse the input document, and even resize in-place if a single
 // name/textvalue pair is added, e.g. for ['$db', 'databasename']
 // - as usedd e.g. by TBsonVariant.AddItem()
-procedure BsonAddItem(var Bson: TBsonDocument;
-  const NameValuePairs: array of const);
+procedure BsonAddItem(var Bson: TBsonDocument; const NameValuePairs: array of const);
 
 /// convert a BSON document into a TDocVariant variant instance
 // - BSON should point to a "int32 e_list #0" BSON document
@@ -1660,7 +1668,7 @@ procedure TDecimal128.ToVariant(out Result: variant);
 var
   res: TBsonVariantData absolute Result;
 begin
-  res.VType := BsonVariantType.VarType;
+  res.VType := BsonVariantVType;
   res.VKind := betDecimal128;
   res.VBlob := nil;
   FastSetRawByteString(RawByteString(res.VBlob), @Bits, SizeOf(TDecimal128));
@@ -1935,19 +1943,21 @@ var
   txt: RawUtf8;
   b: PBsonVariantData;
   v64: Int64;
+  vt: cardinal;
   wasString: boolean;
 begin
   b := @value;
-  if b^.VType = varVariantByRef then
+  if cardinal(b^.VType) = varVariantByRef then
     b := PVarData(b)^.VPointer;
-  if (b^.VType = BsonVariantType.VarType) and
+  vt := b^.VType;
+  if (vt = BsonVariantVType) and
      (b^.VKind = betDecimal128) then
     Bits := PDecimal128(b^.VBlob)^.Bits
-  else if b^.VType = varWord64 then
+  else if vt = varWord64 then
     FromQWord(PVarData(b)^.VInt64)
   else if VariantToInt64(PVariant(b)^, v64) then
     FromInt64(v64)
-  else if b^.VType = varCurrency then
+  else if vt = varCurrency then
     FromCurr(PVariant(b)^.VCurrency)
   else
   begin
@@ -2086,7 +2096,7 @@ var
   res: TBsonVariantData absolute result;
 begin
   VarClear(result);
-  res.VType := BsonVariantType.VarType;
+  res.VType := BsonVariantVType;
   res.VKind := betObjectID;
   res.VObjectID := self;
 end;
@@ -2111,12 +2121,12 @@ var
   wasString: boolean;
 begin
   b := @value;
-  if b^.VType = varVariantByRef then
+  if cardinal(b^.VType) = varVariantByRef then
     b := PVarData(b)^.VPointer;
-  if (b^.VType = BsonVariantType.VarType) and
+  if (cardinal(b^.VType) = BsonVariantVType) and
      (b^.VKind = betObjectID) then
   begin
-    self := b^.VObjectID; // direct retrieval from 12-byte binary content
+    self := b^.VObjectID; // direct 12-byte binary content copy
     result := true;
   end
   else
@@ -2179,10 +2189,10 @@ var
   b: PBsonVariantData;
 begin
   b := @V;
-  if b^.VType = varVariantByRef then
+  if cardinal(b^.VType) = varVariantByRef then
     b := PVarData(b)^.VPointer;
   result := (self <> nil) and
-            (b^.VType = VarType) and
+            (cardinal(b^.VType) = VarType) and
             (b^.VKind = Kind);
 end;
 
@@ -2194,14 +2204,57 @@ begin
             (length(RawByteString(b.VBlob)) <= 5);
 end;
 
+function TBsonVariant.IntCompare(const Instance, Another: TVarData;
+  CaseInsensitive: boolean): integer;
+var
+  a: TBsonVariantData absolute Instance;
+  b: TBsonVariantData absolute Another;
+  vt: cardinal;
+begin
+  vt := cardinal(VarType);
+  if (cardinal(Instance.VType) = vt) and
+     (cardinal(Another.VType)  = vt) and
+     (a.VKind = b.VKind) then // same exact type
+    if a.VKind = betObjectID then
+      result := MemCmp(@a.VObjectID, @b.VObjectID, SizeOf(a.VObjectID))
+    else
+      result := SortDynArrayAnsiString(a.VBlob, b.VBlob) // no CaseInsensitive
+  else // inlined inherited
+    result := VariantCompAsText(@Instance, @Another, CaseInsensitive);
+end;
+
+function TBsonVariant.IntHash(Seed: cardinal; const V: TVarData;
+  var Max: integer; CaseInsensitive: boolean; Hasher: THasher): cardinal;
+var
+  d: TBsonVariantData absolute V;
+  p: pointer;
+  l: PtrInt;
+begin
+  if d.VKind = betObjectID then
+  begin
+    p := @d.VObjectID;
+    l := SizeOf(d.VObjectID);
+  end
+  else
+  begin
+    p := d.VBlob;
+    l := length(RawByteString(d.VBlob));
+    if (l > Max) and
+       (Max > 0) then // don't hash more than needed
+      l := Max;
+  end;
+  dec(Max, l);
+  result := Hasher(Seed, p, l); // no CaseInsensitive
+end;
+
 function TBsonVariant.ToBlob(const V: Variant; var Blob: RawByteString): boolean;
 var
   b: PBsonVariantData;
 begin
   b := @V;
-  if b^.VType = varVariantByRef then
+  if cardinal(b^.VType) = varVariantByRef then
     b := PVarData(b)^.VPointer;
-  result := (b^.VType = VarType) and
+  result := (cardinal(b^.VType) = cardinal(VarType)) and
             (b^.VKind = betBinary);
   if result then
     if (b^.VBlob = nil) or
@@ -2217,17 +2270,19 @@ procedure TBsonVariant.AddItem(var V: variant;
 var
   doc: TBsonDocument;
   b: PBsonVariantData;
+  vt: cardinal;
 begin
   b := @V;
-  if b^.VType = varVariantByRef then
+  if cardinal(b^.VType) = varVariantByRef then
     b := PVarData(b)^.VPointer;
-  if (b^.VType = VarType) and
+  vt := b^.VType;
+  if (vt = cardinal(VarType)) and
      (b^.VKind = betDoc) then
     // in-place add the new fields to the TBsonVariant document
     BsonAddItem(TBsonDocument(b^.VBlob), NameValuePairs)
   else
   begin
-    if (b^.VType = DocVariantVType) and
+    if (vt = DocVariantVType) and
        not PDocVariantData(b)^.IsArray then
     begin
       // use the existing TDocVariant object content
@@ -2248,9 +2303,9 @@ var
   b: PBsonVariantData;
 begin
   b := @V;
-  if b^.VType = varVariantByRef then
+  if cardinal(b^.VType) = varVariantByRef then
     b := PVarData(b)^.VPointer;
-  if (b^.VType = VarType) and
+  if (cardinal(b^.VType) = cardinal(VarType)) and
      (b^.VKind in [betDoc, betArray]) then
   begin
     {%H-}item.FromBsonVariant(PVarData(b));
@@ -2669,7 +2724,7 @@ begin
   end
   else
   begin
-    if src.VType <> VarType then
+    if cardinal(src.VType) <> cardinal(VarType) then
       RaiseCastError;
     if (src.VKind = betObjectID) and
        (AVarType in [varDate, varDouble]) then
@@ -2828,6 +2883,7 @@ procedure TBsonElement.ToVariant(var result: variant;
 var
   res: TVarData absolute result;
   resBSON: TBsonVariantData absolute result;
+  vt: cardinal;
 begin
   VarClear(result);
   res.VAny := nil; // avoid GPF below in res.VAny or resBSON.VBlob/VText
@@ -2867,12 +2923,14 @@ begin
       res.VInt64 := PInt64(Element)^;
   // betNull, betDeprecatedUndefined, betMinKey or betMaxKey has no data
   end;
-  res.VType := BSON_ELEMENTTYPES[Kind];
-  if res.VType = varUnknown then // no exact equivalency to a standard variant
+  vt := BSON_ELEMENTTYPES[Kind];
+  if vt = varUnknown then // no exact equivalency as variant
   begin
-    resBSON.VType := BsonVariantType.VarType;
+    resBSON.VType := BsonVariantVType;
     resBSON.VKind := Kind;
-  end;
+  end
+  else
+    res.VType := vt;
 end;
 
 function TBsonElement.ToInteger(const default: Int64): Int64;
@@ -3095,7 +3153,7 @@ label
   str, st2;
 begin
   v := @aValue;
-  while v.VType = varVariantByRef do
+  while cardinal(v.VType) = varVariantByRef do
     v := v.VPointer;
   FillCharFast(self, SizeOf(self), 0);
   Name := pointer(aName);
@@ -3168,7 +3226,7 @@ str:    Kind := betString;
         goto st2;
       end;
   else
-    if vt = cardinal(BsonVariantType.VarType) then // inlined FromBsonVariant()
+    if vt = BsonVariantVType then // inlined FromBsonVariant()
     begin
       Kind := vbson.VKind;
       if Kind = betObjectID then
@@ -3559,10 +3617,13 @@ begin
 end;
 
 procedure TBsonWriter.BsonDocumentBegin;
+var
+  ndx: PtrInt;
 begin
-  if fDocumentStack >= Length(fDocumentStackOffset) then
-    SetLength(fDocumentStackOffset, NextGrow(fDocumentStack));
-  fDocumentStackOffset[fDocumentStack] := TotalWritten;
+  ndx := fDocumentStack;
+  if ndx >= Length(fDocumentStackOffset) then
+    SetLength(fDocumentStackOffset, NextGrow(ndx));
+  fDocumentStackOffset[ndx] := TotalWritten;
   inc(fDocumentStack);
   Write4(0); // will be overwritten by BsonDocumentEnd
 end;
@@ -3586,21 +3647,27 @@ end;
 
 procedure TBsonWriter.BsonDocumentEnd(
   CloseNumber: integer; WriteEndingZero: boolean);
+var
+  c, o: PtrInt;
 begin
   while CloseNumber > 0 do
   begin
     if (CloseNumber > 1) or
        WriteEndingZero then
       Write1(0);
-    if fDocumentStack = 0 then
+    o := fDocumentStack;
+    if o = 0 then
       EBsonException.RaiseUtf8('Unexpected %.BsonDocumentEnd', [self]);
-    dec(fDocumentStack);
-    if fDocumentCount >= Length(fDocument) then
-      SetLength(fDocument, NextGrow(fDocumentCount));
-    with fDocument[fDocumentCount] do
+    dec(o);
+    fDocumentStack := o;
+    o := fDocumentStackOffset[o];
+    c := fDocumentCount;
+    if c >= Length(fDocument) then
+      SetLength(fDocument, NextGrow(c));
+    with fDocument[c] do
     begin
-      Offset := fDocumentStackOffset[fDocumentStack];
-      Length := TotalWritten - Offset;
+      Offset := o;
+      Length := TotalWritten - o;
     end;
     inc(fDocumentCount);
     dec(CloseNumber);
@@ -3648,12 +3715,14 @@ begin
     {$ifdef FPC} vtQWord, {$endif}
     vtInt64:
       BsonWrite(name, value.VInt64^);
+    vtAnsiString:
+      BsonWriteUtf8(name, RawUtf8(value.VAnsiString));
     vtString,
-    vtAnsiString,
     {$ifdef HASVARUSTRING} vtUnicodeString, {$endif}
     vtPChar,
     vtChar,
     vtWideChar,
+    vtPWideChar,
     vtWideString:
       begin
         VarRecToTempUtf8(@value, tmp);
@@ -3669,39 +3738,12 @@ end;
 procedure TBsonWriter.BsonWriteVariant(const name: RawUtf8; const value: variant);
 var
   v: TVarData absolute value;
-
-  procedure WriteComplex; // use a local temp: RawUtf8
-  var
-    temp: RawUtf8;
-    json: PUtf8Char;
-  begin
-    case v.VType of
-    {$ifdef HASVARUSTRING}
-      varUString:
-        begin
-          RawUnicodeToUtf8(v.VAny, length(UnicodeString(v.VAny)), temp);
-          BsonWriteText(name, pointer(temp), length(temp));
-        end;
-    {$endif HASVARUSTRING}
-      varOleStr:
-        begin
-          RawUnicodeToUtf8(v.VAny, length(WideString(v.VAny)), temp);
-          BsonWriteText(name, pointer(temp), length(temp));
-        end;
-    else
-      begin
-        _VariantSaveJson(value, twJsonEscape, temp);
-        json := pointer(temp);
-        BsonWriteFromJson(name, json, nil);
-        if json = nil then
-          EBsonException.RaiseUtf8(
-            '%.BsonWriteVariant(VType=%)', [self, v.VType]);
-      end;
-    end;
-  end;
-
+  vt: cardinal;
+  tmp: pointer; // fake RawUtf8
+  json: PUtf8Char;
 begin
-  case v.VType of
+  vt := v.VType;
+  case vt of
     varEmpty,
     varNull:
       BsonWrite(name, betNull);
@@ -3734,27 +3776,54 @@ begin
       // will recognize TJsonWriter.AddDateTime/WrBase64 patterns
       BsonWriteUtf8OrDecode(name, v.VAny, length(RawUtf8(v.VAny)));
   else
-    if v.VType = varVariantByRef then
+    if vt = varVariantByRef then
       BsonWriteVariant(name, PVariant(v.VPointer)^)
-    else if v.VType = BsonVariantType.VarType then
+    else if vt = BsonVariantVType then
       BsonWrite(name, TBsonVariantData(v))
-    else if v.VType = DocVariantType.VarType then
+    else if vt = DocVariantVType then
       BsonWrite(name, TDocVariantData(v))
     else
-      WriteComplex;
+    begin
+      tmp := nil;
+      try
+        case vt of
+        {$ifdef HASVARUSTRING}
+          varUString:
+            RawUnicodeToUtf8(v.VAny, length(UnicodeString(v.VAny)), RawUtf8(tmp));
+        {$endif HASVARUSTRING}
+          varOleStr:
+            RawUnicodeToUtf8(v.VAny, length(WideString(v.VAny)), RawUtf8(tmp));
+        else
+          begin
+            _VariantSaveJson(value, twJsonEscape, RawUtf8(tmp));
+            json := tmp;
+            BsonWriteFromJson(name, json, nil);
+            if json = nil then
+              EBsonException.RaiseUtf8(
+                '%.BsonWriteVariant(VType=%)', [self, vt]);
+            exit;
+          end;
+        end;
+        BsonWriteText(name, tmp, PStrLen(PAnsiChar(tmp) - _STRLEN)^);
+      finally
+        FastAssignNew(tmp);
+      end;
+    end;
   end;
 end;
 
 procedure TBsonWriter.BsonWriteDoc(const doc: TDocVariantData);
 var
   Name: RawUtf8;
+  vt: cardinal;
   i: PtrInt;
 begin
   BsonDocumentBegin;
-  if doc.VarType > varNull then // null,empty will write {}
-    if doc.VarType <> DocVariantType.VarType then
+  vt := doc.VarType;
+  if vt > varNull then // null,empty will write {}
+    if vt <> DocVariantVType then
       EBsonException.RaiseUtf8(
-        '%.BsonWriteDoc(VType=%)', [self, doc.VarType])
+        '%.BsonWriteDoc(VType=%)', [self, vt])
     else
       for i := 0 to doc.Count - 1 do
       begin
@@ -3773,13 +3842,15 @@ end;
 procedure TBsonWriter.BsonWriteDoc(const doc: variant);
 var
   b: PBsonVariantData;
+  vt: cardinal;
 begin
   b := @doc;
-  while b^.VType = varVariantByRef do
+  while cardinal(b^.VType) = varVariantByRef do
     b := PVarData(b)^.VPointer;
-  if b^.VType = DocVariantType.VarType then
+  vt := b^.VType;
+  if vt = DocVariantVType then
     BsonWriteDoc(PDocVariantData(b)^)
-  else if (b^.VType = BsonVariantType.VarType) and
+  else if (vt = BsonVariantVType) and
           (b^.VKind in [betDoc, betArray]) and
           (b^.VBlob <> nil) then
     WriteBinary(RawByteString(b^.VBlob))
@@ -4157,8 +4228,7 @@ begin
     inc(result);
 end;
 
-procedure BsonAddItem(var Bson: TBsonDocument;
-  const NameValuePairs: array of const);
+procedure BsonAddItem(var Bson: TBsonDocument; const NameValuePairs: array of const);
 var
   W: TBsonWriter;
   name: RawUtf8;
@@ -4370,7 +4440,7 @@ begin
   VarClear(result);
   with TBsonVariantData(result) do
   begin
-    VType := BsonVariantType.VarType;
+    VType := BsonVariantVType;
     VKind := betJS;
     VText := nil; // avoid GPF
     RawUtf8(VText) := JS;
@@ -4384,7 +4454,7 @@ begin
   VarClear(result);
   with TBsonVariantData(result) do
   begin
-    VType := BsonVariantType.VarType;
+    VType := BsonVariantVType;
     VKind := betDeprecatedJSScope;
     JSLen := Length(JS) + 1;                            // string = int32 text#0
     Len := SizeOf(integer) * 2 + JSLen + length(Scope); // int32 string document
@@ -4417,15 +4487,17 @@ end;
 function Bson(const doc: TDocVariantData): TBsonDocument;
 var
   tmp: TTextWriterStackBuffer;
+  vt: cardinal;
 begin
-  if doc.VarType = varVariantByRef then
+  vt := doc.VarType;
+  if vt = varVariantByRef then
   begin
     result := Bson(PDocVariantData(TVarData(doc).VPointer)^);
     exit;
   end;
-  if doc.VarType <> DocVariantType.VarType then
+  if vt <> DocVariantVType then
     EBsonException.RaiseUtf8(
-      'Bson(doc) is % not a TDocVariant', [doc.VarType]);
+      'Bson(doc) is % not a TDocVariant', [vt]);
   with TBsonWriter.Create(tmp{%H-}) do
   try
     BsonWriteDoc(doc);
@@ -4644,7 +4716,7 @@ begin
       exit;
     end;
   end;
-  FormatParams(Format, Args, Params, {json=}true, json);
+  FormatParams(Format, @Args[0], @Params[0], high(Args), high(Params), {json=}true, json);
   UniqueRawUtf8(json); // ensure Format is untouched if Args=[]
   k := JsonBufferToBsonDocument(pointer(json), result);
   if kind <> nil then
@@ -4746,6 +4818,7 @@ initialization
   Assert(@PBsonVariantData(nil)^.VBlob = @PVarData(nil)^.VAny);
   Assert(@PBsonVariantData(nil)^.VText = @PVarData(nil)^.VAny);
   BsonVariantType := SynRegisterCustomVariantType(TBsonVariant) as TBsonVariant;
+  BsonVariantVType := BsonVariantType.VarType;
   InitBsonObjectIDComputeNew;
 
 
