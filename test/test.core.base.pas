@@ -4621,6 +4621,7 @@ begin
   DoubleToShort(@a, d);
   Check(IdemPropName(a, 'Nan'));
   Check(ShortToFloatNan(a) = fnNan);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnNan]);
   s := 'INF';
   d := GetExtended(pointer(s), err);
   CheckEqual(err, 0, s);
@@ -4628,6 +4629,7 @@ begin
   DoubleToShort(@a, d);
   Check((a = '+Inf') or (a = 'INF'));
   Check(ShortToFloatNan(a) = fnInf);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnInf]);
   s := '-INfinity';
   d := GetExtended(pointer(s), err);
   CheckEqual(err, 0, s);
@@ -4635,6 +4637,7 @@ begin
   DoubleToShort(@a, d);
   Check(IdemPropName(a, '-Inf'));
   Check(ShortToFloatNan(a) = fnNegInf);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnNegInf]);
   Check(IsAnsiCompatible('t'));
   Check(IsAnsiCompatible('te'));
   Check(IsAnsiCompatible('tes'));
@@ -8919,7 +8922,26 @@ begin
     'Feedfetcher-Google; (+http://www.google.com/feedfetcher.html; 1 subscribers; feed-id=728742641706423)'));
   Check(IsHttpUserAgentBot(
     'Python-urllib/3.4'));
-  // some HTTP methods
+  // some HTTP headers processing methods
+  Check(not IsInvalidHttpHeader(''));
+  Check(not IsInvalidHttpHeader('a=b'));
+  Check(not IsInvalidHttpHeader('a'#13#10));
+  Check(not IsInvalidHttpHeader('a'#13#10'b'#13#10));
+  Check(not IsInvalidHttpHeader('a'#13#10'b'));
+  Check(IsInvalidHttpHeader(#13#10'a'#13#10));
+  Check(IsInvalidHttpHeader(#10'a'#13#10));
+  Check(IsInvalidHttpHeader(#13#10#13#10'a'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  Check(IsInvalidHttpHeader('a'#10'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10#13#10'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#13#10#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10#13'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#13'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#13#13));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#13));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  s := 'toto'#13#10;
+  Check(not IsInvalidHttpHeader(s));
   CheckEqual(PurgeHeaders(''), '');
   CheckEqual(PurgeHeaders('toto'), 'toto');
   CheckEqual(PurgeHeaders(#13#10), #13#10);
@@ -8930,7 +8952,6 @@ begin
   CheckEqual(PurgeHeaders('toto', true), 'toto');
   CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10, true), 'toto');
   CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10, true), 'toto');
-  s := 'toto'#13#10;
   CheckEqual(PurgeHeaders(s), s);
   CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10), s);
   CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10), s);
@@ -8938,6 +8959,15 @@ begin
     'accept: all'#13#10'toto'#13#10'content-length: 10'#13#10), s);
   CheckEqual(PurgeHeaders(
     'accept: all'#13#10'content-length: 10'#13#10'toto'#13#10), s);
+  CheckEqual(DeleteHeader(s, ''), s);
+  CheckEqual(DeleteHeader('content-length: 10'#13#10'toto'#13#10, 'content-length'), s);
+  CheckEqual(DeleteHeader('toto'#13#10'content-length: 10'#13#10, 'Content-Length'), s);
+  CheckEqual(DeleteHeader(Join([s, s, s, 'Auth: 1']), 'auth'), Join([s, s, s]));
+  CheckEqual(DeleteHeader(Join(['Auth: 0'#13#10, s, s, s]), 'auth'), Join([s, s, s]));
+  CheckEqual(DeleteHeader(Join(['Auth: 0'#13#10, s, s, s, 'Auth: 1']), 'auth'), Join([s, s, s]));
+  CheckEqual(DeleteHeader(Join([s, s, s, 'Auth: 2'#13#10, s]), 'auth'), Join([s, s, s, s]));
+  CheckEqual(DeleteHeader(Join([s, s, s, 'Auth: 2'#13#10, 'ab']), 'auth'), Join([s, s, s, 'ab']));
+  // some HTTP methods
   Check(HttpMethodWithNoBody('HEAD'));
   Check(HttpMethodWithNoBody('head'));
   Check(HttpMethodWithNoBody('HEADER'));

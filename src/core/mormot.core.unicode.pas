@@ -272,7 +272,6 @@ function IsValidUtf8NotVoid(source: PUtf8Char; len: PtrInt): boolean; overload;
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding and no #0 within
 // - will also refuse #0 characters within the buffer even on AVX2
 function IsValidUtf8NotVoid(const source: RawByteString): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding
 // - will stop when the buffer contains #0
@@ -3381,12 +3380,6 @@ begin
     IsValidUtf8Buffer(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
 end;
 
-function IsValidUtf8NotVoid(const source: RawByteString): boolean;
-begin
-  result := (source = '') or
-    IsValidUtf8NotVoid(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
-end;
-
 {$ifdef ASMX64AVXNOCONST}
 function IsValidUtf8NotVoid(source: PUtf8Char; len: PtrInt): boolean;
 begin
@@ -3403,6 +3396,12 @@ begin
   result := IsValidUtf8Pas(source, len);
 end;
 {$endif ASMX64AVXNOCONST}
+
+function IsValidUtf8NotVoid(const source: RawByteString): boolean;
+begin
+  result := (source = '') or
+    IsValidUtf8NotVoid(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
+end;
 
 procedure DetectRawUtf8(var source: RawByteString);
 begin
@@ -9038,38 +9037,20 @@ function GetLineSize(P, PEnd: PUtf8Char): PtrUInt;
 var
   c: byte;
 begin
-  {$ifdef CPUX64}
   if PEnd <> nil then
   begin
     result := BufferLineLength(P, PEnd); // use branchless SSE2 on x86_64
     exit;
   end;
   result := PtrUInt(P) - 1;
-  {$else}
-  result := PtrUInt(P) - 1;
-  if PEnd <> nil then
-    repeat // inlined BufferLineLength()
-      inc(result);
-      if PtrUInt(result) < PtrUInt(PEnd) then
-      begin
-        c := PByte(result)^;
-        if (c > 13) or
-           ((c <> 10) and
-            (c <> 13)) then
-          continue;
-      end;
-      break;
-    until false
-  else
-  {$endif CPUX64}
-    repeat // inlined BufferLineLength() ending at #0 for PEnd=nil
-      inc(result);
-      c := PByte(result)^;
-      if (c > 13) or
-         ((c <> 0) and (c <> 10) and (c <> 13)) then
-        continue;
-      break;
-    until false;
+  repeat // inlined BufferLineLength() ending at #0 for PEnd=nil
+    inc(result);
+    c := PByte(result)^;
+    if (c > 13) or
+       ((c <> 0) and (c <> 10) and (c <> 13)) then
+      continue;
+    break;
+  until false;
   dec(result, PtrUInt(P)); // returns length
 end;
 

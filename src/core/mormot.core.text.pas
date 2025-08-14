@@ -113,7 +113,7 @@ procedure GetNextItemShortString(var P: PUtf8Char; Dest: PShortString;
 // - if any Values[] item is '', no line is added
 // - otherwise, appends 'Caption: Value', with Caption taken from CSV
 procedure AppendCsvValues(const Csv: string; const Values: array of string;
-  var result: string; const AppendBefore: string = #13#10);
+  var result: string; const AppendBefore: string = EOL);
 
 /// return a CSV list of the iterated same value
 // - e.g. CsvOfValue('?',3)='?,?,?'
@@ -1462,7 +1462,6 @@ procedure ExtendedToStr(Value: TSynExtended; Precision: integer;
 // "-Infinity", and "NaN" for corresponding IEEE special values
 // - result is a PShortString either over tmp, or JSON_NAN[]
 function FloatToJsonNan(s: PShortString): PShortString;
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a floating-point value to its JSON text equivalency
 // - depending on the platform, it may either call str() or FloatToText()
@@ -1940,7 +1939,7 @@ procedure Prepend(var Text: RawByteString; const Args: array of const); overload
 /// append some text to a RawUtf8, ensuring previous text is separated with CRLF
 // - could be used e.g. to update HTTP headers
 procedure AppendLine(var Text: RawUtf8; const Args: array of const;
-  const Separator: RawUtf8 = #13#10);
+  const Separator: RawUtf8 = EOL);
 
 /// append some path parts into a single file name with proper path delimiters
 // - set EndWithDelim=true if you want to create e.g. a full folder name
@@ -2361,9 +2360,9 @@ function StatusCodeToErrorMsg(Code: integer): RawUtf8;
 function StatusCodeIsSuccess(Code: integer): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// check the supplied HTTP header to not contain more than one EOL
+/// check the supplied HTTP header to contain only #13#10 EOL
 // - to avoid unexpected HTTP body injection, e.g. from unsafe business code
-function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
+function IsInvalidHttpHeader(const Headers: RawUtf8): boolean;
 
 
 { **************** Hexadecimal Text And Binary Conversion }
@@ -2940,7 +2939,7 @@ begin // caller should ensure that (P <> nil) and (Sep > ' ')
     dec(E); // trim right
   Item := P;
   Len := E - P;
-  if (PWord(S)^ = CRLFW) or
+  if (PWord(S)^ = EOLW) or
      (S^ = Sep) then
     P := S + 1
   else if S^ = #10 then
@@ -4222,7 +4221,7 @@ begin
   B[1] := #10;
   inc(B);
   {$else}          // mimics CRLF = #13#10 on Windows
-  PWord(B + 1)^ := $0a0d;
+  PWord(B + 1)^ := EOLW;
   inc(B, 2);
   {$endif OSPOSIX}
 end;
@@ -6558,7 +6557,7 @@ begin
   fWriter.OnFlushToStream := FlushToStream; // register
   if twoEndOfLineCRLF in fWriter.CustomOptions then
   begin
-    fWriteLineFeed := $0a0d; // #13#10 - typical on Windows
+    fWriteLineFeed := EOLW; // #13#10 - typical on Windows
     fWriteLineFeedLen := 2;
   end
   else
@@ -7282,6 +7281,7 @@ end;
 
 function Utf8ToFloatNan(s: PUtf8Char; len: PtrInt): TFloatNan;
 begin
+  result := fnNumber;
   case len of
     3:
       case PInteger(s)^ and $dfdfdf of
@@ -7289,8 +7289,6 @@ begin
           result := fnNan;
         ord('I') + ord('N') shl 8 + ord('F') shl 16:
           result := fnInf;
-      else
-        result := fnNumber;
       end;
     4:
       case PInteger(s)^ and $dfdfdfff of
@@ -7298,11 +7296,7 @@ begin
           result := fnInf;
         ord('-') + ord('I') shl 8 + ord('N') shl 16 + ord('F') shl 24:
           result := fnNegInf;
-      else
-        result := fnNumber;
       end;
-  else
-    result := fnNumber;
   end;
 end;
 
@@ -7332,18 +7326,22 @@ begin
 end;
 
 function FloatToJsonNan(s: PShortString): PShortString;
+var
+  fn: TFloatNan;
 begin
-  case PInteger(s)^ and $ffdfdfdf of
+  result := s;
+  case PInteger(s)^ and $dfdfdfff of
     3 + ord('N') shl 8 + ord('A') shl 16 + ord('N') shl 24:
-      result := @JSON_NAN[fnNan];
+      fn := fnNan;
     3 + ord('I') shl 8 + ord('N') shl 16 + ord('F') shl 24,
-    4 + ord('+') shl 8 + ord('I') shl 16 + ord('N') shl 24:
-      result := @JSON_NAN[fnInf];
-    4 + ord('-') shl 8 + ord('I') shl 16 + ord('N') shl 24:
-      result := @JSON_NAN[fnNegInf];
+    4 + (ord('+') and $df) shl 8 + ord('I') shl 16 + ord('N') shl 24:
+      fn := fnInf;
+    4 + (ord('-') and $df) shl 8 + ord('I') shl 16 + ord('N') shl 24:
+      fn := fnNegInf;
   else
-    result := s;
+    exit;
   end;
+  result := @JSON_NAN[fn];
 end;
 
 function ExtendedToJson(tmp: PShortString; Value: TSynExtended;
@@ -8795,8 +8793,9 @@ begin
   aValue := 0;
   result := false;
   if (aIP = nil) or
-     (IdemPChar(aIP, '127.0.0.1') and
-      (aIP[9] = #0)) then
+     ((PCardinalArray(aIP)[0] = HOST_127) and    // 127.
+      (PCardinalArray(aIP)[1] = HOST_127_4) and  // 0.0.
+      (PWordArray(aIP)[4] = ord('1'))) then      // 1
     exit;
   for i := 0 to 3 do
   begin
@@ -8807,11 +8806,10 @@ begin
       exit;
     b[i] := c;
   end;
-  if PCardinal(@b)^ <> $0100007f then // may be e.g. '127.000.000.001'
-  begin
-    aValue := PCardinal(@b)^;
-    result := true;
-  end;
+  if PCardinal(@b)^ = $0100007f then // may be e.g. '127.000.000.001'
+    exit;
+  aValue := PCardinal(@b)^;
+  result := true;
 end;
 
 function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean;
@@ -10664,21 +10662,31 @@ begin
             (Code < HTTP_BADREQUEST); // 200..399
 end;
 
-function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
+function IsInvalidHttpHeader(const Headers: RawUtf8): boolean;
 var
-  i: PtrInt;
-  c: cardinal;
+  p, pend: PUtf8Char;
+  l: PtrInt;
 begin
-  result := true;
-  for i := 0 to headlen - 3 do
-  begin
-    c := PCardinal(head + i)^;
-    if (c = $0a0d0a0d) or
-       (Word(c) = $0d0d) or
-       (Word(c) = $0a0a) then
-      exit;
-  end;
   result := false;
+  p := pointer(Headers);
+  if p = nil then
+    exit;
+  pend := p + PStrLen(p - _STRLEN)^;
+  repeat
+    if p^ = #0 then
+      exit; // clean ending
+    l := BufferLineLength(p, pend); // use SSE2 on x86_64
+    if l = 0 then
+      break; // void line is only for the end of headers
+    inc(p, l);
+    if PWord(p)^ = EOLW then
+      inc(p, 2)
+    else if p^ = #0 then
+      exit // allow ending without any CRLF
+    else
+      break;
+  until false;
+  result := true;
 end;
 
 
