@@ -549,6 +549,8 @@ type
     hfSHA3_384,
     hfShake128,
     hfShake256);
+  /// a pointer to one of our hash algorithms
+  PHashAlgo = ^THashAlgo;
 
   /// set of algorithms available for HashFile/HashFull functions and TSynHasher object
   THashAlgos = set of THashAlgo;
@@ -577,8 +579,10 @@ type
   TSynHasher = object
   {$endif USERECORDWITHMETHODS}
   private
-    fAlgo: THashAlgo;
     ctxt: array[1..SHA3_CONTEXT_SIZE] of byte; // enough space for all algorithms
+    fAlgo: THashAlgo; // ctxt is better aligned if put first
+    procedure CopyTo(out aHasher: TSynHasher); {$ifdef FPC} inline; {$endif}
+    procedure Clear;                           {$ifdef FPC} inline; {$endif}
   public
     /// initialize the internal hashing structure for a specific algorithm
     // - returns false on unknown/unsupported algorithm
@@ -607,9 +611,24 @@ type
     // - returns the written aDigest size in bytes
     function Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer;
       out aDigest: THash512Rec): integer; overload;
+    /// one-step hash computation of several buffers as a binary buffer
+    // - returns the written aDigest size in bytes
+    function Full(aAlgo: THashAlgo; const aBuffer: array of RawByteString;
+      out aDigest: THash512Rec): integer; overload;
     /// fill a buffer with the MGF1 seed deriviation, following RFC 2437
     // - a Mask Generation Function expands aSeed/aSeedLen into aDestLen buffer
     function Mgf1(aAlgo: THashAlgo; aSeed: pointer; aSeedLen, aDestLen: PtrUInt): RawByteString;
+    /// compute the Unix crypt hash of a given password
+    // - currently implement SHA-256/SHA-512 as defined in
+    // https://www.akkadia.org/drepper/SHA-crypt.txt
+    function UnixCryptHash(aAlgo: THashAlgo; const aPassword: RawUtf8;
+      aRounds: cardinal = 535000; aSaltSize: cardinal = 8;
+      aSalt: RawUtf8 = ''): RawUtf8;
+    /// check the Unix crypt hash of a given password
+    // - as previously encoded by UnixCryptHash() method
+    // - can return the algorithm decoded from '$algo$salt$checksum' format
+    function UnixCryptVerify(const aPassword, aHash: RawUtf8;
+      aAlgo: PHashAlgo = nil): boolean;
     /// returns the number of bytes of the hash of the current Algo
     function HashSize: integer;
     /// the hash algorithm used by this instance
@@ -3783,6 +3802,24 @@ begin
   end;
 end;
 
+const
+  HASH_INSTANCE: array[THashAlgo] of word = (
+    SizeOf(TMd5),    SizeOf(TSha1),       SizeOf(TSha256), SizeOf(TSha384),
+    SizeOf(TSha512), SizeOf(TSha512_256), SizeOf(TSha3),   SizeOf(TSha3),
+    SizeOf(TSha256), SizeOf(TSha3),       SizeOf(TSha3),   SizeOf(TSha3),
+    SizeOf(TSha3));
+
+procedure TSynHasher.CopyTo(out aHasher: TSynHasher);
+begin
+  aHasher.fAlgo := fAlgo;
+  MoveFast(ctxt, aHasher.ctxt, HASH_INSTANCE[fAlgo]); // copy what is needed
+end;
+
+procedure TSynHasher.Clear;
+begin
+  FillCharFast(ctxt, HASH_INSTANCE[fAlgo], 0); // only clear what is needed
+end;
+
 procedure TSynHasher.Update(aBuffer: pointer; aLen: integer);
 begin
   case fAlgo of
@@ -3896,6 +3933,14 @@ begin
   result := Final(aDigest);
 end;
 
+function TSynHasher.Full(aAlgo: THashAlgo; const aBuffer: array of RawByteString;
+  out aDigest: THash512Rec): integer;
+begin
+  Init(aAlgo);
+  Update(aBuffer);
+  result := Final(aDigest);
+end;
+
 function TSynHasher.Mgf1(aAlgo: THashAlgo;
   aSeed: pointer; aSeedLen, aDestLen: PtrUInt): RawByteString;
 var
@@ -3919,6 +3964,201 @@ begin
     inc(counter);
   until PtrUInt(dig) - PtrUInt(result) >= aDestLen;
   FakeLength(result, aDestLen);
+end;
+
+const
+  HASH64_CHARS: PAnsiChar =
+   './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+function b64to24(p: PUtf8Char; b2, b1, b0: PtrUInt; n: cardinal = 4): PUtf8Char;
+begin
+  inc(b0, (b2 shl 16) + (b1 shl 8));
+  result := p;
+  p := @HASH64_CHARS;
+  repeat
+    result^ := p[b0 and $3f];
+    inc(result);
+    b0 := b0 shr 6;
+    dec(n)
+  until n = 0;
+end;
+
+function TSynHasher.UnixCryptHash(aAlgo: THashAlgo; const aPassword: RawUtf8;
+  aRounds, aSaltSize: cardinal; aSalt: RawUtf8): RawUtf8;
+var
+  alt, dp, ds: THash512Rec;
+  p: PUtf8Char;
+  i: PtrInt;
+  siz, n: cardinal;
+
+  procedure AddDigest(dig: THash512Rec; n: cardinal);
+  begin
+    while n >= siz do
+    begin
+      Update(@dig, siz);
+      dec(n, siz);
+    end;
+    Update(@dig, n);
+  end;
+
+begin
+  result := '';
+  if aRounds = 0 then
+    exit;
+  case aAlgo of
+    hfSha256,
+    hfSha512:
+      begin
+        aSaltSize := MinPtrUInt(aSaltSize, 16);
+        Make(['$', 5 + ord(aAlgo = hfSha512), '$rounds=', aRounds, '$'], result);
+      end
+    {hfMD5: // yet to be done (not the same exact algorithm)
+      aSaltSize := MinPtrUInt(aSaltSize, 8); }
+  else
+    exit;
+  end;
+  if aSalt = '' then
+  begin
+    if aSaltSize = 0 then
+      aSaltSize := 8;
+    p := FastSetString(aSalt, aSaltSize);
+    SharedRandom.Fill(p, aSaltSize);
+    for i := 0 to aSaltSize - 1 do
+      p[i] := HASH64_CHARS[ord(p[i]) and 63];
+  end;
+  Append(result, aSalt, '$');
+  siz := Full(aAlgo, [aPassword, aSalt, aPassword], alt);
+  Init(aAlgo);
+  Update(aPassword);
+  Update(aSalt);
+  n := length(aPassword); // add one byte of alt for any password char
+  while n > siz do
+  begin
+    Update(@alt, siz);
+    dec(n, siz);
+  end;
+  Update(@alt, siz);
+  n := length(aPassword); // for every bit 1 add alt, for every 0 the key
+  while n > 0 do
+  begin
+    if (n and 1) <> 0 then
+      Update(@alt, siz)
+    else
+      Update(aPassword);
+    n := n shr 1;
+  end;
+  Final(alt);
+  for i := 1 to length(aPassword) do // compute digest DP
+    Update(aPassword);
+  Final(dp);
+  for i := 1 to 16 + alt.b[0] do     // compute digest DS
+    Update(aSalt);
+  Final(ds);
+  for n := 0 to MaxPtrUInt(aRounds, 1) - 1 do
+  begin
+    if (n and 1) <> 0 then // add key or last result
+      AddDigest(dp, length(aPassword))
+    else
+      Update(@alt, siz);
+    if (n mod 3) <> 0 then // add salt for numbers not divisible by 3
+      AddDigest(ds, length(aSalt));
+    if (n mod 7) <> 0 then // add key for numbers not divisible by
+      AddDigest(dp, length(aPassword));
+    if (n and 1) = 0 then // add key or last result
+      AddDigest(dp, length(aPassword))
+    else
+      Update(@alt, siz);
+    Final(alt);
+  end;
+  case aAlgo of
+    hfSHA256:
+      begin
+        SetLength(result, length(result) + 43);
+        p := pointer(result);
+        p := b64to24(p, alt.b[0],  alt.b[10], alt.b[20]);
+        p := b64to24(p, alt.b[21], alt.b[1],  alt.b[11]);
+        p := b64to24(p, alt.b[12], alt.b[22], alt.b[2]);
+        p := b64to24(p, alt.b[3],  alt.b[13], alt.b[23]);
+        p := b64to24(p, alt.b[24], alt.b[4],  alt.b[14]);
+        p := b64to24(p, alt.b[15], alt.b[25], alt.b[5]);
+        p := b64to24(p, alt.b[6],  alt.b[16], alt.b[26]);
+        p := b64to24(p, alt.b[27], alt.b[7],  alt.b[17]);
+        p := b64to24(p, alt.b[18], alt.b[28], alt.b[8]);
+        p := b64to24(p, alt.b[9],  alt.b[19], alt.b[29]);
+             b64to24(p, 0,         alt.b[31], alt.b[30], 3);
+      end;
+    hfSHA512:
+      begin
+        SetLength(result, length(result) + 86);
+        p := pointer(result);
+        p := b64to24(p, alt.b[0] , alt.b[21], alt.b[42]);
+        p := b64to24(p, alt.b[22], alt.b[43], alt.b[1]);
+        p := b64to24(p, alt.b[44], alt.b[2],  alt.b[23]);
+        p := b64to24(p, alt.b[3],  alt.b[24], alt.b[45]);
+        p := b64to24(p, alt.b[25], alt.b[46], alt.b[4]);
+        p := b64to24(p, alt.b[47], alt.b[5],  alt.b[26]);
+        p := b64to24(p, alt.b[6],  alt.b[27], alt.b[48]);
+        p := b64to24(p, alt.b[28], alt.b[49], alt.b[7]);
+        p := b64to24(p, alt.b[50], alt.b[8],  alt.b[29]);
+        p := b64to24(p, alt.b[9],  alt.b[30], alt.b[51]);
+        p := b64to24(p, alt.b[31], alt.b[52], alt.b[10]);
+        p := b64to24(p, alt.b[53], alt.b[11], alt.b[32]);
+        p := b64to24(p, alt.b[12], alt.b[33], alt.b[54]);
+        p := b64to24(p, alt.b[34], alt.b[55], alt.b[13]);
+        p := b64to24(p, alt.b[56], alt.b[14], alt.b[35]);
+        p := b64to24(p, alt.b[15], alt.b[36], alt.b[57]);
+        p := b64to24(p, alt.b[37], alt.b[58], alt.b[16]);
+        p := b64to24(p, alt.b[59], alt.b[17], alt.b[38]);
+        p := b64to24(p, alt.b[18], alt.b[39], alt.b[60]);
+        p := b64to24(p, alt.b[40], alt.b[61], alt.b[19]);
+        p := b64to24(p, alt.b[62], alt.b[20], alt.b[41]);
+             b64to24(p, 0,         0,         alt.b[63], 2);
+      end;
+  end;
+  FillZero(alt.b);
+  FillZero(dp.b);
+  FillZero(ds.b);
+end;
+
+function TSynHasher.UnixCryptVerify(const aPassword, aHash: RawUtf8;
+  aAlgo: PHashAlgo): boolean;
+var
+  s, h: RawUtf8;
+  p: PUtf8Char;
+  a: THashAlgo;
+  r: cardinal;
+begin
+  // parse e.g. $1${salt}${checksum} or $5$rounds={rounds}${salt}${checksum}
+  result := false;
+  p := pointer(aPassword);
+  if (length(aPassword) < 10) or
+     (p^ <> '$') then
+    exit;
+  inc(p);
+  case GetNextItemCardinal(p, '$') of
+    1:
+      a := hfMD5;
+    5:
+      a := hfSHA256;
+    6:
+      a := hfSHA512;
+  else
+    exit;
+  end;
+  if aAlgo <> nil then
+    aAlgo^ := a;
+  r := 5000; // default rounds number
+  if (a <> hfMD5) and
+     IdemPChar(p, 'ROUNDS=') then
+  begin
+    inc(p, 7);
+    r := GetNextItemCardinal(p, '$');
+    if r < 1000 then
+      exit; // not enough rounds
+  end;
+  GetNextItem(p, '$', s);
+  h := UnixCryptHash(a, aPassword, r, 0, s);
+  result := h = aHash;
 end;
 
 
@@ -4285,14 +4525,13 @@ const
 
 procedure TSynSigner.Init(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: integer);
 var
-  i: PtrInt;
-  k0, k0xorIpad: TBlock1024;
+  k0: TBlock1024;
   a: THashAlgo;
 begin
   fAlgo := aAlgo;
   a := SIGN_HASH[Algo];
   fSignatureSize := SIGN_SIZE[Algo];
-  fBlockMax := BLOCK_SIZE[Algo];
+  fBlockMax := BLOCK_SIZE[Algo]; // typically 15 (256-bit) or 31 (512-bit)
   fBlockSize := (fBlockMax + 1) shl 2;
   if fBlockMax = 0 then
   begin // we estimate that the HMAC pattern is part of the SHA-3 sponge design
@@ -4305,14 +4544,11 @@ begin
     fHasher.Full(a, aSecret, aSecretLen, PHash512Rec(@k0)^)
   else
     MoveFast(aSecret^, k0, aSecretLen);
-  for i := 0 to fBlockMax do
-    k0xorIpad[i] := k0[i] xor $36363636;
-  for i := 0 to fBlockMax do
-    fStep7data[i] := k0[i] xor $5c5c5c5c;
+  XorBy128(@fStep7data, @k0, fBlockMax, $5c5c5c5c);
+  XorBy128(@k0, @k0, fBlockMax, $36363636);
   fHasher.Init(a);
-  fHasher.Update(@k0xorIpad, fBlockSize);
+  fHasher.Update(@k0, fBlockSize);
   FillCharFast(k0, fBlockSize, 0);
-  FillCharFast(k0xorIpad, fBlockSize, 0);
 end;
 
 procedure TSynSigner.Init(aAlgo: TSignAlgo; const aSecret: RawUtf8);
@@ -4392,31 +4628,33 @@ end;
 procedure TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
   aSecretPbkdf2Round: integer; aDerivatedKey: PHash512Rec; aPartNumber: integer);
 var
-  iter: TSynSigner;
-  temp: THash512Rec;
-  i: integer;
+  bak: TSynHasher;
+  tmp: THash512Rec;
 begin
-  Init(aAlgo, aSecret);
-  iter := self;
-  iter.Update(aSalt);
-  if not (Algo in SIGNER_SHA3) then // padding + XoF are part of SHA-3
+  Init(aAlgo, aSecret); // = PRF(secret)
+  dec(aSecretPbkdf2Round);
+  if aSecretPbkdf2Round <> 0 then
+    fHasher.CopyTo(bak); // save initial PRF(secret) state
+  Update(aSalt);
+  if not (Algo in SIGNER_SHA3) then // padding + XOF mode are part of SHA-3
     // U1 = PRF(secret, salt + INT_32_BE(part))
-    iter.UpdateBigEndian(aPartNumber);  // is a 1-based index
-  iter.Final(aDerivatedKey, true);
-  if aSecretPbkdf2Round < 2 then
-    exit;
-  // F(secret, salt, c, i) = U1 ^ U2 ^ .. ^ Uc  with Uc = PRF(secret, Uc-1)
-  temp := aDerivatedKey^;
-  for i := 2 to aSecretPbkdf2Round do
+    UpdateBigEndian(aPartNumber);  // is a 1-based index
+  Final(aDerivatedKey, {noinit=}true);
+  if aSecretPbkdf2Round <> 0 then
   begin
-    iter := self;
-    iter.Update(@temp, fSignatureSize);
-    iter.Final(@temp, true);
-    XorMemory(pointer(aDerivatedKey), @temp, fSignatureSize);
+    // F(secret, salt, c, i) = U1 ^ U2 ^ .. ^ Uc  with Uc = PRF(secret, Uc-1)
+    MoveFast(aDerivatedKey^, tmp, fSignatureSize);
+    repeat
+      MoveFast(bak.ctxt, fHasher.ctxt, HASH_INSTANCE[fHasher.fAlgo]); // restore
+      Update(@tmp, fSignatureSize);
+      Final(@tmp, {noinit=}true);
+      XorMemory(pointer(aDerivatedKey), @tmp, fSignatureSize);
+      dec(aSecretPbkdf2Round);
+    until aSecretPbkdf2Round = 0;
+    bak.Clear;
+    FillZero(tmp.b);
   end;
-  FillZero(temp.b);
-  FillCharFast(iter.fHasher.ctxt, SizeOf(iter.fHasher.ctxt), 0);
-  FillCharFast(fHasher.ctxt, SizeOf(fHasher.ctxt), 0);
+  Done;
 end;
 
 procedure TSynSigner.Pbkdf2(const aParams: TSynSignerParams;
@@ -4479,7 +4717,7 @@ end;
 function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
   aSecretPbkdf2Round, aDestLen: PtrUInt): RawByteString;
 var
-  hlen, l, r, i: cardinal;
+  hlen, l, r, part: cardinal;
   p: PHash512Rec;
 begin
   // see https://www.rfc-editor.org/rfc/rfc2898#section-5.2
@@ -4495,12 +4733,16 @@ begin
   r := aDestLen - (l * hlen); // mod
   if r <> 0 then
     inc(l); // ceil()
-  // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, i)
+  if (Algo in SIGNER_SHA3) and
+     (l > 1) then
+    ESynCrypto.RaiseUtf8('TSynSigner.Pbkdf2(%) with DestLen=%: use SHAKE instead',
+      [ToText(algo)^, aDestLen]);
+  // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, part)
   p := FastNewString(l * hlen); // pre-allocate destination buffer
   pointer(result) := p;
-  for i := 1 to l do
+  for part := 1 to l do
   begin
-    Pbkdf2(aAlgo, aSecret, aSalt, aSecretPbkdf2Round, p, i);
+    Pbkdf2(aAlgo, aSecret, aSalt, aSecretPbkdf2Round, p, part);
     inc(PByte(p), hlen); // just concatenate each Ti
   end;
   if r <> 0 then
@@ -4580,8 +4822,10 @@ end;
 
 procedure TSynSigner.Done;
 begin
-  FillCharFast(self, SizeOf(self), 0);
+  FillCharFast(fHasher.ctxt, HASH_INSTANCE[fHasher.fAlgo], 0);
+  FillCharFast(fStep7data, fBlockSize, 0);
 end;
+
 
 function ToText(algo: TSignAlgo): PShortString;
 begin
@@ -4851,21 +5095,6 @@ begin
   HashLen := HASH_SIZE[Hash];
 end;
 
-const
-  DIGEST_KEYS: array[0..11] of PAnsiChar = (
-    'REALM=',     // 0
-    'QOP=',       // 1
-    'URI=',       // 2
-    'ALGORITHM=', // 3
-    'NONCE=',     // 4
-    'NC=',        // 5
-    'CNONCE=',    // 6
-    'RESPONSE=',  // 7
-    'OPAQUE=',    // 8
-    'USERNAME=',  // 9
-    'AUTHZID=',   // 10
-    nil);
-
 function TDigestProcess.Parse(var p: PUtf8Char): boolean;
 var
   n: PUtf8Char;
@@ -4879,7 +5108,8 @@ begin
   GetNextItem(p, ',', '"', RawUtf8(tmp));
   if tmp = '' then
     exit;
-  case IdemPPChar(n, @DIGEST_KEYS) of
+  case IdemPCharSep(n, 'REALM=|QOP=|URI=|ALGORITHM=|NONCE=|NC=|CNONCE=|' +
+                       'RESPONSE=|OPAQUE=|USERNAME=|AUTHZID=|') of
     0: // realm="http-auth@example.org"
       FastAssignUtf8(Realm, tmp);
     1: // qop=auth
@@ -6420,8 +6650,8 @@ begin
     fContext.SessionSequence := Random32 shr 9;
   until fContext.SessionSequence <> 0;
   fContext.SessionSequenceStart := fContext.SessionSequence;
-  fContext.CrcSalt := Random32Not0; // from Lecuyer generator
-  TAesPrng.Main.FillRandom(fContext.CryptKey); // 128-bit strong crypto key
+  fContext.CrcSalt := Random32Not0; // from TLecuyer gsl_rng_taus2 generator
+  Random128(@fContext.CryptKey);    // unpredictable
   fAes.Init(fContext.CryptKey, 128, {avx=}false);
 end;
 
@@ -6468,13 +6698,13 @@ begin
         ECrypt.RaiseU('TBinaryCookieGenerator: Too Big Too Fat');
       MoveFast(tmp.buf^, cc.data, tmp.len);
     end;
-    cc.head.issued := UnixTimeMinimalUtc;
+    cc.head.issued := UnixTimeMinimalUtc; // valid until year 2152
     if TimeOutMinutes = 0 then
-      TimeOutMinutes := DefaultTimeOutMinutes;
+      TimeOutMinutes := fDefaultTimeOutMinutes;
     if TimeOutMinutes = 0 then // max 1 month expiration seems good enough
       TimeOutMinutes := 31 * 24 * 60;
     cc.head.expires := cc.head.issued + TimeOutMinutes * 60;
-    fSafe.Lock;
+    fSafe.Lock; // protect fAes instance and SessionSequence
     try
       inc(fContext.SessionSequence);
       inc(result, fContext.SessionSequence); // inc() to circumvent Delphi hint
@@ -6529,7 +6759,7 @@ begin
      (cc.head.expires <= Now32) then
     exit;
   dec(len, SizeOf(cc.head));
-  fSafe.Lock;
+  fSafe.Lock; // protect fAes instance
   try
     if not fAes.Reset(@cc.head.session, 12) or // unique sequence-based IV
        not fAes.Add_AAD(@cc.head.session, 3 * SizeOf(cardinal)) or
@@ -6786,7 +7016,7 @@ end;
 
 function TCryptRandomAesPrng.Get32: cardinal;
 begin
-  result := TAesPrng.Main.Random32;
+  result := TAesPrng.Main.Random32; // a CSPRNG is pointless for 32-bit anyway
 end;
 
 { TCryptRandomEntropy }
@@ -6850,7 +7080,7 @@ type
 
 procedure TCryptRandomLecuyerPrng.Get(dst: pointer; dstlen: PtrInt);
 begin
-  SharedRandom.Fill(dst, dstlen); // global Lecuyer's gsl_rng_taus2 generator
+  SharedRandom.Fill(dst, dstlen); // global TLecuyer gsl_rng_taus2 generator
 end;
 
 function TCryptRandomLecuyerPrng.Get32: cardinal;
@@ -9165,7 +9395,7 @@ function NextPemToDer(var P: PUtf8Char; Kind: PPemKind): TCertDer;
 var
   len: PtrInt;
   pem: PUtf8Char;
-  base64: TSynTempBuffer; // pem is small, so a 4KB temp buffer is fine enough
+  base64: TSynTempBuffer; // PEM are small, so a 4KB temp buffer is fine enough
 begin
   pem := ParsePem(P, kind, len, {excludemarkers=}true);
   if pem <> nil then
