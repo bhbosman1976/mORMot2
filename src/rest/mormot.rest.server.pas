@@ -499,6 +499,9 @@ type
       Handle304NotModified: boolean = true;
       const DefaultFileName: TFileName = 'index.html';
       const Error404Redirect: RawUtf8 = ''; CacheControlMaxAgeSec: integer = 0); override;
+    /// return the Server's current nonce in the proper JSON format
+    // - as called from TRestServerAuthenticationDefault.Auth
+    procedure ReturnNonce;
     /// use this method to send back an error to the caller
     // - overriden method with additional logging
     procedure Error(const ErrorMessage: RawUtf8 = '';
@@ -1765,7 +1768,7 @@ type
     /// used to compute genuine TAuthSession.ID cardinal value
     fSessionCounter: integer;
     fSessionCounterMin: cardinal;
-    fTimestampInfoCacheTix: cardinal;
+    fTimestampInfoCacheTix, fStatsCacheTix: cardinal;
     fOnIdleLastTix: cardinal;
     fPublishedMethodTimestampIndex: ShortInt; // (8-bit in -1..127 range)
     fPublishedMethodAuthIndex: ShortInt;
@@ -1774,7 +1777,7 @@ type
     fSessionAuthentication: TRestServerAuthenticationDynArray;
     fPublishedMethod: TRestServerMethods;
     fPublishedMethods: TDynArrayHashed;
-    fTimestampInfoCache: RawUtf8;
+    fTimestampInfoCache, fStatsCache: RawUtf8;
     fStats: TRestServerMonitor;
     fStatUsage: TSynMonitorUsage;
     fAssociatedServices: TServicesPublishedInterfacesList;
@@ -3107,20 +3110,21 @@ procedure TRestServerUriContext.ConfigurationRestMethod(SettingsStorage: TObject
 var
   value: TDocVariantData;
   valid: boolean;
-  config: variant;
+  v, config: variant;
 begin
   fUriMethodPath := StringReplaceChars(fUriMethodPath, '/', '.');
   if InputExists['value'] then
   begin
     if fUriMethodPath = '' then
       exit;
-    value.InitObjectFromPath(fUriMethodPath, Input['value']);
+    v := Input['value'];
+    value.InitObjectFromPath(fUriMethodPath, v);
     JsonToObject(SettingsStorage, pointer(value.ToJson), valid, nil,
       JSONPARSER_TOLERANTOPTIONS);
     if not valid then
     begin
-      Error('Invalid input [%] - expected %', [variant(value),
-        ClassFieldNamesAllPropsAsText(PClass(SettingsStorage)^, true)]);
+      Error('Invalid input [%] - expected (%)', [v,
+        ClassFieldNamesAllPropsAsText(PClass(SettingsStorage)^, {typed=}true)]);
       exit;
     end;
   end;
@@ -4386,7 +4390,8 @@ end;
 function TRestServerUriContext.GetInputAsTDocVariant(
   const Options: TDocVariantOptions; InterfaceMethod: PInterfaceMethod): variant;
 var
-  n, ndx, a: PtrInt;
+  n, ndx: PtrInt;
+  a: PInterfaceMethodArgument;
   forcestring: boolean;
   v: variant;
   multipart: TMultiPartDynArray;
@@ -4403,14 +4408,14 @@ begin
     for ndx := 0 to n - 1 do
     begin
       name := fInput[ndx * 2];
+      forcestring := false;
       if InterfaceMethod <> nil then
       begin
-        a := InterfaceMethod.ArgIndex(pointer(name), length(name), {input=}true);
-        forcestring := (a >= 0) and
-                       (rcfJsonString in InterfaceMethod.Args[a].ArgRtti.Flags);
-      end
-      else
-        forcestring := false;
+        a := InterfaceMethod.ArgInput(pointer(name), length(name));
+        if (a <> nil) and
+           (rcfJsonString in a^.ArgRtti.Flags) then
+          forcestring := true;
+      end;
       GetVariantFromJsonField(pointer(fInput[ndx * 2 + 1]), forcestring, v,
         @Options, fInputAllowDouble, length(fInput[ndx * 2 + 1]));
       res.AddValue(name, v);
@@ -4525,6 +4530,14 @@ begin
     Handle304NotModified, '', '', Error404Redirect, CacheControlMaxAgeSec);
 end;
 
+procedure TRestServerUriContext.ReturnNonce;
+begin
+  if fServer <> nil then
+    Returns(Join(['{"result":"', CurrentNonce(self), '"}']))
+  else
+    Error;
+end;
+
 procedure TRestServerUriContext.Error(const ErrorMessage: RawUtf8;
   Status: integer; CacheControlMaxAgeSec: integer);
 begin
@@ -4631,10 +4644,11 @@ begin
     WR.AddDirect('[');
     m := fServiceMethod;
     ilow := 0;
-    a := @m^.Args[m^.ArgsInFirst];
-    for arg := m^.ArgsInFirst to m^.ArgsInLast do
+    arg := m^.ArgsInFirst;
+    a := @m^.Args[arg];
+    while arg <= m^.ArgsInLast do
     begin
-      if a^.ValueDirection <> imdOut then
+      if a^.IsInput then
       begin
         argdone := false;
         for i := ilow to (length(fInput) - 1) shr 1 do // search argument in URI
@@ -4650,6 +4664,7 @@ begin
           a^.AddDefaultJson(WR); // allow missing argument (and add ',')
       end;
       inc(a);
+      inc(arg);
     end;
     WR.CancelLastComma(']');
     WR.SetText(fCall^.InBody); // input Body contains new generated input JSON
@@ -5024,14 +5039,15 @@ begin
   begin
     if usrid <> 0 then
     begin
-      // try if TAuthUser.ID was transmitted
-      result := fServer.fAuthUserClass.Create(fServer.ORM, usrid); // may use ORM cache :)
+      // try if TAuthUser.ID was transmitted - may use ORM per-ID cache
+      result := fServer.fAuthUserClass.Create(fServer.ORM, usrid);
       if result.IDValue = 0 then
         FreeAndNil(result);
     end
     else
       result := nil;
     if result = nil then
+      // search by LogonName - may use the JSON cache at SQlite3 DB level
       result := fServer.fAuthUserClass.Create(
         fServer.ORM, 'LogonName=?', [aUserName]);
     if (result.IDValue = 0) and
@@ -5218,11 +5234,11 @@ begin
   if PInteger(@ServerProcessKdf)^ = 0 then
   begin
     // first time used: initialize the HMAC-SHA-256 secret for this process
-    TAesPrng.Main.Fill(tmp); // use strong CSPRNG seed
+    TAesPrng.Main.FillRandom(tmp); // use strong CSPRNG seed
     ServerNonceCache[false].safe.Lock;
-    if PInteger(@ServerProcessKdf)^ = 0 then // ensure thread-safe
+    if PInteger(@ServerProcessKdf)^ = 0 then // thread-safe initialization
     begin
-      ServerProcessKdf.Init(@StartupEntropy, SizeOf(StartupEntropy)); // salt
+      ServerProcessKdf.Init(@SystemEntropy, SizeOf(SystemEntropy)); // salt
       ServerProcessKdf.Update(tmp);
     end;
     ServerNonceCache[false].safe.UnLock;
@@ -5323,12 +5339,6 @@ var
   nonce, pwd: PRawUtf8;
   os: TOperatingSystemVersion;
   usr: TAuthUser;
-
-  procedure DoAuthReturnNonce;
-  begin
-    Ctxt.Results([CurrentNonce(Ctxt)]);
-  end;
-
 begin
   // our default schemes require an user name
   result := aUserName <> '';
@@ -5374,7 +5384,7 @@ begin
   end
   else
     // only UserName=... -> return hexadecimal nonce valid for 4.3 minutes
-    DoAuthReturnNonce;
+    Ctxt.ReturnNonce;
 end;
 
 function TRestServerAuthenticationDefault.CheckPassword(
@@ -5699,11 +5709,9 @@ procedure TRestServerMonitor.ProcessSuccess(IsOutcomingFile: boolean);
 begin
   if self = nil then
     exit;
-  fSafe.Lock;
-  inc(fSuccess);
+  LockedInc64(@fSuccess); // faster than fSafe.Lock/UnLock
   if IsOutcomingFile then
-    inc(fOutcomingFiles);
-  fSafe.UnLock;
+    LockedInc64(@fOutcomingFiles);
 end;
 
 procedure TRestServerMonitor.NotifyOrm(aMethod: TUriMethod);
@@ -7789,6 +7797,7 @@ procedure TRestServer.Stat(Ctxt: TRestServerUriContext);
 var
   W: TJsonWriter;
   json, xml, name: RawUtf8;
+  tix: cardinal;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
@@ -7796,17 +7805,27 @@ begin
     Ctxt.RetrieveInputUtf8OrVoid('findservice', name);
     if name = '' then
     begin
-      InternalStat(Ctxt, W);
-      name := 'Stats';
+      tix := Ctxt.TickCount64 shr 12; // refresh every 4 seconds to avoid DoS
+      if fStatsCacheTix <> tix then
+      begin
+        fStatsCacheTix := tix;
+        InternalStat(Ctxt, W);
+        W.SetText(fStatsCache);
+      end;
+      json := fStatsCache;
     end
     else
-      AssociatedServices.FindServiceAll(name, W);
-    W.SetText(json);
+    begin
+      AssociatedServices.FindServiceAll(name, W, Ctxt.TickCount64);
+      W.SetText(json);
+    end;
     if Ctxt.InputExists['format'] or
        PropNameEquals(Ctxt.fUriMethodPath, 'json') then
       json := JsonReformat(json)
     else if PropNameEquals(Ctxt.fUriMethodPath, 'xml') then
     begin
+      if name = '' then
+        name := 'Stats'; // output as <Stats> .. </Stats>
       JsonBufferToXML(pointer(json), XMLUTF8_HEADER, Join(['<', name, '>']), xml);
       Ctxt.Returns(xml, 200, XML_CONTENT_TYPE_HEADER);
       exit;
@@ -7865,7 +7884,7 @@ begin
      not (rsoTimestampInfoUriDisable in fOptions) then
   begin
     if tix shr 12 <> fTimestampInfoCacheTix then
-      ComputeInfo; // cache refreshed every 4.096 seconds
+      ComputeInfo; // cache refreshed every 4.096 seconds to avoid DoS attacks
     Ctxt.Returns(fTimestampInfoCache);
   end
   else

@@ -188,6 +188,8 @@ type
     a: TOrmPeopleObjArray;
     fAdd, fDel: RawUtf8;
     fQuickSelectValues: TIntegerDynArray;
+    rnd: TLecuyer;
+    procedure Setup; override;
     function QuickSelectGT(IndexA, IndexB: PtrInt): boolean;
     procedure intadd(const Sender; Value: integer);
     procedure intdel(const Sender; Value: integer);
@@ -340,6 +342,11 @@ end;
 
 
 { TTestCoreBase }
+
+procedure TTestCoreBase.Setup;
+begin
+  RandomLecuyer(rnd);
+end;
 
 procedure TTestCoreBase._CamelCase;
 var
@@ -531,12 +538,12 @@ const
       {$ifdef FPC}
       CheckEqual(popcnt(v), c);
       {$endif FPC}
-      v := random32;
+      v := rnd.Next;
       c := BSRdwordPurePascal(v);
       CheckEqual(c, BSRdword(v));
       CheckEqual(c, BSRqword(v), 'bsrq2');
       {$ifdef CPU64}
-      v := v or (PtrUInt(Random32) shl 32);
+      v := v or (PtrUInt(rnd.Next) shl 32);
       {$endif CPU64}
       c := GetBitsCount64(v, POINTERBITS);
       CheckEqual(GetBitsCountPtrInt(v), c);
@@ -757,8 +764,8 @@ begin
     if i < 500 then
       V1 := i * 3
     else
-      V1 := Random64 shr 28;
-    if Random32 and 3 = 0 then
+      V1 := rnd.NextQWord shr 28;
+    if rnd.Next and 3 = 0 then
       V1 := -V1;
     v := Curr64ToStr(PInt64(@V1)^);
     tmp[0] := AnsiChar(Curr64ToPChar(PInt64(@V1)^, @tmp[1]));
@@ -882,8 +889,8 @@ begin
   Content := '';
   for i := 1 to 1000 do
   begin
-    Si := Random32(20);
-    Ni := Random32(50);
+    Si := rnd.Next(20);
+    Ni := rnd.Next(50);
     Vi := Si * Ni + Ni;
     if Si = 0 then
       S := ''
@@ -2775,7 +2782,10 @@ begin
   for i := 9 to 15 do
     CheckEqual(BitsToBytes(i), 2);
   s := GuidToRawUtf8(Guid);
-  Check(s = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
+  CheckEqual(s, '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
+  Check(s[16] = '4');
+  Check(s[21] in ['8', '9', 'A', 'B']);
+  Check(IsRandomGuid(@Guid));
   Check(TextToGuid(@s[2], @g2)^ = '}');
   Check(IsEqualGuid(g2, Guid));
   Check(GuidToString(Guid) = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
@@ -2807,7 +2817,7 @@ begin
   for i := 1 to 100 do
   begin
     x2 := x;
-    delete(x2, Random32(length(x2)) + 1, 2);
+    delete(x2, rnd.Next(length(x2)) + 1, 2);
     Check(x <> x2);
     Check(HumanHexCompare(x, x2) <> 0);
     HumanHexCompare(x, x2);
@@ -2815,7 +2825,7 @@ begin
   for i := 1 to 100 do
   begin
     x2 := x;
-    j := Random32(length(x2)) + 1;
+    j := rnd.Next(length(x2)) + 1;
     delete(x2, j, 1);
     Check(x <> x2);
     Check((HumanHexCompare(x, x2) = 0) = (x[j] = ':'));
@@ -2833,7 +2843,7 @@ begin
   s := s + s; // validates also our patched RTL
   CheckEqual(HumanHexCompare(s, s), 0);
   repeat
-    i := Random32(length(s)) + 1;
+    i := rnd.Next(length(s)) + 1;
     delete(s, i, 1);
     Check(TrimGuid(s) = (length(s) = 32));
   until s = '';
@@ -2860,14 +2870,21 @@ begin
   CheckEqual(s, '1234678');
   for i := 1 to 1000 do
   begin
-    RandomGuid(g);
+    if i and 1 = 0 then
+      RandomGuid(g)
+    else
+      TAesPrng.Main.FillGuid(g);
+    Check(IsRandomGuid(@g));
     st := GuidToString(g);
+    Check(st <> st2);
     st2 := SysUtils.GuidToString(g);
     Check(st = st2);
     Check(IsEqualGuid(StringToGuid(st), g));
     s := GuidToRawUtf8(g);
+    Check(s[16] = '4');
+    Check(s[21] in ['8', '9', 'A', 'B']);
     Check(st = mormot.core.unicode.Utf8ToString(s));
-    st[Random32(38) + 1] := ' ';
+    st[rnd.Next(38) + 1] := ' ';
     g2 := StringToGuid(st);
     Check(IsZero(@g2, SizeOf(g2)));
     Check(TextToGuid(@s[2], @g2)^ = '}');
@@ -2888,7 +2905,7 @@ begin
   FillCharFast(h, SizeOf(h), 1);
   for pt := ptGuid to ptHash512 do
   begin
-    RandomBytes(@h, PT_SIZE[pt]);
+    rnd.Fill(@h, PT_SIZE[pt]);
     s := SaveJson(h, PT_INFO[pt]); // ptHash* are not record types
     CheckUtf8(TextToVariantNumberType(pointer(s)) = varString,
       '%:%', [PT_INFO[pt].RawName, s]);
@@ -3452,12 +3469,12 @@ begin
 end;
 
 const
-  REF_LECUYER_GENERATOR: array[0..15] of cardinal = (
+  REF_LECUYER_GENERATOR: TBlock512 = (
     2094674600, 1801471443, 1564436181, 3659342702,
     1831620425, 3729943674, 687904812,  2066320563,
     3494904290, 3023528103, 1358263417, 3202492728,
     1577967257, 3235083616, 712712534,  1900728807);
-  REF_LECUYER_GENERATOR_TRAIL: array[0..15] of cardinal = (
+  REF_LECUYER_GENERATOR_TRAIL: TBlock512 = (
     2912814506, 4264204172, 1224264557, 457988427,
     3671383357, 2304790299, 1068635130, 1812365788,
     18904424,   1385490254, 3829840815, 3086100873,
@@ -4055,6 +4072,21 @@ var
   timer: TPrecisionTimer;
 begin
   CheckEqual(9007199254740991, MAX_SAFE_JS_INTEGER);
+  Check(IsPowerOfTwo(0));
+  Check(IsPowerOfTwo(1));
+  Check(IsPowerOfTwo(2));
+  Check(not IsPowerOfTwo(3));
+  Check(IsPowerOfTwo(4));
+  Check(not IsPowerOfTwo(5));
+  Check(not IsPowerOfTwo(6));
+  Check(not IsPowerOfTwo(7));
+  Check(IsPowerOfTwo(8));
+  for i := 9 to 15 do
+    Check(not IsPowerOfTwo(i));
+  Check(IsPowerOfTwo(16));
+  for i := 17 to 31 do
+    Check(not IsPowerOfTwo(i));
+  Check(IsPowerOfTwo(32));
   CheckEqual(NextPowerOfTwo(0), 1);
   CheckEqual(NextPowerOfTwo(1), 1);
   CheckEqual(NextPowerOfTwo(2), 2);
@@ -4070,8 +4102,13 @@ begin
     CheckEqual(NextPowerOfTwo(i), 2048);
   for i := 65537 to 131072 do
     CheckEqual(NextPowerOfTwo(i), 131072);
-  for i := 33554433 to 67108864 do // 33 millions tests in a few ms :)
+  for i := 33554433 to 67108864 - 1 do // millions tests in a few ms :)
+  begin
+    Check(not IsPowerOfTwo(i));
     Check(NextPowerOfTwo(i) = 67108864);
+  end;
+  Check(IsPowerOfTwo(67108864));
+  Check(NextPowerOfTwo(67108864) = 67108864);
   n := 512;
   CheckEqual(MinPtrInt(1, n), 1);
   CheckEqual(MaxPtrInt(1, n), n);
@@ -4276,7 +4313,7 @@ begin
   SetLength(i32, 100000);
   n := 10;
   repeat
-    RandomBytes(pointer(i32), n * 4);
+    rnd.Fill(pointer(i32), n * 4);
     timer.Start;
     QuickSortInteger(pointer(i32), 0, n - 1);
     NotifyTestSpeed('QuickSortInteger', n, 0, @timer, {onlylog=}true);
@@ -4824,7 +4861,7 @@ begin
   for i := 0 to 10000 do
   begin
     j := i shr 6; // circumvent weird FPC code generation bug in -O2 mode
-    s := RandomAnsi7(j);
+    rnd.FillAscii(j, s);
     CheckHash(s, Hash32Reference(pointer(s), length(s)));
     Check(kr32(0, pointer(s), length(s)) = kr32reference(pointer(s), length(s)));
     Check(fnv32(0, pointer(s), length(s)) = fnv32reference(0, pointer(s), length(s)));
@@ -4835,7 +4872,7 @@ begin
       Check(xxhash32(0, pointer(s), length(s)) = xxHash32reference(pointer(s),
         length(s)));
     if i <> 0 then
-      j := Random32; // always validate j=0 value
+      j := rnd.Next; // always validate j=0 value
     str(j, a);
     s := RawUtf8(a);
     u := string(a);
@@ -4878,8 +4915,8 @@ begin
     CheckEqual(FormatJson('? %', [vj], [vj]), s + ' ' + s);
     CheckEqual(FormatJson(' ?? ', [], [vs]), ' "' + s + '" ');
     CheckEqual(FormatJson('? %', [vs], [vj]), s + ' ' + s);
-    k := Int64(j) * Random32(MaxInt);
-    b := Random32(64);
+    k := Int64(j) * rnd.Next(MaxInt);
+    b := rnd.Next(64);
     s := GetBitCsv(k, b);
     l := 0;
     P := pointer(s);
@@ -4971,7 +5008,7 @@ begin
       9993:
         d := 1E-210;
     else
-      d := RandomDouble * 1E-17 - RandomDouble * 1E-19;
+      d := rnd.NextDouble * 1E-17 - rnd.NextDouble * 1E-19;
     end;
     str(d, a);
     s := RawUtf8(a);
@@ -5107,11 +5144,11 @@ begin
   exit; // code below is speed informative only, without any test
   Timer.Start;
   for i := 0 to 99999 do
-    SysUtils.IntToStr(Int64(7777) * Random32);
+    SysUtils.IntToStr(Int64(7777) * rnd.Next);
   NotifyTestSpeed('SysUtils.IntToStr', 100000, 0, @Timer);
   Timer.Start;
   for i := 0 to 99999 do
-    StrInt64(@varint[31], Int64(7777) * Random32);
+    StrInt64(@varint[31], Int64(7777) * rnd.Next);
   NotifyTestSpeed('StrInt64', 100000, 0, @Timer);
 end;
 
@@ -5171,7 +5208,7 @@ begin
     for k := 1 to 50 do
     begin
       for j := 0 to i - 1 do
-        P[j] := CHR[Random32(83)];
+        P[j] := CHR[rnd.Next(83)];
       b := AsciiToBaudot(u);
       check(BaudotToAscii(b) = u);
     end;
@@ -7257,12 +7294,12 @@ begin
   for i := 1700 to 2500 do
     Check(mormot.core.datetime.IsLeapYear(i) = SysUtils.IsLeapYear(i), 'IsLeapYear');
   // this will test typically from year 1905 to 2065
-  D := Now / 20 + RandomDouble * 20; // some starting random date/time
+  D := Now / 20 + rnd.NextDouble * 20; // some starting random date/time
   for i := 1 to 2000 do
   begin
     Test(D, true);
     Test(D, false);
-    D := D + RandomDouble * 57; // go further a little bit: change date/time
+    D := D + rnd.NextDouble * 57; // go further a little bit: change date/time
   end;
   b.Value := Iso8601ToTimeLog('20150504');
   Check(b.Year = 2015);
@@ -8749,7 +8786,7 @@ var
 begin
   for i := 1 to 100 do
   begin
-    s := DateTimeToIso8601(Now / 20 + RandomDouble * 20, true);
+    s := DateTimeToIso8601(Now / 20 + rnd.NextDouble * 20, true);
     t := UrlEncode(s);
     CheckEqual(UrlDecode(t), s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
@@ -9196,7 +9233,7 @@ begin
     Check(fQuickSelectValues[med1] = n + 1);
     Check(MedianQuickSelectInteger(P, len) = n + 1);
     for i := 0 to high(fQuickSelectValues) do
-      fQuickSelectValues[i] := Random32(MaxInt);
+      fQuickSelectValues[i] := rnd.Next31;
     med1 := fQuickSelectValues[MedianQuickSelect(QuickSelectGT, len, tmp)];
     med2 := MedianQuickSelectInteger(P, len);
     Check(med1 = med2);
@@ -9676,8 +9713,9 @@ const
   MAX = 10000;
 var
   dict: TSynDictionary;
+  rnd: TLecuyer; // local per-thread instance
 
-  procedure TestSpeed(Count: integer; SetCapacity, DoGuidText: boolean;
+  procedure TestSpeed(Count: integer; SetCapacity, DoText: boolean;
     Hasher: THasher; const Msg: RawUtf8);
   var
     timer: TPrecisionTimer;
@@ -9693,13 +9731,13 @@ var
     SetLength(r, Count);
     for i := 0 to High(a) do // pre-computed values and indexes for fairness
     begin
-      v := Random32(Count shr 2) shl 2; // realistic 25% coverage
+      v := rnd.Next(Count shr 2) shl 2; // realistic 25% coverage
       Check(v < Count, 'random32 overflow');
       r[i] := v;
-      if DoGuidText then
-        a[i] := GuidToRawUtf8(RandomGuid)
+      if DoText then
+        rnd.FillAscii(38, a[i])
       else
-        a[i] := UInt32ToUtf8(i);
+        UInt32ToUtf8(i, a[i]);
     end;
     dic := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
       TypeInfo(TIntegerDynArray), false, 0, nil, Hasher);
@@ -9772,6 +9810,7 @@ var
   b: byte;
   sdk: TSDKey;
 begin
+  RandomLecuyer(rnd); // local per-thread generator
   SetDict;
   try
     CheckEqual(dict.Count, 0);

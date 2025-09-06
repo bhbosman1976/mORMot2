@@ -364,6 +364,95 @@ asm
         pop     ebx
 end;
 
+// don't use PIC itself, but called by PIC-incompatible Sha256Compressx86()
+procedure Sha256ExpandMessageBlocks(W, Buf: PIntegerArray);
+  {$ifdef FPC}nostackframe; assembler;{$endif}
+asm // W=eax Buf=edx
+        push    esi
+        push    edi
+        push    ebx
+        mov     esi, eax
+        // part 1: W[i]:= bswap32(TW32Buf(Buf)[i])
+        mov     eax, [edx]
+        mov     ebx, [edx + 4]
+        bswap   eax
+        bswap   ebx
+        mov     [esi], eax
+        mov     [esi + 4], ebx
+        mov     eax, [edx + 8]
+        mov     ebx, [edx + 12]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 8], eax
+        mov     [esi + 12], ebx
+        mov     eax, [edx + 16]
+        mov     ebx, [edx + 20]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 16], eax
+        mov     [esi + 20], ebx
+        mov     eax, [edx + 24]
+        mov     ebx, [edx + 28]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 24], eax
+        mov     [esi + 28], ebx
+        mov     eax, [edx + 32]
+        mov     ebx, [edx + 36]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 32], eax
+        mov     [esi + 36], ebx
+        mov     eax, [edx + 40]
+        mov     ebx, [edx + 44]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 40], eax
+        mov     [esi + 44], ebx
+        mov     eax, [edx + 48]
+        mov     ebx, [edx + 52]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 48], eax
+        mov     [esi + 52], ebx
+        mov     eax, [edx + 56]
+        mov     ebx, [edx + 60]
+        bswap   eax
+        bswap   ebx
+        mov     [esi + 56], eax
+        mov     [esi + 60], ebx
+        lea     esi, [esi + 64]
+        // part2: w[i]:= lrot_1(w[i-3] xor w[i-8] xor w[i-14] xor w[i-16])
+        mov     ecx, 48
+@@2:    mov     eax, [esi - 2 * 4]    // w[i-2]
+        mov     edi, [esi - 7 * 4]    // w[i-7]
+        mov     edx, eax
+        mov     ebx, eax              // sig1: rr17 xor rr19 xor srx,10
+        ror     eax, 17
+        ror     edx, 19
+        shr     ebx, 10
+        xor     eax, edx
+        xor     eax, ebx
+        add     edi, eax
+        mov     eax, [esi - 15 * 4]   // w[i-15]
+        mov     ebx, eax              // sig0: rr7 xor rr18 xor sr3
+        mov     edx, eax
+        ror     eax, 7
+        ror     edx, 18
+        shr     ebx, 3
+        xor     eax, edx
+        xor     eax, ebx
+        add     eax, edi
+        add     eax, [esi - 16 * 4]   // w[i-16]
+        mov     [esi], eax
+        add     esi, 4
+        dec     ecx
+        jnz     @@2
+        pop     ebx
+        pop     edi
+        pop     esi
+end;
+
 procedure Sha256Compressx86(HW: pointer);
   {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
@@ -1391,6 +1480,42 @@ asm     // Src=eax Dst=edx Factor=ecx Carry=[ebp]
         pop    ebx
 end;
 
+{$ifdef CPUSSE2}
+procedure Xor512(dst, src: PPtrIntArray);
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        movups  xmm0, dqword ptr [dst]
+        movups  xmm1, dqword ptr [dst + 16]
+        movups  xmm2, dqword ptr [dst + 32]
+        movups  xmm3, dqword ptr [dst + 48]
+        movups  xmm4, dqword ptr [src]      // xorps xmm, [mem] requires aligned
+        movups  xmm5, dqword ptr [src + 16]
+        movups  xmm6, dqword ptr [src + 32]
+        movups  xmm7, dqword ptr [src + 48]
+        xorps   xmm0, xmm4
+        xorps   xmm1, xmm5
+        xorps   xmm2, xmm6
+        xorps   xmm3, xmm7
+        movups  dqword ptr [dst], xmm0
+        movups  dqword ptr [dst + 16], xmm1
+        movups  dqword ptr [dst + 32], xmm2
+        movups  dqword ptr [dst + 48], xmm3
+end;
+
+procedure Move512(dst, src: PPtrIntArray);
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        movups  xmm0, dqword ptr [src]
+        movups  xmm1, dqword ptr [src + 16]
+        movups  xmm2, dqword ptr [src + 32]
+        movups  xmm3, dqword ptr [src + 48]
+        movups  dqword ptr [dst], xmm0
+        movups  dqword ptr [dst + 16], xmm1
+        movups  dqword ptr [dst + 32], xmm2
+        movups  dqword ptr [dst + 48], xmm3
+end;
+{$endif CPUSSE2}
+
 procedure Sha1ExpandMessageBlocks(W: PCardinalArray; n: cardinal);
 // semi-unrolled optimized asm version by A. Bouchez
 {$ifdef FPC}nostackframe; assembler;{$endif}
@@ -1431,94 +1556,6 @@ asm
       pop     esi
       pop     ebx
       pop     ebp
-end;
-
-procedure Sha256ExpandMessageBlocks(W, Buf: PIntegerArray);
-  {$ifdef FPC}nostackframe; assembler;{$endif}
-asm // W=eax Buf=edx
-        push    esi
-        push    edi
-        push    ebx
-        mov     esi, eax
-        // part 1: W[i]:= bswap32(TW32Buf(Buf)[i])
-        mov     eax, [edx]
-        mov     ebx, [edx + 4]
-        bswap   eax
-        bswap   ebx
-        mov     [esi], eax
-        mov     [esi + 4], ebx
-        mov     eax, [edx + 8]
-        mov     ebx, [edx + 12]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 8], eax
-        mov     [esi + 12], ebx
-        mov     eax, [edx + 16]
-        mov     ebx, [edx + 20]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 16], eax
-        mov     [esi + 20], ebx
-        mov     eax, [edx + 24]
-        mov     ebx, [edx + 28]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 24], eax
-        mov     [esi + 28], ebx
-        mov     eax, [edx + 32]
-        mov     ebx, [edx + 36]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 32], eax
-        mov     [esi + 36], ebx
-        mov     eax, [edx + 40]
-        mov     ebx, [edx + 44]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 40], eax
-        mov     [esi + 44], ebx
-        mov     eax, [edx + 48]
-        mov     ebx, [edx + 52]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 48], eax
-        mov     [esi + 52], ebx
-        mov     eax, [edx + 56]
-        mov     ebx, [edx + 60]
-        bswap   eax
-        bswap   ebx
-        mov     [esi + 56], eax
-        mov     [esi + 60], ebx
-        lea     esi, [esi + 64]
-        // part2: w[i]:= lrot_1(w[i-3] xor w[i-8] xor w[i-14] xor w[i-16])
-        mov     ecx, 48
-@@2:    mov     eax, [esi - 2 * 4]    // w[i-2]
-        mov     edi, [esi - 7 * 4]    // w[i-7]
-        mov     edx, eax
-        mov     ebx, eax              // sig1: rr17 xor rr19 xor srx,10
-        ror     eax, 17
-        ror     edx, 19
-        shr     ebx, 10
-        xor     eax, edx
-        xor     eax, ebx
-        add     edi, eax
-        mov     eax, [esi - 15 * 4]   // w[i-15]
-        mov     ebx, eax              // sig0: rr7 xor rr18 xor sr3
-        mov     edx, eax
-        ror     eax, 7
-        ror     edx, 18
-        shr     ebx, 3
-        xor     eax, edx
-        xor     eax, ebx
-        add     eax, edi
-        add     eax, [esi - 16 * 4]   // w[i-16]
-        mov     [esi], eax
-        add     esi, 4
-        dec     ecx
-        jnz     @@2
-        pop     ebx
-        pop     edi
-        pop     esi
 end;
 
 
@@ -2525,7 +2562,7 @@ end;
 
 {
  1) our simple 4x algorithm is much faster than OpenSSL for small content < 1KB
- 2) for big content, OpenSSL is slightly faster
+ 2) for big content, OpenSSL is only slightly faster
  3) weirdly enough, our very same 4x algorithm is slower on x86_64 than on i386
 
  AesNiEncryptCtrNist32 Win32 on a Core i5 15400:
@@ -2596,47 +2633,47 @@ asm
         {$endif FPC}
         pshufb  xmm0, xmm2
         pshufb  xmm1, xmm2
-        movdqa  xmm5, xmm0
-        movdqa  xmm4, xmm0
-        movdqa  xmm2, xmm0
+        movaps  xmm5, xmm0
+        movaps  xmm4, xmm0
+        movaps  xmm2, xmm0
         // pclmulqdq xmm0, xmm1, 16
         db $66, $0f, $3a, $44, $c1, $10
         // pclmulqdq xmm5, xmm1, 17
         db $66, $0f, $3a, $44, $e9, $11
-        movdqa  xmm3, xmm5
+        movaps  xmm3, xmm5
         // pclmulqdq xmm4, xmm1, 0
         db $66, $0f, $3a, $44, $e1, $00
         // pclmulqdq xmm2, xmm1, 1
         db $66, $0f, $3a, $44, $d1, $01
         pslldq  xmm3, 8
         pxor    xmm0, xmm2
-        movdqa  xmm2, xmm4
+        movaps  xmm2, xmm4
         pxor    xmm3, xmm0
         pslldq  xmm2, 8
         punpckhqdq xmm3, xmm5
-        movdqa  xmm1, xmm3
+        movaps  xmm1, xmm3
         pslldq  xmm0, 8
         pxor    xmm0, xmm4
         pslldq  xmm1, 8
         punpckhqdq xmm2, xmm0
-        movdqa  xmm4, xmm2
-        movdqa  xmm7, xmm1
+        movaps  xmm4, xmm2
+        movaps  xmm7, xmm1
         pslldq  xmm4, 8
-        movdqa  xmm1, xmm2
+        movaps  xmm1, xmm2
         psrlq   xmm4, 63
         psrldq  xmm1, 8
         psllq   xmm3, 1
-        movdqa  xmm6, xmm1
+        movaps  xmm6, xmm1
         psllq   xmm2, 1
-        movdqa  xmm1, xmm3
+        movaps  xmm1, xmm3
         por     xmm2, xmm4
-        movdqa  xmm3, xmm2
+        movaps  xmm3, xmm2
         psrlq   xmm7, 63
         pslldq  xmm3, 8
         por     xmm1, xmm7
-        movdqa  xmm4, xmm3
+        movaps  xmm4, xmm3
         psrlq   xmm6, 63
-        movdqa  xmm0, xmm3
+        movaps  xmm0, xmm3
         psllq   xmm4, 63
         por     xmm1, xmm6
         psllq   xmm3, 57
@@ -2644,14 +2681,14 @@ asm
         pxor    xmm2, xmm3
         pxor    xmm0, xmm4
         pxor    xmm2, xmm0
-        movdqa  xmm3, xmm2
-        movdqa  xmm7, xmm2
+        movaps  xmm3, xmm2
+        movaps  xmm7, xmm2
         psrldq  xmm3, 8
-        movdqa  xmm0, xmm2
-        movdqa  xmm6, xmm2
-        movdqa  xmm4, xmm3
+        movaps  xmm0, xmm2
+        movaps  xmm6, xmm2
+        movaps  xmm4, xmm3
         psrlq   xmm7, 1
-        movdqa  xmm5, xmm3
+        movaps  xmm5, xmm3
         psllq   xmm4, 63
         psllq   xmm3, 57
         por     xmm4, xmm7
@@ -2664,7 +2701,7 @@ asm
         por     xmm0, xmm3
         psllq   xmm5, 62
         pxor    xmm1, xmm0
-        movdqa  xmm0, xmm4
+        movaps  xmm0, xmm4
         psrlq   xmm6, 2
         por     xmm5, xmm6
         pxor    xmm0, xmm5
@@ -2680,115 +2717,6 @@ end;
 {$endif HASAESNI}
 
 {$endif USEAESNI}
-
-function Adler32Asm(Adler: cardinal; p: pointer; Count: integer): cardinal;
-  {$ifdef FPC}nostackframe; assembler;{$endif}
-asm
-        push    ebx
-        push    esi
-        push    edi
-        mov     edi, eax
-        shr     edi, 16
-        movzx   ebx, ax
-        push    ebp
-        mov     esi, edx
-        test    esi, esi
-        mov     ebp, ecx
-        jne     @31
-        mov     eax, 1
-        jmp     @32
-@31:    test    ebp, ebp
-        jbe     @34
-@33:    cmp     ebp, 5552
-        jae     @35
-        mov     eax, ebp
-        jmp     @36
-@35:    mov     eax, 5552
-@36:    sub     ebp, eax
-        cmp     eax, 16
-        jl      @38
-        xor     edx, edx
-        xor     ecx, ecx
-@39:    sub     eax, 16
-        mov     dl, [esi]
-        mov     cl, [esi + 1]
-        add     ebx, edx
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 2]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 3]
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 4]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 5]
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 6]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 7]
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 8]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 9]
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 10]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 11]
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 12]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 13]
-        add     edi, ebx
-        add     ebx, ecx
-        mov     dl, [esi + 14]
-        add     edi, ebx
-        add     ebx, edx
-        mov     cl, [esi + 15]
-        add     edi, ebx
-        add     ebx, ecx
-        add     esi, 16
-        lea     edi, [edi + ebx]
-        cmp     eax, 16
-        jge     @39
-@38:    test    eax, eax
-        je      @42
-@43:    movzx   edx, byte ptr [esi]
-        add     ebx, edx
-        dec     eax
-        lea     esi, [esi + 1]
-        lea     edi, [edi + ebx]
-        jg      @43
-@42:    mov     ecx, 65521
-        mov     eax, ebx
-        xor     edx, edx
-        div     ecx
-        mov     ebx, edx
-        mov     ecx, 65521
-        mov     eax, edi
-        xor     edx, edx
-        div     ecx
-        test    ebp, ebp
-        mov     edi, edx
-        ja      @33
-@34:    mov     eax, edi
-        shl     eax, 16
-        or      eax, ebx
-@32:    pop     ebp
-        pop     edi
-        pop     esi
-        pop     ebx
-end;
 
 {
    MD5_386.Asm   -  386 optimized helper routine for calculating
@@ -3453,12 +3381,6 @@ end;
 
 {$ifdef USEAESNIHASH}
 
-var
-  // 16*4=64 random bytes (512-bit) set at startup to avoid hash flooding
-  // - defined as a pointer from GetMemAligned() which is mandatory on Delphi
-  AesNiHashKey: pointer; // = 512-bit AesNiHashAntiFuzzTable
-  AesNiHashMem: RawByteString;
-
 procedure _AesNiHashXmm0; forward;
 
 function _AesNiHash64(const seed: QWord; data: pointer; len: PtrUInt): QWord;
@@ -3512,7 +3434,7 @@ asm
         test    ecx, ecx
         jz      @0                      // _AesNiHash32 left eax=seed
         mov     eax, dword ptr [AesNiHashKey]
-        movdqa  xmm1, xmm0              // save seed for @17up
+        movaps  xmm1, xmm0              // save seed for @17up
         pxor    xmm0, dqword ptr [eax]  // xor with seed
         aesenc  xmm0, xmm0              // scramble
         // 1..16 bytes have no branch
@@ -3526,7 +3448,7 @@ asm
 @16:    aesenc  xmm1, xmm0  // scramble 3 times
         aesenc  xmm1, xmm1
         aesenc  xmm1, xmm1
-        movdqa  xmm0, xmm1
+        movaps  xmm0, xmm1
         movd    eax,  xmm1   // truncate to 32-bit for _AesNiHash32
 @0:     ret
 @17up:  cmp     ecx, 32
@@ -3543,14 +3465,14 @@ asm
         aesenc  xmm2, xmm2
         aesenc  xmm3, xmm3
         pxor    xmm2, xmm3 // combine result
-        movdqa  xmm0, xmm2
+        movaps  xmm0, xmm2
         movd    eax,  xmm2  // truncate to 32-bit for _AesNiHash32
         ret
 @33up:  cmp     ecx, 64
         ja      @65up
         // 33..64 bytes
-        movdqa  xmm2, xmm1
-        movdqa  xmm3, xmm1
+        movaps  xmm2, xmm1
+        movaps  xmm3, xmm1
         pxor    xmm1, dqword ptr [eax + 16]
         pxor    xmm2, dqword ptr [eax + 32]
         pxor    xmm3, dqword ptr [eax + 48]
@@ -3576,7 +3498,7 @@ asm
         pxor    xmm4, xmm6 // combine result
         pxor    xmm5, xmm7
         pxor    xmm4, xmm5
-        movdqa  xmm0, xmm4
+        movaps  xmm0, xmm4
         movd    eax,  xmm4  // truncate to 32-bit for _AesNiHash32
         ret
         {$ifdef FPC} align 16 {$else} .align 16 {$endif}
@@ -3599,8 +3521,8 @@ asm
         dd $05040302, $09080706, $0d0c0b0a, $ffff0f0e
         dd $04030201, $08070605, $0c0b0a09, $ff0f0e0d
 @65up:  // 65 bytes and up
-        movdqa  xmm2, xmm1
-        movdqa  xmm3, xmm1
+        movaps  xmm2, xmm1
+        movaps  xmm3, xmm1
         pxor    xmm1, dqword ptr [eax + 16]
         pxor    xmm2, dqword ptr [eax + 32]
         pxor    xmm3, dqword ptr [eax + 48]

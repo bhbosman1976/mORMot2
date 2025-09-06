@@ -167,12 +167,15 @@ type
   // this pointer is not defined on older Delphi revisions
   PMethod = ^TMethod;
 
-  {$ifndef ISDELPHIXE2}
+{$ifndef ISDELPHIXE2}
   /// used to store the handle of a system Thread
   TThreadID = cardinal;
   /// compatibility definition with FPC and newer Delphi
   PUInt64 = ^UInt64;
-  {$endif ISDELPHIXE2}
+
+/// cross-platform intrinsic since Delphi XE2 - just return [ebp + 4]
+function ReturnAddress: pointer;
+{$endif ISDELPHIXE2}
 
 {$endif FPC}
 
@@ -832,6 +835,10 @@ function NextGrow(capacity: integer): integer;
 // - e.g. NextPowerOfTwo(3) = NextPowerOfTwo(4) = 4
 function NextPowerOfTwo(number: cardinal): cardinal;
 
+/// quickly check if the number is a power-of-two
+function IsPowerOfTwo(number: PtrUInt): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// equivalence to SetString(s,pansichar,len) function but from a raw pointer
 // - so works with both PAnsiChar and PUtf8Char input buffer (or even PByteArray)
 // - faster especially under FPC
@@ -937,13 +944,6 @@ function GetCodePage(const s: RawByteString): cardinal; inline;
 // - StringRefCount() is not available on oldest Delphi
 function GetRefCount(const s: RawByteString): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
-
-/// initialize a RawByteString, ensuring returned "aligned" pointer
-// is 16-bytes aligned
-// - to be used e.g. for proper SIMD process
-// - you can specify an alternate alignment, but it should be a power of two
-procedure GetMemAligned(var holder: RawByteString; fillwith: pointer; len: PtrUInt;
-  out aligned: pointer; alignment: PtrUInt = 16);
 
 /// equivalence to @u[1] expression to ensure a RawUtf8 variable is unique
 // - will ensure that the string refcount is 1, and return a pointer to the text
@@ -2293,6 +2293,11 @@ procedure InterfaceArrayDelete(var aInterfaceArray; aItemIndex: PtrInt;
   const aContinueOnException: boolean = false; aCount: PInteger = nil); overload;
   {$ifdef HASSAFEINLINE}inline;{$endif}
 
+/// wrapper to extract an item from a T*InterfaceArray dynamic array storage
+// - will assign the instance to a local variable, and remove it from the array
+function InterfaceArrayExtract(var aInterfaceArray; aItemIndex: PtrInt;
+  var aExtracted; aCount: PInteger = nil): boolean;
+
 
 { ************ Low-level Types Mapping Binary Structures }
 
@@ -2344,7 +2349,7 @@ type
   PHash224 = ^THash224;
 
   /// store a 256-bit hash value in 32 bytes of memory
-  // - e.g. a SHA-256 digest, a TEccSignature result, or array[0..7] of cardinal
+  // - e.g. a SHA-256 digest, a TEccSignature result, or TBlock256
   THash256 = array[0..31] of byte;
   /// pointer to a 256-bit hash value
   PHash256 = ^THash256;
@@ -2356,7 +2361,7 @@ type
   PHash384 = ^THash384;
 
   /// store a 512-bit hash value in 64 bytes of memory
-  // - e.g. a SHA-512 digest, a TEccSignature result, or array[0..15] of cardinal
+  // - e.g. a SHA-512 digest, a TEccSignature result, or TBlock512
   THash512 = array[0..63] of byte;
   /// pointer to a 512-bit hash value
   PHash512 = ^THash512;
@@ -2366,7 +2371,14 @@ type
   TBlock128 = array[0..3] of cardinal;
   /// pointer to a 128-bit buffer
   PBlock128 = ^TBlock128;
-
+  /// store a 256-bit buffer of 32 bytes, indexed as 32-bit items
+  TBlock256 = array[0..7] of cardinal;
+  /// pointer to a 256-bit buffer, i.e. 32 bytes
+  PBlock256 = ^TBlock256;
+  /// store a 512-bit buffer of 64 bytes, indexed as 32-bit items
+  TBlock512 = array[0..15] of cardinal;
+  /// pointer to a 512-bit buffer, i.e. 64 bytes
+  PBlock512 = ^TBlock512;
   /// store a 1024-bit buffer of 128 bytes, indexed as 32-bit items
   TBlock1024 = array[0..31] of cardinal;
   /// pointer to a 1024-bit buffer, i.e. 128 bytes
@@ -2409,7 +2421,7 @@ type
   /// pointer to an infinite array of 256-bit hash values
   PHash256Array = ^THash256Array;
   /// store several 256-bit hash values
-  // - e.g. SHA-256 digests, TEccSignature results, or array[0..7] of cardinal
+  // - e.g. SHA-256 digests, TEccSignature results, or TBlock256
   // - consumes 32 bytes of memory per item
   THash256DynArray = array of THash256;
 
@@ -2423,7 +2435,7 @@ type
       3: (c0, c1: TBlock128);
       4: (b: THash256);
       5: (q: array[0..3] of QWord);
-      6: (c: array[0..7] of cardinal);
+      6: (c: TBlock256);
       7: (w: array[0..15] of word);
       8: (l, h: THash128Rec);
       9: (sha1: THash160);
@@ -2442,7 +2454,7 @@ type
   /// pointer to an infinite array of 512-bit hash values
   PHash512Array = ^THash512Array;
   /// store several 512-bit hash values
-  // - e.g. SHA-512 digests, or array[0..15] of cardinal
+  // - e.g. SHA-512 digests, or TBlock512
   // - consumes 64 bytes of memory per item
   THash512DynArray = array of THash512;
 
@@ -2461,7 +2473,7 @@ type
       7:  (b224: THash224);
       8:  (b384: THash384);
       9:  (w: array[0..31] of word);
-      10: (c: array[0..15] of cardinal);
+      10: (c: TBlock512);
       11: (i: array[0..7] of Int64);
       12: (q: array[0..7] of QWord);
       13: (r: array[0..3] of THash128Rec);
@@ -3279,7 +3291,11 @@ type
   // - SeedGenerator() makes it a sequence generator (or encryptor via Fill)
   // - when used as random generator (default when initialized with 0), Seed()
   // will gather and hash some system entropy to initialize the internal state
-  // - you can seed and use your own TLecuyer (threadvar) instance, if needed
+  // - you can seed and use your own TLecuyer (threadvar) instance, if needed -
+  // see RandomLecuyer() from mormot.crypt.core.pas to setup a local instance
+  // - generation numbers are very good for such a simple and proven algorithm:
+  // $   Lecuyer Random32 in 708us i.e. 134.7M/s, aver. 7ns, 538.8 MB/s
+  // $   Lecuyer RandomBytes in 3.75ms, 254.3 MB/s
   {$ifdef USERECORDWITHMETHODS}
   TLecuyer = record
   {$else}
@@ -3296,7 +3312,8 @@ type
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute the next 32-bit pseudo-random value, in range [0..max-1]
     function Next(max: cardinal): cardinal; overload;
-      {$ifdef HASSAFEINLINE}inline;{$endif}
+    /// compute the next positive 32-bit pseudo-random value
+    function Next31: integer;
     /// compute a 64-bit integer pseudo-random value
     function NextQWord: QWord;
     /// compute a 64-bit floating point pseudo-random value in range [0..1)
@@ -3312,6 +3329,8 @@ type
     procedure FillShort(var dest: ShortString; size: PtrUInt = 255);
     /// fill some string[0..31] with 7-bit ASCII pseudo-random text
     procedure FillShort31(var dest: TShort31);
+    /// fill some RawUtf8 with 7-bit ASCII pseudo-random text
+    procedure FillAscii(chars: PtrInt; var text: RawUtf8);
     /// force a pseudo-random seed of the generator from current system state
     // - as executed by the Next method at startup, and after 2^32 values, which
     // is very conservative against Pierre L'Ecuyer's algorithm period of 2^88
@@ -3327,6 +3346,12 @@ type
     /// force a well-defined seed of the generator from a buffer initial point
     // - apply crc32c() over the fixedseed buffer to initialize the generator
     procedure SeedGenerator(fixedseed: pointer; fixedseedbytes: integer); overload;
+    /// force a well-defined seed of the generator from its current 128-bit state
+    // - used e.g. from a random seed to generate a thread-safe uniform
+    // distribution in a Monte-Carlo or Miller-Rabin loop, or to generate a
+    // local TLecuyer instance for thread-safe non-blocking random generation
+    // e.g. as in mormot.crypt.core.pas RandomLecuyer()
+    procedure SeedGenerator; overload;
     /// compute the next 32-bit pseudo-random value with no Seed - internal call
     function RawNext: cardinal;
   end;
@@ -3346,6 +3371,9 @@ procedure AdjustShortStringFromRandom(dest: PByteArray; size: PtrUInt);
 // algorithm, and its gsl_rng_taus2 generator
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 
+/// use a gsl_rng_taus2 generator to diffuse 128-bit into any output size
+procedure LecuyerDiffusion(dest: pointer; destsize: PtrUInt; src: PHash128);
+
 /// retrieve 512-bit of entropy, as used to seed our gsl_rng_taus2 TLecuyer
 // - XOR _Fill256FromOs() then ThreadID and RdRand32/Rdtsc on Intel/AMD
 // - the resulting output is expected to contain at least 88-bit of true
@@ -3356,30 +3384,39 @@ procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 procedure XorEntropy(var e: THash512Rec);
 
 var
+  /// 512-bit filled at startup from Intel cpuid/rdtsc/rdrand and/or Linux auxv
+  // - is likely to be weak (but not void) on BSD/Mac ARM just after start
+  // - used and updated in-place by TLecuyer.Seed for its forward secrecy
+  BaseEntropy: THash512Rec;
+
   /// internal stub used by XorEntropy() to quickly get 256-bit of OS entropy
   // - this default unit with call sysutils.CreateGuid() twice - fine on Windows
   // - mormot.core.os.posix.inc will override it to properly call fast OS APIs
   // - consider rather XorEntropy() XorOSEntropy() or TAesPrng.GetEntropy()
   _Fill256FromOs: procedure(out e: THash256Rec);
 
-/// convert the endianness of a given unsigned 16-bit integer into BigEndian
+/// convert the endianness of a given unsigned 16-bit integer
 function bswap16(a: cardinal): cardinal;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert the endianness of a given unsigned 32-bit integer into BigEndian
+/// convert the endianness of a given unsigned 32-bit integer
 function bswap32(a: cardinal): cardinal;
   {$ifndef CPUINTEL}inline;{$endif}
 
-/// convert the endianness of a given unsigned 64-bit integer into BigEndian
+/// in-place convert the endianness of several unsigned 32-bit integers
+// - n is required to be > 0
+procedure bswap32array(a: PCardinalArray; n: PtrInt);
+
+/// convert the endianness of a given unsigned 64-bit integer
 function bswap64({$ifdef FPC_X86}constref{$else}const{$endif} a: QWord): QWord;
   {$ifndef CPUINTEL}inline;{$endif}
 
-/// convert the endianness of an array of unsigned 64-bit integer into BigEndian
+/// convert the endianness of an array of unsigned 64-bit integer
 // - n is required to be > 0
 // - warning: on x86, a should be <> b
 procedure bswap64array(a, b: PQWordArray; n: PtrInt);
 
-/// copy one memory buffer to another, swapping the bytes order
+/// copy one memory buffer to another, swapping their bytes order
 // - used e.g. by TBigInt.Load/Save to follow DER big-endian encoding
 // - warning: src and dst should not overlap
 procedure MoveSwap(dst, src: PByte; n: PtrInt);
@@ -3592,22 +3629,21 @@ type
 /// logical OR of two memory buffers
 // - will perform on all buffer bytes:
 // ! Dest[i] := Dest[i] or Source[i];
-procedure OrMemory(Dest, Source: PByteArray; size: PtrInt);
-  {$ifdef HASINLINE}inline;{$endif}
+procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 
-/// logical XOR of two memory buffers
+/// logical XOR of two memory buffers - using SSE2 asm on x86_64
 // - will perform on all buffer bytes:
 // ! Dest[i] := Dest[i] xor Source[i];
-procedure XorMemory(Dest, Source: PByteArray; size: PtrInt); overload;
-  {$ifdef HASINLINE}inline;{$endif}
+procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt); overload;
+  {$ifndef CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// logical XOR of two memory buffers into a third
 // - will perform on all buffer bytes:
 // ! Dest[i] := Source1[i] xor Source2[i];
-procedure XorMemory(Dest, Source1, Source2: PByteArray; size: PtrInt); overload;
+procedure XorMemory(Dest, Source1, Source2: PByteArray; Size: PtrInt); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// logical XOR of two 128-bit memory buffers
+/// logical XOR of two 128-bit / 16-byte memory buffers
 procedure XorMemory(var Dest: THash128Rec;
   {$ifdef FPC}constref{$else}const{$endif} Source: THash128Rec); overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -3616,7 +3652,6 @@ procedure XorMemory(var Dest: THash128Rec;
 // - will perform on all buffer bytes:
 // ! Dest[i] := Dest[i] and Source[i];
 procedure AndMemory(Dest, Source: PByteArray; size: PtrInt);
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if all bytes equal zero
 function IsZero(P: pointer; Length: integer): boolean; overload;
@@ -3734,6 +3769,9 @@ procedure crcblockfast(crc128, data128: PBlock128);
 // - combine crcblocks() with 4 parallel crc32c() for 1..15 trailing bytes
 procedure crc32c128(hash: PHash128; buf: PAnsiChar; len: cardinal);
 
+/// compute ADLER32 checksum on the supplied buffer - use adler32() instead
+function adler32fast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+
 var
   /// compute CRC32C (Castagnoli/iSCSI) checksum on the supplied buffer
   // - result is not compatible with zlib/IEEE-802 crc32() - Intel/SCSI crc32c()
@@ -3772,8 +3810,8 @@ var
   crc32: THasher = crc32fast;
 
   /// compute ADLER32 checksum on the supplied buffer
-  // - is only available if mormot.lib.z.pas unit is included in the project
-  adler32: THasher;
+  // - mormot.lib.z.pas unit may include the much faster version from libdeflate
+  adler32: THasher = adler32fast;
 
 /// compute CRC16-CCITT checkum on the supplied buffer
 // - i.e. 16-bit CRC-CCITT, with polynomial x^16 + x^12 + x^5 + 1 ($1021)
@@ -4904,6 +4942,11 @@ begin // O(1) branchless algorithm for 32-bit values
   result := result or (result shr 4);
   result := result or (result shr 8);
   result := (result or (result shr 16)) + 1;
+end;
+
+function IsPowerOfTwo(number: PtrUInt): boolean;
+begin
+  result := (number and (number - 1) = 0);
 end;
 
 {$ifndef FPC_CPUX64} // dedicated asm on x86_64 only
@@ -6872,28 +6915,28 @@ end;
 function MinPtrInt(const A, B: PtrInt): PtrInt;
 begin
   result := A;
-  if B < A then
+  if B < result then // better FPC code generation, especially with A constant
     result := B;
 end;
 
 function MaxPtrInt(const A, B: PtrInt): PtrInt;
 begin
   result := A;
-  if B > A then
+  if B > result then
     result := B;
 end;
 
 function MinPtrUInt(const A, B: PtrUInt): PtrUInt;
 begin
   result := A;
-  if B < A then
+  if B < result then
     result := B;
 end;
 
 function MaxPtrUInt(const A, B: PtrUInt): PtrUInt;
 begin
   result := A;
-  if B > A then
+  if B > result then
     result := B;
 end;
 
@@ -8385,6 +8428,18 @@ begin
   result := aIndex;
 end;
 
+function ArrayCount(aArray: PPAnsiChar; aCount: PInteger): PtrUInt;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  if aCount = nil then
+    if aArray^ <> nil then
+      result := PDALen(aArray^ - _DALEN)^ + _DAOFF
+    else
+      result := 0
+  else
+    result := aCount^;
+end;
+
 procedure PtrArrayDelete(var aPtrArray; aIndex: PtrInt; aCount: PInteger;
   aKind: TPtrArrayKind);
 var
@@ -8392,10 +8447,7 @@ var
   v: PPointerArray;
   n: PtrInt;
 begin
-  if aCount = nil then
-    n := length(a)
-  else
-    n := aCount^;
+  n := ArrayCount(@a, aCount);
   if PtrUInt(aIndex) >= PtrUInt(n) then
     exit; // out of range
   v := @a[aIndex];
@@ -8419,7 +8471,7 @@ begin
     if (n and 127 <> 0) then // call ReallocMem() once every 128 deletions
       PDALen(PAnsiChar(a) - _DALEN)^ := n - _DAOFF
     else
-      SetLength(a, n) // ReallocMem() or finalize if n = 0
+      SetLength(a, n) // periodic ReallocMem() or finalize if n = 0
   else
   begin
     aCount^ := n; // no ReallocMem()
@@ -8430,15 +8482,8 @@ end;
 
 function PtrArrayDelete(var aPtrArray; aItem: pointer; aCount: PInteger;
   aKind: TPtrArrayKind): PtrInt;
-var
-  a: TPointerDynArray absolute aPtrArray;
-  n: PtrInt;
 begin
-  if aCount = nil then
-    n := length(a)
-  else
-    n := aCount^;
-  result := PtrUIntScanIndex(pointer(a), n, PtrUInt(aItem));
+  result := PtrUIntScanIndex(pointer(aPtrArray), ArrayCount(@aPtrArray, aCount), PtrUInt(aItem));
   if result >= 0 then
     PtrArrayDelete(aPtrArray, result, aCount, aKind);
 end;
@@ -8782,6 +8827,18 @@ begin
   result := PtrArrayDelete(aInterfaceArray, pointer(aItem), nil, pakInterface);
 end;
 
+function InterfaceArrayExtract(var aInterfaceArray; aItemIndex: PtrInt;
+  var aExtracted; aCount: PInteger): boolean;
+var
+  a: TPointerDynArray absolute aInterfaceArray;
+begin
+  result := false;
+  if PtrUInt(aItemIndex) >= ArrayCount(@a, aCount) then
+    exit;
+  pointer(aExtracted) := a[aItemIndex];              // weak assign
+  PtrArrayDelete(a, aItemIndex, aCount, pakPointer); // weak remove
+  result := true;
+end;
 
 
 { ************ low-level types mapping binary structures }
@@ -9389,6 +9446,31 @@ begin
   result := PosExPas(pointer(SubStr), pointer(S), Offset); // inlined call
 end;
 
+function adler32fast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+var
+  s1, s2, n, c: cardinal;
+begin
+  s1 := crc and $ffff;
+  s2 := crc shr 16;
+  if len > 0 then
+    repeat
+      n := 5552;
+      if len < n then
+        n := len;
+      c := n;
+      repeat
+        inc(s1, ord(buf^));
+        inc(buf);
+        inc(s2, s1);
+        dec(c);
+      until c = 0;
+      s1 := s1 mod 65521;
+      s2 := s2 mod 65521;
+      dec(len, n);
+    until len = 0;
+  result := (s1 and $ffff) + (s2 and $ffff) shl 16;
+end;
+
 {$endif CPUX86}
 
 function StrCompW(Str1, Str2: PWideChar): PtrInt;
@@ -9933,13 +10015,23 @@ end;
 
 {$ifdef OSWINDOWS} // not defined in the Delphi RTL but in its Windows unit :(
 function GetCurrentThreadId: PtrUInt; stdcall; external 'kernel32';
-{$endif OSWINDOWS}
+function CoCreateGuid(var h: THash128): PtrUInt; stdcall; external 'ole32.dll';
 
 procedure __Fill256FromOs(out e: THash256Rec);
 begin
-  sysutils.CreateGUID(e.l.guid); // = direct CoCreateGuid() on Windows
-  sysutils.CreateGUID(e.h.guid);
+  CoCreateGuid(e.Lo); // fast but not CSPRNG
+  CoCreateGuid(e.Hi);
+end;
+{$else}
+{$ifdef OSDARWIN} // lighter than sysutil's fpgettimeofday(), and in nanoseconds
+function GetTickCount64: UInt64; cdecl external 'c' name 'mach_absolute_time';
+{$endif OSDDARWIN}
+procedure __Fill256FromOs(out e: THash256Rec);
+begin
+  e.q[0] := GetTickCount64;
+  crc256c(@e, SizeOf(e.q[0]), e.b); // weak but not void
 end; // mormot.core.os.posix.inc overrides to use OS API - but not /dev/urandom
+{$endif OSWINDOWS}
 
 procedure XorEntropy(var e: THash512Rec);
 var
@@ -9956,6 +10048,8 @@ begin
   RdRand32(@tmp.l, 4);              // xor 128-bit HW CSPRNG: no-op if no cfSSE42
   if cfTSC in CpuFeatures then
     e.r[2].L := e.r[2].L xor Rdtsc; // has changed during slow RdRand32()
+  {$else}
+  e.r[2].L := e.r[2].L xor GetTickCount64; // defined in RTL or just above
   {$endif CPUINTEL}
   crcblock(@e.r[3], @tmp.l);        // crc32c 128-bit diffusion
 end; // note: RTL Random() not used because it is not thread-safe nor consistent
@@ -9975,7 +10069,7 @@ begin
   dest[0] := size;
   if size <> 0 then
     repeat
-      dest[size] := (cardinal(dest[size]) and 63) + 32;
+      dest[size] := (PtrUInt(dest[size]) and 63) + 32;
       dec(size);
     until size = 0;
 end;
@@ -9994,27 +10088,17 @@ begin // Linear Feedback Shift Register (LFSR) - not inlined for better codegen
   result := rs1 xor rs2 xor result;
 end; // use masks of rs1:-2=31-bit rs2:-8=29-bit rs3:-16=28-bit -> 2^88 period
 
-var // filled by TestCpuFeatures from Intel cpuid/rdtsc/random and/or Linux auxv
-  LecuyerEntropy: THash512Rec; // nothing on BSD/Mac but XorEntropy() is enough
-
 procedure TLecuyer.Seed(entropy: PByteArray; entropylen: PtrInt);
 var
   e: THash512Rec; // use a local copy on stack to avoid race condition
-  h: THash128Rec;
-  i: integer;
 begin
-  e := LecuyerEntropy; // we only need 88-bit of entropy within these 512-bit
+  e := BaseEntropy; // only need 88-bit of entropy within these 512-bit
   if entropy <> nil then
     crc32c128(@e.h0, pointer(entropy), entropylen); // user-supplied entropy
   XorEntropy(e); // xor 512-bit from _Fill256FromOs + thread + RdRand32 + Rdtsc
-  LecuyerEntropy := e; // forward security
-  DefaultHasher128(@h, @e, SizeOf(e)); // may be AesNiHash128
-  rs1 := MaxPtrUInt(rs1 xor h.c0, 2);  // mask = -2 in RawNext
-  rs2 := MaxPtrUInt(rs2 xor h.c1, 8);  // mask = -8
-  rs3 := MaxPtrUInt(rs3 xor h.c2, 16); // mask = -16
-  seedcount := h.c3 shr 24; // may seed slightly before 2^32 RawNext calls
-  for i := 1 to h.i3 and 7 do
-    RawNext; // warm up
+  BaseEntropy := e; // forward secrecy
+  DefaultHasher128(@self, @e, SizeOf(e)); // may be AesNiHash128
+  SeedGenerator;
 end;
 
 procedure TLecuyer.SeedGenerator(fixedseed: QWord);
@@ -10027,10 +10111,18 @@ begin
   rs1 := crc32c(0,   fixedseed, fixedseedbytes);
   rs2 := crc32c(rs1, fixedseed, fixedseedbytes);
   rs3 := crc32c(rs2, fixedseed, fixedseedbytes);
-  rs1 := MaxPtrUInt(rs1, 2);  // mask = -2 in RawNext
-  rs2 := MaxPtrUInt(rs2, 8);  // mask = -8
-  rs3 := MaxPtrUInt(rs3, 16); // mask = -16
-  seedcount := 1; // will reseed after 16 GB, i.e. 2^32 RawNext calls (< 2^88)
+  SeedGenerator;
+end;
+
+procedure TLecuyer.SeedGenerator;
+begin
+  if rs1 < 2 then  // mask = -2 in RawNext
+    rs1 := 2;
+  if rs2 < 8 then  // mask = -8
+    rs2 := 8;
+  if rs3 < 16 then // mask = -16
+    rs3 := 16;
+  seedcount := 1;  // reseed after 16 GB, i.e. 2^32 RawNext calls (<2^88)
 end;
 
 function TLecuyer.Next: cardinal;
@@ -10045,6 +10137,11 @@ end;
 function TLecuyer.Next(max: cardinal): cardinal;
 begin
   result := (QWord(Next) * max) shr 32;
+end;
+
+function TLecuyer.Next31: integer;
+begin
+  result := Next shr 1;
 end;
 
 function TLecuyer.NextQWord: QWord;
@@ -10110,6 +10207,18 @@ begin
   AdjustShortStringFromRandom(@dest, 32);
 end;
 
+procedure TLecuyer.FillAscii(chars: PtrInt; var text: RawUtf8);
+var
+  p: PByteArray;
+begin
+  p := FastSetString(text, chars);
+  Fill(p, chars);
+  while chars > 0 do
+  begin
+    dec(chars);
+    p[chars] := (PtrUInt(p[chars]) and 63) + 32; // 7-bit ASCII
+  end;
+end;
 
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 var
@@ -10123,6 +10232,15 @@ begin
   gen.SeedGenerator(key);
   gen.Fill(@data[1], length(data));
   FillZero(THash128(gen)); // to avoid forensic leak
+end;
+
+procedure LecuyerDiffusion(dest: pointer; destsize: PtrUInt; src: PHash128);
+var
+  gen: TLecuyer;
+begin
+  PHash128(@gen)^ := src^;
+  gen.SeedGenerator;
+  gen.Fill(dest, destsize);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -10316,7 +10434,7 @@ end; // no "vector width" bits any more: AVX10 means 128-, 256- and 512-bit
 
 procedure TestCpuFeatures;
 var
-  regs: array[0..3] of TIntelRegisters absolute LecuyerEntropy;
+  regs: array[0..3] of TIntelRegisters absolute BaseEntropy;
   flags: PIntegerArray;
 begin
   // retrieve CPUID raw flags
@@ -10385,9 +10503,18 @@ begin
       include(X64CpuFeatures, cpuHaswell);
   end;
   {$endif ASMX64}
-  {$endif DISABLE_SSE42}
   // redirect some CPU-aware functions
-  {$ifdef ASMX86} 
+  if cfSSE42 in CpuFeatures then // for both i386 and x86_64
+  begin
+    crc32c          := @crc32csse42;
+    crc32cby4       := @crc32cby4sse42;
+    crcblock        := @crcblocksse42;
+    crcblocks       := @crcblockssse42;
+    DefaultHasher   := @crc32csse42;
+    InterningHasher := @crc32csse42;
+  end;
+  {$endif DISABLE_SSE42}
+  {$ifdef ASMX86}
   {$ifndef HASNOSSE2}
   {$ifdef WITH_ERMS}
   if not (cfSSE2 in CpuFeatures) then // introduced in year 2000 with Pentium 4
@@ -10407,15 +10534,6 @@ begin
   if cfSSE2 in CpuFeatures then
     StrLen := @StrLenSSE2;
   {$endif ASMX86}
-  if cfSSE42 in CpuFeatures then // for both i386 and x86_64
-  begin
-    crc32c          := @crc32csse42;
-    crc32cby4       := @crc32cby4sse42;
-    crcblock        := @crcblocksse42;
-    crcblocks       := @crcblockssse42;
-    DefaultHasher   := @crc32csse42;
-    InterningHasher := @crc32csse42;
-  end;
 end;
 
 {$else not CPUINTEL}
@@ -10848,6 +10966,14 @@ begin
   result := SwapEndian(a); // use fast platform-specific function
 end;
 
+procedure bswap32array(a: PCardinalArray; n: PtrInt);
+begin
+  repeat // assume n > 0 like the asm
+    dec(n);
+    a[n] := SwapEndian(a[n]);
+  until n = 0;
+end;
+
 function bswap64(const a: QWord): QWord;
 begin
   result := SwapEndian(a); // use fast platform-specific function
@@ -10946,8 +11072,8 @@ begin
     while p^ <> 0 do
       inc(p);
     inc(p); // auxv is located after the last textual environment variable
-    e := @LecuyerEntropy;
-    eend := @PByteArray(e)[SizeOf(LecuyerEntropy)];
+    e := @BaseEntropy;
+    eend := @PByteArray(e)[SizeOf(BaseEntropy)];
     while p[0] <> 0 do
     begin
       case p[0] of // 32-bit or 64-bit entries = PtrUInt
@@ -10956,12 +11082,12 @@ begin
         AT_HWCAP2:
           caps[1] := p[1];
         AT_RANDOM: // 16 random bytes (used as stacks canaries) are just perfect
-          XorMemory(LecuyerEntropy.r[3], PHash128Rec(p[1])^);
+          XorMemory(BaseEntropy.r[3], PHash128Rec(p[1])^);
       end;
-      inc(e^, ((p[0] shl 20) xor p[1]) * 3266489917); // fill LecuyerEntropy
+      inc(e^, ((p[0] shl 20) xor p[1]) * 3266489917); // fill BaseEntropy
       inc(e);
       if e = eend then
-        dec(PByte(e), SizeOf(LecuyerEntropy));
+        dec(PByte(e), SizeOf(BaseEntropy));
       p := @p[2];
     end;
     MoveFast(caps, CpuFeatures, SizeOf(CpuFeatures));
@@ -11981,68 +12107,70 @@ begin
 end;
 
 
-procedure OrMemory(Dest, Source: PByteArray; size: PtrInt);
+procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 begin
-  while size >= SizeOf(PtrInt) do
+  while Size >= SizeOf(PtrInt) do
   begin
-    dec(size, SizeOf(PtrInt));
+    dec(Size, SizeOf(PtrInt));
     PPtrInt(Dest)^ := PPtrInt(Dest)^ or PPtrInt(Source)^;
     inc(PPtrInt(Dest));
     inc(PPtrInt(Source));
   end;
-  while size > 0 do
+  while Size > 0 do
   begin
-    dec(size);
-    Dest[size] := Dest[size] or Source[size];
+    dec(Size);
+    Dest[Size] := Dest[Size] or Source[Size];
   end;
 end;
 
-procedure XorMemory(Dest, Source: PByteArray; size: PtrInt);
+{$ifndef CPUX64} // SSE2 version in mormot.core.base.asmx64.inc
+procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt);
 begin
-  while size >= SizeOf(PtrInt) do
+  while Size >= SizeOf(PtrInt) do
   begin
-    dec(size, SizeOf(PtrInt));
+    dec(Size, SizeOf(PtrInt));
     PPtrInt(Dest)^ := PPtrInt(Dest)^ xor PPtrInt(Source)^;
     inc(PPtrInt(Dest));
     inc(PPtrInt(Source));
   end;
-  while size > 0 do
+  while Size > 0 do
   begin
-    dec(size);
-    Dest[size] := Dest[size] xor Source[size];
+    dec(Size);
+    Dest[Size] := Dest[Size] xor Source[Size];
   end;
 end;
+{$endif CPUX64}
 
-procedure XorMemory(Dest, Source1, Source2: PByteArray; size: PtrInt);
+procedure XorMemory(Dest, Source1, Source2: PByteArray; Size: PtrInt);
 begin
-  while size >= SizeOf(PtrInt) do
+  while Size >= SizeOf(PtrInt) do
   begin
-    dec(size, SizeOf(PtrInt));
+    dec(Size, SizeOf(PtrInt));
     PPtrInt(Dest)^ := PPtrInt(Source1)^ xor PPtrInt(Source2)^;
     inc(PPtrInt(Dest));
     inc(PPtrInt(Source1));
     inc(PPtrInt(Source2));
   end;
-  while size > 0 do
+  while Size > 0 do
   begin
-    dec(size);
-    Dest[size] := Source1[size] xor Source2[size];
+    dec(Size);
+    Dest[Size] := Source1[Size] xor Source2[Size];
   end;
 end;
 
-procedure AndMemory(Dest, Source: PByteArray; size: PtrInt);
+procedure AndMemory(Dest, Source: PByteArray; Size: PtrInt);
 begin
-  while size >= SizeOf(PtrInt) do
+  while Size >= SizeOf(PtrInt) do
   begin
-    dec(size, SizeOf(PtrInt));
+    dec(Size, SizeOf(PtrInt));
     PPtrInt(Dest)^ := PPtrInt(Dest)^ and PPtrInt(Source)^;
     inc(PPtrInt(Dest));
     inc(PPtrInt(Source));
   end;
-  while size > 0 do
+  while Size > 0 do
   begin
-    dec(size);
-    Dest[size] := Dest[size] and Source[size];
+    dec(Size);
+    Dest[Size] := Dest[Size] and Source[Size];
   end;
 end;
 
@@ -13305,7 +13433,9 @@ end;
 
 function {%H-}RaiseStreamError(Caller: TObject; const Context: ShortString): PtrInt;
 begin
-  raise EStreamError.CreateFmt('Unexpected %s.%s', [ClassNameShort(Caller)^, Context]);
+  raise EStreamError.CreateFmt('Unexpected %s.%s', [ClassNameShort(Caller)^, Context])
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 { TStreamWithPosition }
@@ -13545,13 +13675,15 @@ begin
   // setup minimalistic global functions - overriden by other core units
   VariantClearSeveral      := @_VariantClearSeveral;
   SortDynArrayVariantComp  := @_SortDynArrayVariantComp;
-  _Fill256FromOs := @__Fill256FromOs;
-  ClassUnit      := @_ClassUnit;
+  _Fill256FromOs           := @__Fill256FromOs;
+  ClassUnit                := @_ClassUnit;
   // initialize CPU-specific asm
   TestCpuFeatures;
   {$ifndef ASMINTEL}
   MoveFast := @Move;
   FillCharFast := @_FillChar;
+  if BaseEntropy.i0 = 0 then // BSD or MAC arm/aarch64
+    XorEntropy(BaseEntropy); // ensure not void
   {$endif ASMINTEL}
 end;
 
