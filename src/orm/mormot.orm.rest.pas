@@ -154,14 +154,16 @@ type
     // this value as insertion ID
     // - override this method for proper calling the database engine
     // - this method must be implemented in a thread-safe manner
-    function EngineAdd(TableModelIndex: integer; const SentData: RawUtf8): TID; virtual; abstract;
+    function EngineAdd(TableModelIndex: integer;
+      const SentData: RawUtf8): TID; virtual; abstract;
     /// update a member
     // - implements REST PUT collection
     // - SentData can contain the JSON object with field values to be added
     // - returns true on success
     // - override this method for proper calling the database engine
     // - this method must be implemented in a thread-safe manner
-    function EngineUpdate(TableModelIndex: integer; ID: TID; const SentData: RawUtf8): boolean; virtual; abstract;
+    function EngineUpdate(TableModelIndex: integer; ID: TID;
+      const SentData: RawUtf8): boolean; virtual; abstract;
     /// delete a member
     // - implements REST DELETE collection
     // - returns true on success
@@ -729,10 +731,11 @@ begin
     ForceID := false;
   props := Value.Orm;
   if CustomFields <> nil then
-    if DoNotAutoComputeFields then
-      fields := CustomFields^ * props.CopiableFieldsBits
-    else
-      fields := CustomFields^ * props.CopiableFieldsBits + props.ComputeBeforeAddFieldsBits
+  begin
+    fields := CustomFields^ * props.CopiableFieldsBits; // refine from ALL_FIELDS
+    if not DoNotAutoComputeFields then
+      fields := fields + props.ComputeBeforeAddFieldsBits;
+  end
   else if WithBlobs then
     fields := props.CopiableFieldsBits
   else
@@ -1374,7 +1377,7 @@ begin
     exit;
   sql := TrimU(SqlWhere);
   if not EndWith(sql, ' LIMIT 1') then
-    sql := sql + ' LIMIT 1'; // we keep a single record below
+    Append(sql, ' LIMIT 1'); // we keep a single record below
   T := MultiFieldValues(POrmClass(Value)^, FieldsCsv, sql);
   if T <> nil then
   try
