@@ -1887,7 +1887,7 @@ function FormatToShort(const Format: RawUtf8; const Args: array of const): Short
 /// fast Format() function replacement, tuned for small content
 // - use the same single token % (and implementation) than FormatUtf8()
 procedure FormatString(const Format: RawUtf8; const Args: array of const;
-  out result: string); overload;
+  var result: string); overload;
 
 /// fast Format() function replacement, tuned for small content
 // - use the same single token % (and implementation) than FormatUtf8()
@@ -1895,9 +1895,14 @@ function FormatString(const Format: RawUtf8; const Args: array of const): string
   {$ifdef FPC}inline;{$endif} // Delphi don't inline "array of const" parameters
 
 /// fast Format() function replacement, for UTF-8 content stored in TShort16
-// - truncate result if the text size exceeds 16 bytes
+// - truncate result if the text size exceeds 16 chars (17 bytes)
 procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
   var result: TShort16);
+
+/// fast Format() function replacement, for UTF-8 content stored in TShort31
+// - truncate result if the text size exceeds 31 chars (32 bytes)
+procedure FormatShort31(const Format: RawUtf8; const Args: array of const;
+  var result: TShort31);
 
 /// fast Format() function replacement, for UTF-8 content stored in variant
 function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
@@ -2038,20 +2043,20 @@ procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean = tru
 /// create a temporary string random content, WinAnsi (code page 1252) content
 function RandomWinAnsi(CharCount: integer): WinAnsiString;
 
-/// create a temporary UTF-8 string random content, using WinAnsi
-// (code page 1252) content
+/// create a temporary UTF-8 random string, from RandomWinAnsi() content
 // - CharCount is the number of random WinAnsi chars, so it is very likely that
 // length(result) > CharCount once encoded into UTF-8
 function RandomUtf8(CharCount: integer): RawUtf8;
 
-/// create a temporary UTF-16 string random content, using WinAnsi
-// (code page 1252) content
+/// create a temporary UTF-16 random string, from RandomWinAnsi() content
 function RandomUnicode(CharCount: integer): SynUnicode;
 
-/// create a temporary string random content, using ASCII 7-bit content
+/// create a temporary string random content, using only ASCII 7-bit chars
+// - e.g. RandomAnsi7(10) = '1d2I(\?U; ' (from #$20 space to #$7e tilde)
 function RandomAnsi7(CharCount: integer; CodePage: integer = CP_UTF8): RawByteString;
 
 /// create a temporary string random content, using A..Z,_,0..9 chars only
+// - for a strong password, use safer TAesPrng.Main.RandomPassword method
 function RandomIdentifier(CharCount: integer): RawUtf8;
 
 /// create a temporary string random content, using uri-compatible chars only
@@ -9830,19 +9835,13 @@ begin
     FastAssignNew(Result);
 end;
 
-procedure FormatShort(const Format: RawUtf8; const Args: array of const;
-  var result: ShortString);
+function FormatBufferRaw(const Format: RawUtf8; Args: PVarRec; ArgsCount: PtrInt;
+  Dest: pointer; DestLen: PtrInt): PUtf8Char;
 var
   f: TFormatUtf8;
 begin
-  if (Format = '') or
-     (high(Args) < 0) then // no formatting needed
-    SetString(result, PAnsiChar(pointer(Format)), length(Format))
-  else
-  begin
-    f.Parse(Format, @Args[0], length(Args));
-    result[0] := AnsiChar(f.WriteMax(@result[1], 255) - @result[1]);
-  end;
+  f.Parse(Format, Args, ArgsCount);
+  result := f.WriteMax(Dest, DestLen);
 end;
 
 function FormatBuffer(const Format: RawUtf8; const Args: array of const;
@@ -9856,13 +9855,11 @@ begin
                 Dest, DestLen) - PUtf8Char(Dest);
 end;
 
-function FormatBufferRaw(const Format: RawUtf8; Args: PVarRec; ArgsCount: PtrInt;
-  Dest: pointer; DestLen: PtrInt): PUtf8Char;
-var
-  f: TFormatUtf8;
+procedure FormatShort(const Format: RawUtf8; const Args: array of const;
+  var result: ShortString);
 begin
-  f.Parse(Format, Args, ArgsCount);
-  result := f.WriteMax(Dest, DestLen);
+  result[0] := AnsiChar(FormatBufferRaw(
+    Format, @Args[0], length(Args), @result[1], 255) - @result[1]);
 end;
 
 function FormatToShort(const Format: RawUtf8;
@@ -9874,21 +9871,20 @@ end;
 
 procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
   var result: TShort16);
-var
-  f: TFormatUtf8;
 begin
-  if (Format = '') or
-     (high(Args) < 0) then // no formatting needed
-    SetString(result, PAnsiChar(pointer(Format)), length(Format))
-  else
-  begin
-    f.Parse(Format, @Args[0], length(Args));
-    result[0] := AnsiChar(f.WriteMax(@result[1], 16) - @result[1]);
-  end;
+  result[0] := AnsiChar(FormatBufferRaw(
+    Format, @Args[0], length(Args), @result[1], 16) - @result[1]);
+end;
+
+procedure FormatShort31(const Format: RawUtf8; const Args: array of const;
+  var result: TShort31);
+begin
+  result[0] := AnsiChar(FormatBufferRaw(
+    Format, @Args[0], length(Args), @result[1], 31) - @result[1]);
 end;
 
 procedure FormatString(const Format: RawUtf8; const Args: array of const;
-  out result: string);
+  var result: string);
 var
   f: TFormatUtf8;
 begin
@@ -10303,7 +10299,7 @@ var
 begin
   R := RandomByteString(CharCount, result, CodePage);
   for i := 0 to CharCount - 1 do
-    R[i] := (R[i] mod 95) + 32; // may include tilde #$7e (#126) char
+    R[i] := (R[i] mod 95) + 32; // [' ' .. #$7e] (#126=tilde) range
 end;
 
 procedure InitRandom64(chars64: PAnsiChar; count: integer; var result: RawUtf8);

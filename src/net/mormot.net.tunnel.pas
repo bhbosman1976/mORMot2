@@ -9,6 +9,7 @@ unit mormot.net.tunnel;
    TCP/UDP Port Forwarding and Tunnelling
    - Abstract Definitions for Port Forwarding
    - Local NAT Client/Server to Tunnel TCP Streams
+   - Abstract SOA implementation of a Relay Server
 
   *****************************************************************************
 
@@ -33,6 +34,7 @@ uses
   mormot.core.log,
   mormot.core.datetime,
   mormot.core.variants,
+  mormot.core.interfaces,
   mormot.crypt.core,
   mormot.crypt.secure,   // for ICryptCert
   mormot.crypt.ecc256r1, // for ECDHE encryption
@@ -45,17 +47,18 @@ type
   ETunnel = class(ESynException);
 
   /// each option available for TTunnelLocal process
-  // - toEcdhe will compute an ephemeral secret to encrypt the link
+  // - toEcdhe computes an ephemeral secret to encrypt the link: combined with
+  // toClientSigned/toServerSigned, it offers perfect End-to-end encryption
+  // - toClientSigned/toServerSigned will be set by Open() according to the
+  // actual certificates available, to ensure endpoint authenticated handshake
   // - if toEcdhe is not set, toEncrypt will ensure a symmetric encryption
   // - only localhost clients are accepted, unless toAcceptNonLocal is set
-  // - toClientSigned/toServerSigned will be set by Open() according to
-  // the actual certificates available, to ensure an authenticated handshake
   TTunnelOption = (
     toEcdhe,
-    toEncrypt,
-    toAcceptNonLocal,
     toClientSigned,
-    toServerSigned);
+    toServerSigned,
+    toEncrypt,
+    toAcceptNonLocal);
 
   /// options for TTunnelLocal process
   TTunnelOptions = set of TTunnelOption;
@@ -63,7 +66,7 @@ type
 
   /// a session identifier which should match on both sides of the tunnel
   // - typically a Random32 or a TBinaryCookieGeneratorSessionID value
-  TTunnelSession = Int64;
+  TTunnelSession = cardinal;
   PTunnelSession = ^TTunnelSession;
 
   /// abstract transmission layer with the central relay server
@@ -72,17 +75,18 @@ type
   // - named as Tunnel*() methods to be joined as a single service interface,
   // to leverage a single WebSockets callback
   ITunnelTransmit = interface(IInvokable)
-    ['{F481A93C-1321-49A6-9801-CCCF065F3973}']
+    ['{AA661151-81EA-4665-895E-1487EF459AFF}']
     /// main method to emit the supplied binary Frame to the relay server
-    // - the raw binary frame always end with 8 bytes of 64-bit TTunnelSession
+    // - the raw binary frame always end with 4 bytes of 32-bit TTunnelSession
     // - no result so that the frames could be gathered e.g. over WebSockets
     // - single binary parameter so that could be transmitted as
     // BINARY_CONTENT_TYPE without any base-64 encoding (to be done at WS level)
     procedure TunnelSend(const Frame: RawByteString);
     /// return some information about this connection(s)
-    // - as a TDocVariant object for a single connection, or array for a node
+    // - as a TDocVariant object for a single connection, or null from the relay
     function TunnelInfo: variant;
   end;
+  PITunnelTransmit = ^ITunnelTransmit;
 
   /// abstract tunneling service implementation
   ITunnelLocal = interface(ITunnelTransmit)
@@ -90,24 +94,20 @@ type
     /// match mormot.soa.core IServiceWithCallbackReleased definition
     procedure CallbackReleased(const callback: IInvokable;
       const interfaceName: RawUtf8);
-    /// to be called before Open() for proper handshake process
-    procedure SetTransmit(const Transmit: ITunnelTransmit);
-    /// the associated tunnel session ID
-    function TunnelSession: TTunnelSession;
     /// the local port used for the tunnel local process
     function LocalPort: RawUtf8;
     /// the remote port used for the tunnel local process
     function RemotePort: cardinal;
-    /// check if the background processing thread is using encrypted frames
+    /// check if the background processing thread is using End-to-end encryption
     function Encrypted: boolean;
   end;
-  PITunnelLocal = ^ITunnelLocal;
 
   TTunnelLocal = class;
 
   /// background thread bound or connected to a local port process
   TTunnelLocalThread = class(TLoggedThread)
   protected
+    fSafe: TLightLock; // protect especially fClientSock at startup/closure
     fState: (stCreated, stAccepting, stProcessing, stTerminated);
     fStarted: boolean;
     fOwner: TTunnelLocal;
@@ -117,24 +117,31 @@ type
     fServerSock, fClientSock: TNetSocket;
     fClientAddr: TNetAddr;
     fPort: TNetPort;
+    fTimeoutAcceptSecs: cardinal;
     /// accept/connect the connection, then crypt/redirect to fTransmit
     procedure DoExecute; override;
   public
     // how much data has been processed by this background thread
     /// initialize the thread - called from Open()
     constructor Create(owner: TTunnelLocal; const transmit: ITunnelTransmit;
-      const key, iv: THash128; sock: TNetSocket); reintroduce;
+      const key, iv: THash128; sock: TNetSocket; acceptSecs: cardinal); reintroduce;
     /// release all sockets and encryption state
     destructor Destroy; override;
     /// redirected from TTunnelLocal.Send
-    procedure OnReceived(const Frame: RawByteString);
+    procedure OnReceived(Frame: pointer; FrameLen: PtrInt);
+    /// true if internal state is stProcessing, i.e. after accept() and within
+    // the main redirection loop
+    function Processing: boolean;
+  published
+    property TimeoutAcceptSecs: cardinal
+      read fTimeoutAcceptSecs;
   end;
 
   /// define the wire frame layout for TTunnelLocal optional ECDHE handshake
   TTunnelEcdhFrame = packed record
     /// the 128-bit client or server random nonce
     rnd: TAesBlock;
-    /// the public key of this side (may be just random if toEcdhe is not set)
+    /// the public key of this side (33 random bytes if toEcdhe is not set)
     pub: TEccPublicKey;
   end;
 
@@ -151,7 +158,7 @@ type
     magic: TTunnelLocalMagic;
     /// define how this link should be setup
     options: TTunnelOptions;
-    /// a genuine integer ID
+    /// a genuine 32-bit integer ID
     session: TTunnelSession;
     /// the local port used for communication - may be an ephemeral bound port
     port: word;
@@ -178,39 +185,59 @@ type
     ITunnelLocal, ITunnelTransmit)
   protected
     fSession: TTunnelSession;
-    fSendSafe: TMultiLightLock;
+    fSendSafe: TMultiLightLock; // protect fHandshake+fThread
     fPort, fRemotePort: TNetPort;
     fOptions: TTunnelOptions;
-    fOpenBind, fClosePortNotified: boolean;
+    fFlags: set of (fSocketCreated, fClosePortNotified);
+    fClosed, fVerboseLog: boolean;
     fThread: TTunnelLocalThread;
     fHandshake: TSynQueue;
     fEcdhe: TEccKeyPair;
     fTransmit: ITunnelTransmit;
     fSignCert, fVerifyCert: ICryptCert;
-    fReceived, fSent: Int64;
+    fBytesIn, fBytesOut, fFramesIn, fFramesOut: Int64;
     fLogClass: TSynLogClass;
     fStartTicks: cardinal;
     fInfo: TDocVariantData;
     // methods to be overriden according to the client/server side
-    function ComputeOptionsFromCert: TTunnelOptions; virtual; abstract;
+    procedure IncludeOptionsFromCert; virtual; abstract;
     procedure EcdheHashRandom(var hmac: THmacSha256;
       const local, remote: TTunnelEcdhFrame); virtual; abstract;
     // can optionally add a signature to the main handshake frame
     procedure FrameSign(var frame: RawByteString); virtual;
     function FrameVerify(frame: PAnsiChar; framelen, payloadlen: PtrInt): boolean; virtual;
+    function GetElapsed: cardinal;
+    // can be overriden to customize this class process
+    procedure AfterHandshake; virtual;
+    procedure OnTunnelInfo(var Info: TDocVariantData); virtual;
   public
     /// initialize the instance for process
     // - if no Context value is supplied, will compute an ephemeral key pair
+    // - call Open() to perform actual handshaking and start the background
+    // tunnelling thread
     constructor Create(Logger: TSynLogClass = nil;
       SpecificKey: PEccKeyPair = nil); reintroduce;
     /// main method to initialize tunnelling process
+    // - Sess genuine integer identifier should match on both sides
+    // - Transmit.TunnelSend will be used for sending raw data to the other end
     // - TransmitOptions will be amended to follow SignCert/VerifyCert properties
+    // - TimeOutMS is the delay to receive an handshake answer from the other
+    // end - this value will be used * 2 as TTunnelLocalThread.fTimeoutAcceptSecs
+    // - AppSecret is used during handshake (and toEncrypt with no toEcdhe), and
+    // should match on both sides
     // - if Address has a port, will connect a socket to this address:port
     // - if Address has no port, will bound its address an an ephemeral port,
     // which is returned as result for proper client connection
-    function Open(Sess: TTunnelSession; TransmitOptions: TTunnelOptions;
-      TimeOutMS: integer; const AppSecret, Address: RawUtf8;
-      const InfoNameValue: array of const): TNetPort;
+    // - InfoNameValue are name/value pairs of some JSON fields which will be
+    // included to ITunnelTransmit.TunnelInfo returned object (e.g. Host name)
+    // - SignCert/VerifyCert should have [cuDigitalSignature] usage, and match
+    // VerifyCert/SignCert corresponding certificate on other side
+    // - raise ETunnel or return 0 on error; return the new local port on sucsess
+    // - should be called only once per TTunnelLocal instance
+    function Open(Sess: TTunnelSession; const Transmit: ITunnelTransmit;
+      TransmitOptions: TTunnelOptions; TimeOutMS: integer; const AppSecret, Address: RawUtf8;
+      const InfoNameValue: array of const; const SignCert: ICryptCert = nil;
+      const VerifyCert: ICryptCert = nil): TNetPort;
     /// finalize this instance, and its local TCP server
     destructor Destroy; override;
     /// called e.g. by CallbackReleased() or by Destroy
@@ -218,17 +245,13 @@ type
   public
     /// ITunnelTransmit method: when a Frame is received from the relay server
     procedure TunnelSend(const aFrame: RawByteString);
-    /// ITunnelTransmit method: return some information about this connection
+    /// ITunnelTransmit method: return a TDocVariant object about this connection
     function TunnelInfo: variant;
-    /// ITunnelLocal method: to be called before Open()
-    procedure SetTransmit(const Transmit: ITunnelTransmit);
-    /// ITunnelLocal method: return the associated tunnel session ID
-    function TunnelSession: TTunnelSession;
     /// ITunnelLocal method: return the local port
     function LocalPort: RawUtf8;
     /// ITunnelLocal method: return the remote port
     function RemotePort: cardinal;
-    /// ITunnelLocal method: check if the background thread uses encrypted frames
+    /// ITunnelLocal method: check if the background thread uses E2EE
     function Encrypted: boolean;
     /// ITunnelLocal method: when a ITunnelTransmit remote callback is finished
     procedure CallbackReleased(const callback: IInvokable;
@@ -236,16 +259,12 @@ type
     /// access the logging features of this class
     property LogClass: TSynLogClass
       read fLogClass write fLogClass;
-    /// optional Certificate with private key to sign the output handshake frame
-    // - certificate should have [cuDigitalSignature] usage
-    // - should match other side's VerifyCert public key property
-    property SignCert: ICryptCert
-      read fSignCert write fSignCert;
-    /// optional Certificate with public key to verify the input handshake frame
-    // - certificate should have [cuDigitalSignature] usage
-    // - should match other side's SignCert private key property
-    property VerifyCert: ICryptCert
-      read fVerifyCert write fVerifyCert;
+    /// log each received frame length for raw debugging
+    property VerboseLog: boolean
+      read fVerboseLog write fVerboseLog;
+    /// raw access to the transmission method - used during testing
+    property RawTransmit: ITunnelTransmit
+      read fTransmit write fTransmit;
   published
     /// the ephemeral port on the loopback as returned by Open()
     property Port: TNetPort
@@ -263,19 +282,31 @@ type
     /// access to the associated background thread processing the data
     property Thread: TTunnelLocalThread
       read fThread;
-    /// input TCP frames bytes
-    property Received: Int64
-      read fReceived;
-    /// output TCP frames bytes
-    property Sent: Int64
-      read fSent;
+    /// how many bytes have been received
+    property BytesIn: Int64
+      read fBytesIn;
+    /// how many bytes have been sent
+    property BytesOut: Int64
+      read fBytesOut;
+    /// how many frames have been received
+    property FramesIn: Int64
+      read fFramesIn;
+    /// how many frames have been sent
+    property FramesOut: Int64
+      read fFramesOut;
+    /// number of seconds elapsed since Open()
+    property Elapsed: cardinal
+      read GetElapsed;
+    /// equals true after ClosePort
+    property Closed: boolean
+      read fClosed;
   end;
 
 function ToText(opt: TTunnelOptions): ShortString; overload;
 
-/// extract the 64-bit session trailer from a ITunnelTransmit.TunnelSend() frame
+/// extract the 32-bit session trailer from a ITunnelTransmit.TunnelSend() frame
 function FrameSession(const Frame: RawByteString): TTunnelSession;
-  {$ifdef HASINLINE} inline; {$endif}
+  {$ifdef FPC} inline; {$endif}
 
 const
   toEncrypted = [toEcdhe, toEncrypt];
@@ -286,47 +317,239 @@ const
 type
   /// implements server-side tunneling service
   // - here 'server' or 'client' side does not have any specific meaning - one
-  // should just be at either end of the tunnel
+  // should just be at either end of the tunnel - but they must appear in a
+  // coherent order during the handshake phase by using those overriden methods
+  // - class usually assigned to ITunnelConsole in the TTunnelRelay context
   TTunnelLocalServer = class(TTunnelLocal)
   protected
-    function ComputeOptionsFromCert: TTunnelOptions; override;
+    procedure IncludeOptionsFromCert; override;
     procedure EcdheHashRandom(var hmac: THmacSha256;
       const local, remote: TTunnelEcdhFrame); override;
   end;
 
   /// implements client-side tunneling service
   // - here 'server' or 'client' side does not have any specific meaning - one
-  // should just be at either end of the tunnel
+  // should just be at either end of the tunnel - but they must appear in a
+  // coherent order during the handshake phase by using those overriden methods
+  // - class usually assigned to ITunnelAgent in the TTunnelRelay context
   TTunnelLocalClient = class(TTunnelLocal)
   protected
-    function ComputeOptionsFromCert: TTunnelOptions; override;
+    procedure IncludeOptionsFromCert; override;
     procedure EcdheHashRandom(var hmac: THmacSha256;
       const local, remote: TTunnelEcdhFrame); override;
   end;
 
-  /// maintain a list of ITunnelLocal instances
-  // - with proper redirection of ITunnelTransmit.TunnelSend() frames
-  TTunnelList = class(TInterfacedPersistent,
-    ITunnelTransmit)
+  /// maintain a list of ITunnelTransmit instances
+  TTunnelList = class(TObjectRWLightLock)
   protected
-    fSafe: TRWLightLock;
-    fItem: array of ITunnelLocal;
+    fInfoCacheSafe: TLightLock;
+    fItem: array of ITunnelTransmit;
+    fSession: TIntegerDynArray; // store TTunnelSession (=cardinal) values
+    fCount: integer;
+    fInfoCacheTix32: cardinal;
+    fInfoCache: TVariantDynArray;
   public
-    /// append one ITunnelLocal to the list
-    function Add(const aInstance: ITunnelLocal): boolean;
-    /// remove one ITunnelLocal from its session ID
+    /// append one ITunnelTransmit callback to the list
+    function Add(aSession: TTunnelSession;
+      const aInstance: ITunnelTransmit): boolean;
+    /// remove one ITunnelTransmit from its session ID
     function Delete(aSession: TTunnelSession): boolean;
-    /// search if one ITunnelLocal matches a session ID
+    /// remove all ITunnelTransmit from another list
+    // - returns the number of deleted items
+    function DeleteFrom(aList: TTunnelList): integer;
+    /// search if one ITunnelTransmit matches a session ID
     function Exists(aSession: TTunnelSession): boolean;
-    /// search the ITunnelLocal matching a session ID
-    function Get(aSession: TTunnelSession; var aInstance: ITunnelLocal): boolean;
-  public
-    /// ITunnelTransmit method which will redirect the given frame to the
-    // expected registered TTunnelLocal instance
-    procedure TunnelSend(const Frame: RawByteString);
-    /// ITunnelTransmit method: return some information about these connections
-    function TunnelInfo: variant;
+    /// ask the TunnelInfo of a given session ID as TDocVariant object
+    procedure GetInfo(aSession: TTunnelSession; out aInfo: variant);
+    /// ask all TunnelInfo of all opended sessions as TDocVariant array
+    // - with a one second cache
+    function GetAllInfo: TVariantDynArray;
+    /// ITunnelTransmit-like method which will redirect the given frame to the
+    // expected registered ITunnelTransmit instance
+    // - if the Frame does not match any known session, return false
+    // - handle end of process notification from the other side with a frame
+    // with no payload but just the
+    function TunnelSend(const Frame: RawByteString;
+      aSession: TTunnelSession = 0): boolean; virtual;
   end;
+
+
+{ ******************** Abstract SOA implementation of a Relay Server }
+
+type
+  /// abstract parent to ITunnelAgent/ITunnelConsole service endpoints
+  // - with shared methods to validate or cancel a two-phase startup
+  // - the steps of a TTunnelRelay session are therefore:
+  // 1) TTunnelLocalClient/TTunnelLocalServer.Create as ITunnelTransmit callbacks
+  // 2) ITunnelConsole.TunnelPrepare() to retrieve a session;
+  // 3) ITunnelAgent.TunnelPrepare() with this session;
+  // 4) TTunnelLocal.Open() on the console and agent sides to start tunnelling
+  // on a localhost TCP port;
+  // 5a) ITunnelOpen.TunnelCommit or TunnelRollback against Open() result or
+  // 5b) after a timeout, missing TunnelCommit/TunnelRollback would delete any
+  // unfinished TunnelPrepare from an internal transient/pending list
+  ITunnelOpen = interface(ITunnelTransmit)
+    /// finalize a relay process startup after Open() success
+    // - now ITunnelTransmit.TunnelSend will redirect frames from both sides
+    function TunnelCommit(aSession: TTunnelSession): boolean;
+    /// abort a relay after Open() failed
+    // - now this session will be flushed from the internal list
+    function TunnelRollback(aSession: TTunnelSession): boolean;
+  end;
+
+  /// service endpoint called by the consoles on the Relay Server
+  // - here the "console" initiate the relay process, and ask for a Session
+  // to which an "agent" will connect via the ITunnelAgent simple endpoint
+  // - also maps ITunnelTransmit to send remote frames, and is likely to be
+  // implemented as sicPerSession over our SOA WebSockets
+  // - ITunnelTransmit.TunnelInfo will be implemented and return information
+  // about all associated sessions
+  // - when the interface is released, will cancel all corresponding sessions
+  ITunnelConsole = interface(ITunnelOpen)
+    ['{9453C229-9D4A-4F93-B5B3-E4A05E28267F}']
+    /// could be used to define a TDocVariant object about this console
+    // - will be completed with "agents":[] array with each associated agents
+    procedure TunnelSetInfo(const info: variant);
+    /// initiate a new relay process as a two-phase commit from the console
+    // - caller should call this method, then TTunnelLocal.Open() on its side,
+    // and once the handhake is ok or ko, call TunnelCommit or TunnelRollback
+    function TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+  end;
+
+  /// service endpoint called by the agents on the Relay Server
+  // - here "agent" is a simple TTunnelLocal application opening a localhost
+  // port, for transmitting some information (e.g. a VNC server) to a remote
+  // "console" with its own TTunnelLocal redirected port (e.g. a VNC viewer)
+  // - just maps a ITunnelTransmit, and is likely to be implemented as sicShared
+  // over our SOA WebSockets
+  ITunnelAgent = interface(ITunnelOpen)
+    ['{B3B39C9F-43AA-4EA0-A88E-662401755AD0}']
+    /// initiate a new relay process as a two-phase commit from the agent
+    // - caller should call this method, then TTunnelLocal.Open() on its side,
+    // and once the handhake is ok or ko, call TunnelCommit or TunnelRollback
+    // - the relay is initiated by ITunnelConsole.TunnelPrepare, and the
+    // returned session should be specified to this command
+    function TunnelPrepare(aSession: TTunnelSession;
+      const callback: ITunnelTransmit): boolean;
+  end;
+
+  TTunnelRelay = class;
+
+  /// abstract parent of TTunnelConsole/TTunnelAgent
+  // - maintain a list of working tunnels for ITunnelTransmit.TunnelSend() relay
+  // - maintain also a list of transient/pending sessions, to be purged after
+  // a timeout if TunnelCommit/TunnelRollback() has not been called soon enough
+  TTunnelOpen = class(TInterfacedObjectRWLightLocked)
+  protected
+    fOwner: TTunnelRelay;
+    fLogClass: TSynLogClass;
+    fList: TTunnelList;
+    fDeprecatedTix32, fTimeOutSecs: cardinal;
+    // transient/pending sessions before TunnelCommit/TunnelRollback
+    fSession: TIntegerDynArray;    // store TTunnelSession (=cardinal) values
+    fSessionTix: TIntegerDynArray; // store GetTickSec
+    fSessionCount: integer;
+    function HasTransient(aSession: TTunnelSession): boolean;
+    function AddTransient(aSession: TTunnelSession;
+      const callback: ITunnelTransmit): boolean;
+    function RemoveTransient(aSession: TTunnelSession): boolean;
+    procedure DeleteTransient(ndx: PtrInt);
+    // ITunnelOpen methods
+    function TunnelCommit(aSession: TTunnelSession): boolean;
+    function TunnelRollback(aSession: TTunnelSession): boolean;
+  public
+    /// initialize this instance for a given TTunnelRelay main instance
+    constructor Create(aOwner: TTunnelRelay; aTimeOutSecs: cardinal); reintroduce;
+    /// finalize this instance
+    destructor Destroy; override;
+    /// return fList.Count or 0 if any instance is nil
+    function Count: integer;
+    /// access to the associated main TTunnelRelay instance
+    property Owner: TTunnelRelay
+      read fOwner;
+    /// how many seconds a TunnelPrepare() would be in the transient/pending queue
+    // - auto-trim if no TunnelCommit/TunnelRollback occured within this time slot
+    property TimeOutSecs: cardinal
+      read fTimeOutSecs;
+  end;
+
+  /// implement ITunnelConsole on the Relay Server
+  // - likely to be implemented as sicPerSession over our SOA WebSockets
+  // - is in fact owned by TTunnelRelay
+  TTunnelConsole = class(TTunnelOpen, ITunnelConsole)
+  protected
+    fInfo: TDocVariantData;
+    // ITunnelConsole methods
+    procedure TunnelSetInfo(const info: variant);
+    function TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+    function TunnelInfo: variant;
+    procedure TunnelSend(const Frame: RawByteString);
+  public
+    /// finalize this instance and remove it from fOwner.fConsole
+    destructor Destroy; override;
+  end;
+  TTunnelConsoles = array of TTunnelConsole;
+
+  /// implement ITunnelAgent on the Relay Server
+  // - likely to be implemented as sicShared over our SOA WebSockets
+  // - is in fact owned by TTunnelRelay
+  TTunnelAgent = class(TTunnelOpen, ITunnelAgent)
+  protected
+    // ITunnelAgent methods
+    function TunnelPrepare(aSession: TTunnelSession;
+      const callback: ITunnelTransmit): boolean;
+    function TunnelInfo: variant;
+    procedure TunnelSend(const Frame: RawByteString);
+  end;
+
+  /// implement Relay server process
+  // - maintain one TTunnelAgent and several TTunnelConsole
+  TTunnelRelay = class(TInterfaceResolver)
+  protected
+    // note: fAgent and fConsole[] are class instances, to avoid refcount race
+    fAgent: TTunnelAgent;
+    fConsoleSafe: TRWLightLock;
+    fConsole: TTunnelConsoles; // per-console list of instances with callbacks
+    fLogClass: TSynLogClass;
+    fConsoleCount: integer;
+    fTransientTimeOutSecs: cardinal;
+    fAgentInstance: ITunnelAgent;
+    function HasConsolePrepared(aSession: TTunnelSession): boolean;
+    function LockedFindConsole(aSession: TTunnelSession): TTunnelConsole;
+    // search for matching fConsole[].TunnelSend
+    procedure ConsoleTunnelSend(const Frame: RawByteString);
+    // TInterfaceResolver method to resolve ITunnelConsole instances
+    function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
+  public
+    /// initialize this instance
+    constructor Create(aLogClass: TSynLogClass;
+      aTransientTimeOutSecs: cardinal = 120); reintroduce;
+    /// finalize this instance and its associated fAgent
+    destructor Destroy; override;
+    /// called by TTunnelConsole.Destroy to unregister its own instance
+    // - will also remove any associated fAgent.fList session
+    function RemoveConsole(aConsole: TTunnelConsole): boolean;
+    /// ask all TunnelInfo of all opended Agent sessions as TDocVariant array
+    function AgentsInfo: TVariantDynArray;
+    /// ask all TunnelInfo of all opended Console sessions as TDocVariant array
+    function ConsolesInfo: TVariantDynArray;
+    /// low-level access to the "agents" list
+    // - usually published as SOA sicShared ITunnelAgent endpoint
+    property Agent: TTunnelAgent
+      read fAgent;
+    /// low-level access to the "consoles" list - associated with ConsoleCount
+    // - these instances are allocated (as SOA sicPerSession) using Resolve()
+    property Console: TTunnelConsoles
+      read fConsole;
+    /// how many items are actually stored in Console[]
+    property ConsoleCount: integer
+      read fConsoleCount;
+    /// how many seconds a TunnelPrepare() would be in the transient/pending queue
+    // - auto-trim if no TunnelCommit/TunnelRollback occured within this time slot
+    property TransientTimeOutSecs: cardinal
+      read fTransientTimeOutSecs;
+  end;
+
 
 
 
@@ -335,108 +558,159 @@ implementation
 
 { ******************** Abstract Definitions for Port Forwarding }
 
+const
+  TRAIL_SIZE = SizeOf(TTunnelSession);
+
+function ToText(opt: TTunnelOptions): ShortString;
+begin
+  GetSetNameShort(TypeInfo(TTunnelOptions), opt, result, {trim=}true);
+  LowerCaseShort(result);
+end;
+
+function FrameSession(const Frame: RawByteString): TTunnelSession;
+var
+  l: PtrInt;
+begin
+  l := length(Frame) - TRAIL_SIZE;
+  if l >= 0 then
+    result := PTunnelSession(@PByteArray(Frame)[l])^
+  else
+    result := 0;
+end;
+
+
 { TTunnelLocalThread }
 
 constructor TTunnelLocalThread.Create(owner: TTunnelLocal;
-  const transmit: ITunnelTransmit; const key, iv: THash128; sock: TNetSocket);
+  const transmit: ITunnelTransmit; const key, iv: THash128; sock: TNetSocket;
+  acceptSecs: cardinal);
 begin
   fOwner := owner;
   fPort := owner.Port;
   fSession := owner.Session;
   fTransmit := transmit;
+  fTimeoutAcceptSecs := acceptSecs;
   if not IsZero(key) then
   begin
     // ecc256r1 shared secret has 128-bit resolution -> 128-bit AES-CTR
-    fAes[{sending:}false] := AesIvUpdatedCreate(mCtr, key, 128);
-    fAes[{sending:}true]  := AesIvUpdatedCreate(mCtr, key, 128);
-    // won't include an IV with each frame, but update it from (ecdhe) KDF
-    fAes[false].IV := iv;
-    fAes[true].IV := iv;
+    fAes[{sending:}false] := AesIvUpdatedCreate(mCtr, key, 128, @iv);
+    fAes[{sending:}true]  := AesIvUpdatedCreate(mCtr, key, 128, @iv);
+    // won't include an IV with each frame, but update it after each frame
   end;
   fServerSock := sock;
   FreeOnTerminate := true;
-  inherited Create({suspended=}false, nil, nil, fOwner.fLogClass, Make(['tun ', fPort]));
+  inherited Create({susp=}false, nil, nil, fOwner.fLogClass, Make(['tun', fPort]));
 end;
 
 destructor TTunnelLocalThread.Destroy;
 begin
   Terminate;
-  if fOwner <> nil then
-    fOwner.ClosePort;
-  fServerSock.ShutdownAndClose({rdwr=}true);
-  fClientSock.ShutdownAndClose({rdwr=}true);
+  fSafe.Lock;
+  try
+    if fOwner <> nil then
+    try
+      fOwner.fThread := nil;
+    except
+    end;
+    fServerSock.ShutdownAndClose({rdwr=}true);
+    fClientSock.ShutdownAndClose({rdwr=}true);
+  finally
+    fSafe.UnLock;
+  end;
   inherited Destroy;
   FreeAndNil(fAes[true]);
   FreeAndNil(fAes[false]);
 end;
 
-procedure TTunnelLocalThread.OnReceived(const Frame: RawByteString);
+procedure TTunnelLocalThread.OnReceived(Frame: pointer; FrameLen: PtrInt);
 var
   res: TNetResult;
   data: RawByteString;
 begin
   // validate and optionally decrypt the input frame
   if Terminated or
-     (fTransmit = nil) or
-     (Frame = '') then
+     (Frame = nil) then
     exit;
-  if fClientSock = nil then // may occur with direct calls
+  if not fSafe.TryLock then
   begin
-    SleepHiRes(10); // let the socket be accepted()
-    if Terminated or
-       (fClientSock = nil) then
-      exit;
+    fLogClass.Add.Log(sllDebug, 'OnReceived: wait for accept', self);
+    fSafe.Lock;
+    fLogClass.Add.Log(sllDebug, 'OnReceived: accepted', self);
   end;
-  if fAes[{sending:}false] = nil then
-    data := Frame
-  else
-  begin
-    data := fAes[false].DecryptPkcs7(Frame, {ivatbeg=}false, {raise=}false);
-    if data = '' then
+  try
+    if fAes[{sending:}false] <> nil then
     begin
-      Terminate;
-      ETunnel.RaiseUtf8('%.OnReceived(%): decrypt error', [self, fPort]);
+      data := fAes[false].DecryptPkcs7Buffer(
+        Frame, FrameLen, {ivatbeg=}false, {raise=}false);
+      if data = '' then
+      begin
+        Terminate;
+        ETunnel.RaiseUtf8('%.OnReceived(%): decrypt error', [self, fPort]);
+      end;
+      Frame := pointer(data);
+      FrameLen := length(data);
     end;
+    // relay the (decrypted) data to the local loopback
+    if Terminated then
+      exit;
+    if fOwner <> nil then
+      inc(fOwner.fBytesIn, FrameLen);
+    res := fClientSock.SendAll(Frame, FrameLen, @Terminated);
+  finally
+    fSafe.UnLock;
   end;
-  // relay the (decrypted) data to the local loopback
-  if Terminated then
-    exit;
-  if fOwner <> nil then
-    inc(fOwner.fReceived, length(data));
-  res := fClientSock.SendAll(pointer(data), length(data), @Terminated);
   if (res = nrOk) or
      Terminated then
     exit;
-  Terminate;
   ETunnel.RaiseUtf8('%.OnReceived(%): error % when retransmitting',
     [self, fPort, ToText(res)^]);
+  Terminate;
+end;
+
+function TTunnelLocalThread.Processing: boolean;
+begin
+  result := (self <> nil) and
+            (fState = stProcessing);
 end;
 
 procedure TTunnelLocalThread.DoExecute;
 var
   tmp: RawByteString;
   res: TNetResult;
+  start: cardinal;
 begin
   fStarted := true;
   try
     if (fOwner <> nil) and
-       fOwner.fOpenBind then
+       (fSocketCreated in fOwner.fFlags) then
     begin
       // newsocket() was done in the main thread: blocking accept() now
       fState := stAccepting;
       fLog.Log(sllTrace,
         'DoExecute: waiting for accept on port %', [fPort], self);
-      res := fServerSock.Accept(fClientSock, fClientAddr, {async=}false);
-      if (res = nrOk) and
-         not Terminated then
-      begin
-        fLog.Log(sllTrace,
-          'DoExecute: accepted %', [fClientAddr.IPShort({port=}true)], self);
-        if (toAcceptNonLocal in fOwner.Options) or
-           (fClientAddr.IP4 = cLocalhost32) then
-         fState := stProcessing // start background process
-        else
-          fLog.Log(sllWarning, 'DoExecute: rejected non local client', self);
+      fSafe.Lock; // protect early fClientSock access in OnReceived()
+      try
+        start := GetTickSec; // socket timeout is 500ms: use a loop
+        repeat
+          res := fServerSock.Accept(fClientSock, fClientAddr, {async=}false);
+          if (res = nrOk) and
+             not Terminated then
+          begin
+            fLog.Log(sllTrace,
+              'DoExecute: accepted %', [fClientAddr.IPShort({port=}true)], self);
+            if (toAcceptNonLocal in fOwner.Options) or
+               (fClientAddr.IP4 = cLocalhost32) then
+             fState := stProcessing // start background process
+            else
+              fLog.Log(sllWarning, 'DoExecute: rejected non local client', self);
+          end;
+        until Terminated or
+              (fState = stProcessing) or
+              (fOwner = nil) or
+              (res <> nrRetry) or
+              (GetTickSec - start > fTimeoutAcceptSecs);
+      finally
+        fSafe.UnLock;
       end;
     end
     else
@@ -451,33 +725,50 @@ begin
           nrRetry:
             continue;
           nrClosed:
-            break;
+            begin
+              fLog.Log(sllTrace, 'DoExecute: closed connection on port %',
+                [fPort], self);
+              break;
+            end;
           nrOK:
             if (tmp <> '') and
                not Terminated then
             begin
-              // emit the (encrypted) data with a 64-bit TTunnelSession trailer
+              // emit the (encrypted) data with a 32-bit TTunnelSession trailer
               if fOwner <> nil then
-                inc(fOwner.fSent, length(tmp)); // Sent/Received are plain sizes in bytes
+                inc(fOwner.fBytesOut, length(tmp)); // size before encryption
               if fAes[{send:}true] <> nil then
-                tmp := fAes[true].EncryptPkcs7(tmp, {ivatbeg=}false, {trailer=}8)
+                tmp := fAes[true].EncryptPkcs7(tmp, {ivatbeg=}false, TRAIL_SIZE)
               else
-                SetLength(tmp, length(tmp) + 8);
-              PInt64(@PByteArray(tmp)[length(tmp) - 8])^ := fSession;
+                SetLength(tmp, length(tmp) + TRAIL_SIZE);
+              PTunnelSession(@PByteArray(tmp)[length(tmp) - TRAIL_SIZE])^ := fSession;
               if (fTransmit <> nil) and
                  not Terminated then
+              begin
+                if fOwner <> nil then
+                  inc(fOwner.fFramesOut);
                 fTransmit.TunnelSend(tmp);
+              end;
             end;
         else
-          ETunnel.RaiseUtf8('%.Execute(%): error % at receiving',
+          ETunnel.RaiseUtf8('%.Execute(%): error % receiving',
             [self, fPort, ToText(res)^]);
         end;
-      end;
-    fLog.Log(sllTrace, 'DoExecute: ending %', [self]);
+      end
+    else
+      ETunnel.RaiseUtf8('%.Execute(%): accept timeout after % seconds',
+        [self, fPort, fTimeoutAcceptSecs]);
   except
-    fLog.Log(sllWarning, 'DoExecute: aborted %', [self]);
-    if fOwner <> nil then
-      fOwner.ClosePort;
+    on E: Exception do
+    try
+      fLog.Log(sllWarning, 'DoExecute: % aborted due to % [%]',
+        [fProcessName, PClass(E)^, E.Message], self);
+      if fOwner <> nil then
+        fOwner.ClosePort;
+    except
+      on E2: Exception do
+        fLog.Log(sllWarning, 'DoExecute: nested %', [PClass(E2)^], self);
+    end;
   end;
   fState := stTerminated;
 end;
@@ -500,38 +791,58 @@ begin
     ClosePort; // calls Terminate
   inherited Destroy;
   FillCharFast(fEcdhe, SizeOf(fEcdhe), 0);
-  FreeAndNil(fHandshake);
+  FreeAndNil(fHandshake); // if Open() was not called
 end;
 
 procedure TTunnelLocal.ClosePort;
 var
   thread: TTunnelLocalThread;
-  notifycloseport: RawByteString;
+  frame: RawByteString; // notification frame to unregister to the other side
   callback: TNetSocket; // touch-and-go to the server to release main Accept()
+  log: ISynLog;
 begin
   if self = nil then
     exit;
-  if not fClosePortNotified then
-    try
-      fClosePortNotified := true;
-      PInt64(FastNewRawByteString(notifycloseport, 8))^ := fSession;
-      TunnelSend(notifycloseport);
-    except
-    end;
-  thread := fThread;
-  if thread <> nil then
-    try
-      fThread := nil;
-      thread.fOwner := nil;
-      thread.Terminate;
-      if thread.fState = stAccepting then
-        if NewSocket(cLocalhost, UInt32ToUtf8(fPort), nlTcp,
-           {dobind=}false, 10, 0, 0, 0, callback) = nrOK then
-          // Windows socket may not release Accept() until connected
-          callback.ShutdownAndClose({rdwr=}false);
-    except
-    end;
+  fLogClass.EnterLocal(log, 'ClosePort %', [fPort], self);
+  fSendSafe.Lock; // protect fHandshake+fThread
+  try
+    if not (fClosePortNotified in fFlags) then
+      try
+        // send frame with only session (and no payload) to notify as closed
+        include(fFlags, fClosePortNotified);
+        if Assigned(log) then
+          log.Log(sllTrace, 'ClosePort: notify other end', self);
+        PTunnelSession(FastNewRawByteString(frame, TRAIL_SIZE))^ := fSession;
+        if Assigned(fTransmit) then
+        begin
+          inc(fFramesOut);
+          fTransmit.TunnelSend(frame);
+        end;
+      except
+      end;
+    thread := fThread;
+    if thread <> nil then
+      try
+        fThread := nil;
+        thread.Terminate;
+        if thread.fState = stAccepting then
+        begin
+          if Assigned(log) then
+            log.Log(sllDebug, 'ClosePort: release accept', self);
+          if NewSocket(cLocalhost, UInt32ToUtf8(fPort), nlTcp,
+             {dobind=}false, 10, 0, 0, 0, callback) = nrOK then
+            // Windows socket may not release Accept() until connected
+            callback.ShutdownAndClose({rdwr=}false);
+        end;
+      except
+      end;
+  finally
+    fSendSafe.UnLock;
+  end;
+  if Assigned(log) then
+    log.Log(sllTrace, 'ClosePort: %', [self]); // final statistics
   fPort := 0;
+  fClosed := true;
 end;
 
 procedure TTunnelLocal.TunnelSend(const aFrame: RawByteString);
@@ -540,29 +851,34 @@ var
   p: PAnsiChar;
 begin
   // ITunnelTransmit method: when a Frame is received from the relay server
-  l := length(aFrame) - 8;
+  l := length(aFrame);
+  if fVerboseLog then
+    fLogClass.Add.Log(sllTrace, 'TunnelSend=%', [l]);
+  dec(l, TRAIL_SIZE);
   if l < 0 then
     ETunnel.RaiseUtf8('%.Send: unexpected size=%', [self, l]);
-  fSendSafe.Lock;
+  fSendSafe.Lock; // protect fHandshake+fThread
   try
+    inc(fFramesIn);
     if fHandshake <> nil then
     begin
+      fLogClass.Add.Log(sllTrace, 'TunnelSend: into Handshake queue', self);
       fHandshake.Push(aFrame); // during the handshake phase - maybe before Open
       exit;
     end;
     p := pointer(aFrame);
-    if PInt64(p + l)^ <> fSession then
+    if PTunnelSession(p + l)^ <> fSession then
       ETunnel.RaiseUtf8('%.Send: session mismatch', [self]);
     if l = 0 then
     begin
-      fClosePortNotified := true; // the other party notified end of process
+      // received frame with only session (and no payload) to notify as closed
+      include(fFlags, fClosePortNotified);
       ClosePort;
     end
     else if fThread <> nil then // = nil after ClosePort (too late)
-    begin
-      PStrLen(p - _STRLEN)^ := l; // trim 64-bit session trailer
-      fThread.OnReceived(aFrame); // regular tunelling process
-    end;
+      fThread.OnReceived(p, l) // regular tunelling process
+    else
+      fLogClass.Add.Log(sllWarning, 'TunnelSend: Thread=nil', self); // unlikely
   finally
     fSendSafe.UnLock;
   end;
@@ -573,7 +889,7 @@ procedure TTunnelLocal.CallbackReleased(const callback: IInvokable;
 begin
   if not IdemPChar(pointer(interfaceName), 'ITUNNEL') then
     exit; // should be ITunnelLocal or ITunnelTransmit
-  fClosePortNotified := true; // no need to notify the remote end
+  include(fFlags, fClosePortNotified); // no need to notify the remote end
   ClosePort;
 end;
 
@@ -592,11 +908,13 @@ begin
                in CV_VALIDSIGN));
 end;
 
-procedure TTunnelLocal.SetTransmit(const Transmit: ITunnelTransmit);
+function TTunnelLocal.GetElapsed: cardinal;
 begin
-  fTransmit := Transmit;
-  if fThread <> nil then
-    fThread.fTransmit := Transmit; // could be refreshed during process
+  if (self = nil) or
+     (fStartTicks = 0) then
+    result := 0
+  else
+    result := GetUptimeSec - fStartTicks; // in seconds
 end;
 
 procedure TunnelHandshakeCrc(const Handshake: TTunnelLocalHandshake;
@@ -613,9 +931,9 @@ begin
   sha3.Final(@crc, 128);
 end;
 
-function TTunnelLocal.Open(Sess: TTunnelSession; TransmitOptions: TTunnelOptions;
-  TimeOutMS: integer; const AppSecret, Address: RawUtf8;
-  const InfoNameValue: array of const): TNetPort;
+function TTunnelLocal.Open(Sess: TTunnelSession; const Transmit: ITunnelTransmit;
+  TransmitOptions: TTunnelOptions; TimeOutMS: integer; const AppSecret, Address: RawUtf8;
+  const InfoNameValue: array of const; const SignCert, VerifyCert: ICryptCert): TNetPort;
 var
   uri: TUri;
   sock: TNetSocket;
@@ -626,43 +944,45 @@ var
   rem: PTunnelLocalHandshake absolute remote;
   loc: TTunnelLocalHandshake;
   key, iv: THash256Rec;
-  hmackey, hmaciv: THmacSha256;
+  hmac, hmac2: THmacSha256;
   hqueue: TSynQueue;
+  thread: TTunnelLocalThread;
   log: ISynLog;
 const // port is asymmetrical so not included to the KDF - nor the crc
   KDF_SIZE = SizeOf(loc.Info) - (SizeOf(loc.Info.port) + SizeOf(loc.Info.crc));
+  SUFFIX_SIZE = TRAIL_SIZE + SizeOf(word);
 begin
-  if fLogClass <> nil then
-    fLogClass.EnterLocal(log, 'Open(%)', [Session], self);
   // validate input parameters
-  if (fPort <> 0) or
-     (not Assigned(fTransmit)) then
-    ETunnel.RaiseUtf8('%.Open invalid call', [self]);
-  if not uri.From(Address, '0') then
-    ETunnel.RaiseUtf8('%.Open invalid %', [self, Address]);
   fRemotePort := 0;
   fInfo.Clear;
   fSession := Sess;
-  TransmitOptions := (TransmitOptions - [toClientSigned, toServerSigned]) +
-                     ComputeOptionsFromCert;
+  fSignCert := SignCert;
+  fVerifyCert := VerifyCert;
+  fOptions := TransmitOptions - [toClientSigned, toServerSigned];
+  IncludeOptionsFromCert; // adjust from fSignCert/fVerifyCert
+  if fLogClass <> nil then
+    fLogClass.EnterLocal(log, 'Open(%,[%])', [Int64(Sess), ToText(fOptions)], self);
+  if (fPort <> 0) or
+     (not Assigned(Transmit)) then
+    ETunnel.RaiseUtf8('%.Open invalid call', [self]);
+  if not uri.From(Address, '0') then
+    ETunnel.RaiseUtf8('%.Open invalid %', [self, Address]);
+  fTransmit := Transmit;
   // bind to a local (ephemeral) port
-  if fThread <> nil then
-  begin
-    fClosePortNotified := true; // emulate a clean remote closing
-    ClosePort;                  // close any previous Open()
-  end;
+  if (fThread <> nil) or
+     (fHandshake = nil) then
+    ETunnel.RaiseUtf8('%.Open called twice', [self]);
   fPort := 0;
-  fClosePortNotified := false;
+  fFlags := [];
   result := uri.PortInt;
   if result = 0 then
   begin
     // bind on port='0' = ephemeral port
     ENetSock.Check(NewSocket(uri.Server, uri.Port, nlTcp, {bind=}true,
-      TimeOutMS, TimeOutMS, TimeOutMS, {retry=}0, sock, @addr), 'Open');
+      500, 500, 500, {retry=}0, sock, @addr), 'Open');
     result := addr.Port;
     if Assigned(log) then
       log.Log(sllTrace, 'Open: bound to %', [addr.IPShort(true)], self);
-    fOpenBind := true;
   end
   else
   begin
@@ -672,19 +992,19 @@ begin
     if Assigned(log) then
       log.Log(sllTrace, 'Open: connected to %:%', [uri.Server, uri.Port], self);
   end;
+  include(fFlags, fSocketCreated);
   // initial single round trip handshake
   infoaes := nil;
-  fOptions := TransmitOptions;
   try
     // header with optional ECDHE
     loc.Info.magic   := tlmVersion1;
     loc.Info.options := fOptions;
     loc.Info.session := fSession; // is typically an increasing sequence number
     loc.Info.port    := result;
-    Random128(@loc.Ecdh.rnd);   // unpredictable
+    Random128(@loc.Ecdh.rnd);     // unpredictable
     if toEcdhe in fOptions then
     begin
-      if IsZero(fEcdhe.pub) then // ephemeral key was not specified at Create
+      if IsZero(fEcdhe.pub) then  // ephemeral key was not specified at Create
       begin
         if Assigned(log) then
           log.Log(sllTrace, 'Open: generate ECHDE key', self);
@@ -703,14 +1023,13 @@ begin
     if toEncrypted * fOptions <> [] then // toEncrypt or toEcdhe
     begin
       if AppSecret = '' then
-        hmackey.Init('705FC9676148405B91A66FFE7C3B54AA') // some minimal key
+        hmac.Init('705FC9676148405B91A66FFE7C3B54AA') // some minimal key
       else
-        hmackey.Init(AppSecret);
-      hmackey.Update(@loc.Info, KDF_SIZE); // no replay (sequential session)
-      hmaciv := hmackey; // use hmaciv for info KDF
-      hmaciv.Done(key.b);
-      infoaes := TAesCtr.Create(key.Lo); // simple symmetrical encryption
-      infoaes.IV := key.Hi;
+        hmac.Init(AppSecret);
+      hmac.Update(@loc.Info, KDF_SIZE); // no replay (sequential session)
+      hmac2 := hmac; // use hmac2 to compute info KDF
+      hmac2.Done(key.b);
+      infoaes := TAesCtr.Create(key.Lo, 128, @key.Hi); // simple encryption
       info := infoaes.EncryptPkcs7(info, {ivatbeg=}false);
       infoaes.IV := key.Hi; // use the same IV for decoding "remote" info below
     end;
@@ -718,23 +1037,24 @@ begin
     if li > 65535 then
       ETunnel.RaiseUtf8('Open: too much info (len=%)', [li]);
     // actually send the frame ending with its session ID
-    Append(frame, [info, '0101234567']); // li:W sess:I64
+    Append(frame, [info, 'lisess']); // li:W sess:U32 = SUFFIX_SIZE
     l := length(frame);
-    PWord(@PByteArray(frame)^[l - 10])^ := li;
-    PInt64(@PByteArray(frame)^[l - 8])^ := fSession;
+    PWord(@PByteArray(frame)^[l - SUFFIX_SIZE])^ := li;
+    PTunnelSession(@PByteArray(frame)^[l - TRAIL_SIZE])^ := fSession;
+    inc(fFramesOut);
     fTransmit.TunnelSend(frame);
     if Assigned(log) then
-      log.Log(sllTrace, 'Open: after Send1 len=', [length(frame)], self);
+      log.Log(sllTrace, 'Open: sent % - wait for answer', [length(frame)], self);
     // this method will wait until both sides sent a valid signed header
     if not fHandshake.WaitPop(TimeOutMS, nil, remote) then
-      ETunnel.RaiseUtf8('Open: handshake timeout on port %', [result]);
+      ETunnel.RaiseUtf8('Open: handshake %ms timeout on port %', [TimeOutMS, result]);
     if Assigned(log) then
-      log.Log(sllTrace, 'Open: received len=', [length(remote)], self);
+      log.Log(sllTrace, 'Open: received len=%', [length(remote)], self);
     // ensure the returned frame is for this session
     if FrameSession(remote) <> fSession then
       ETunnel.RaiseUtf8('Open: wrong handshake trailer on port %', [result]);
     // extract (and potentially decrypt) the associated JSON info payload
-    l := length(remote) - 10;
+    l := length(remote) - SUFFIX_SIZE;
     li := PWord(@PByteArray(remote)^[l])^;
     FastSetRawByteString(info, @PByteArray(remote)^[l - li], li);
     if infoaes <> nil then
@@ -757,59 +1077,70 @@ begin
     FillZero(key.b);
     if toEncrypted * fOptions <> [] then // toEncrypt or toEcdhe
     begin
-      // hmackey has been pre-computed above with loc.Info and AppSecret
-      EcdheHashRandom(hmackey, loc.Ecdh, rem^.Ecdh); // rnd+pub in same order
+      // hmac has been pre-computed above with loc.Info and AppSecret
+      EcdheHashRandom(hmac, loc.Ecdh, rem^.Ecdh); // rnd+pub in same order
       if toEcdhe in fOptions then
       begin
         if Assigned(log) then
-          log.Log(sllTrace, 'Open: ECDHE shared secret', self);
+          log.Log(sllTrace, 'Open: compute ECDHE shared secret', self);
         if not Ecc256r1SharedSecret(rem^.Ecdh.pub, fEcdhe.priv, key.b) then
           exit;
-        hmackey.Update(key.b); // prime256v1 shared secret
+        hmac.Update(key.b); // prime256v1 shared secret
       end;
-      hmaciv := hmackey;     // two labeled hmacs - see NIST SP 800-108
-      hmackey.Update('AES key'#0);
-      hmackey.Done(key.b);   // AES-128-CTR key
-      hmaciv.Update('IV'#1);
-      hmaciv.Done(iv.b);     // AES-128-CTR iv
+      hmac2 := hmac;     // two labeled hmacs - see NIST SP 800-108
+      hmac.Update('AES key'#0);
+      hmac.Done(key.b);   // AES-128-CTR key
+      hmac2.Update('IV'#1);
+      hmac2.Done(iv.b);     // AES-128-CTR iv
     end;
     // launch the background processing thread
-    if Assigned(log) then
-      log.Log(sllTrace, 'Open: % success', [ToText(fOptions)], self);
     fPort := result;
-    fThread := TTunnelLocalThread.Create(self, fTransmit, key.Lo, iv.Lo, sock);
-    SleepHiRes(100, fThread.fStarted);
+    TimeOutMS := (TimeOutMS shr 10) + 5; // minimal coherent accept time
+    thread := TTunnelLocalThread.Create(
+      self, fTransmit, key.Lo, iv.Lo, sock, TimeOutMS);
+    SleepHiRes(100, thread.fStarted);
+    if Assigned(log) then
+      log.Log(sllTrace, 'Open: started=% %',
+        [BOOL_STR[thread.fStarted], thread], self);
     fStartTicks := GetUptimeSec; // wall clock
-    fInfo.AddNameValuesToObject([
-      'remotePort', fRemotePort,
-      'localPort',  fPort,
-      'started',    NowUtcToString,
-      'session',    fSession,
-      'encrypted',  Encrypted,
-      'options',    ToText(fOptions)]);
     hqueue := fHandshake;
     fSendSafe.Lock; // re-entrant for TunnelSend()
     try
-      fHandshake := nil; // ends the handshaking phase
+      fThread := thread;   // starts the normal tunnelling phase
+      fHandshake := nil;   // ends the handshaking phase
       while hqueue.Pop(frame) do
-        TunnelSend(frame); // paranoid
+      begin
+        if Assigned(log) then
+          log.Log(sllDebug, 'Open: delayed frame len=%', [length(frame)], self);
+        TunnelSend(frame); // paranoid: redirect to this instance
+      end;
     finally
       fSendSafe.UnLock;
       hqueue.Free;
     end;
+    // now everything is running and we can prepare the fixed info
+    fInfo.AddNameValuesToObject([
+      'remotePort', fRemotePort,
+      'localPort',  fPort,
+      'started',    NowUtcToString,
+      'session',    Int64(fSession),
+      'encrypted',  Encrypted,
+      'options',    ToText(fOptions)]);
+    AfterHandshake; // may be overriden e.g. to customize fInfo
+    if Assigned(log) then
+      log.Log(sllTrace, 'Open=% %', [result, variant(fInfo)], self);
   except
     sock.ShutdownAndClose(true); // any error would abort and return 0
     result := 0;
   end;
   infoaes.Free;
-  FreeAndNil(fHandshake);
   FillZero(key.b);
   FillZero(iv.b);
 end;
 
-function TTunnelLocal.TunnelSession: TTunnelSession;
+procedure TTunnelLocal.AfterHandshake;
 begin
-  result := fSession;
+  // do nothing by default, but could perform some custom process e.g. on fInfo
 end;
 
 function TTunnelLocal.LocalPort: RawUtf8;
@@ -833,6 +1164,11 @@ begin
             (fThread.fAes[false] <> nil);
 end;
 
+procedure TTunnelLocal.OnTunnelInfo(var Info: TDocVariantData);
+begin
+  // do nothing by default, but could remove or add some fields
+end;
+
 function TTunnelLocal.TunnelInfo: variant;
 var
   dv: TDocVariantData absolute result;
@@ -840,30 +1176,15 @@ begin
   VarClear(result);
   if fPort = 0 then
     exit;
-  dv.InitFast(fInfo.Count + 3, dvObject);
-  dv.AddFrom(fInfo);
-  dv.AddNameValuesToObject([
-    'elapsed',  GetUptimeSec - fStartTicks,
-    'bytesIn',  fReceived,
-    'bytesOut', fSent]);
-end;
-
-
-function ToText(opt: TTunnelOptions): ShortString;
-begin
-  GetSetNameShort(TypeInfo(TTunnelOptions), opt, result, {trim=}true);
-  LowerCaseShort(result);
-end;
-
-function FrameSession(const Frame: RawByteString): TTunnelSession;
-var
-  l: PtrInt;
-begin
-  l := length(Frame) - 8;
-  if l >= 0 then
-    result := PInt64(@PByteArray(Frame)[l])^
-  else
-    result := 0;
+  dv.InitFast(fInfo.Count + 7, dvObject);
+  dv.AddFrom(fInfo);         // fixed values
+  dv.AddNameValuesToObject([ // evolving values
+    'elapsed',   GetElapsed,
+    'bytesIn',   fBytesIn,
+    'bytesOut',  fBytesOut,
+    'framesIn',  fFramesIn,
+    'framesOut', fFramesOut]);
+  OnTunnelInfo(dv);
 end;
 
 
@@ -871,13 +1192,12 @@ end;
 
 { TTunnelLocalServer }
 
-function TTunnelLocalServer.ComputeOptionsFromCert: TTunnelOptions;
+procedure TTunnelLocalServer.IncludeOptionsFromCert;
 begin
-  result := [];
-  if Assigned(fSignCert) then
-    include(result, toServerSigned);
   if Assigned(fVerifyCert) then
-    include(result, toClientSigned);
+    include(fOptions, toClientSigned); // client signature
+  if Assigned(fSignCert) then
+    include(fOptions, toServerSigned); // server signature
 end;
 
 procedure TTunnelLocalServer.EcdheHashRandom(var hmac: THmacSha256;
@@ -890,13 +1210,12 @@ end;
 
 { TTunnelLocalClient }
 
-function TTunnelLocalClient.ComputeOptionsFromCert: TTunnelOptions;
+procedure TTunnelLocalClient.IncludeOptionsFromCert;
 begin
-  result := [];
   if Assigned(fSignCert) then
-    include(result, toClientSigned);
+    include(fOptions, toClientSigned); // client signature
   if Assigned(fVerifyCert) then
-    include(result, toServerSigned);
+    include(fOptions, toServerSigned); // server signature
 end;
 
 procedure TTunnelLocalClient.EcdheHashRandom(var hmac: THmacSha256;
@@ -909,65 +1228,28 @@ end;
 
 { TTunnelList }
 
-function FindIndexLocked(p: PITunnelLocal; s: TTunnelSession): PtrInt;
-var
-  n: PtrInt;
-begin
-  if (s <> 0) and
-     (p <> nil) then
-  begin
-    result := 0;
-    n := PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1);
-    repeat
-      if p^.TunnelSession = s then // fast TTunnelLocal.TunnelSession method
-        exit;
-      if result = n then
-        break;
-      inc(p);
-      inc(result);
-    until false;
-  end;
-  result := -1; // not found
-end;
-
 function TTunnelList.Exists(aSession: TTunnelSession): boolean;
 begin
   fSafe.ReadLock;
   try
-    result := FindIndexLocked(pointer(fItem), aSession) >= 0;
+    result := IntegerScanExists(pointer(fSession), fCount, aSession);
   finally
     fSafe.ReadUnLock;
   end;
 end;
 
-function TTunnelList.Get(aSession: TTunnelSession; var aInstance: ITunnelLocal): boolean;
-var
-  ndx: PtrInt;
+function TTunnelList.Add(aSession: TTunnelSession;
+  const aInstance: ITunnelTransmit): boolean;
 begin
   result := false;
-  if aSession = 0 then
-    exit;
-  fSafe.ReadLock;
-  try
-    ndx := FindIndexLocked(pointer(fItem), aSession);
-    if ndx < 0 then
-      exit;
-    aInstance := fItem[ndx]; // fast ref counted assignment
-    result := true;
-  finally
-    fSafe.ReadUnLock;
-  end;
-end;
-
-function TTunnelList.Add(const aInstance: ITunnelLocal): boolean;
-begin
-  result := false;
-  if aInstance = nil then
+  if (aInstance = nil) or
+     (aSession = 0) then
     exit;
   fSafe.WriteLock;
   try
-    if FindIndexLocked(pointer(fItem), aInstance.TunnelSession) >= 0 then
+    if IntegerScanExists(pointer(fSession), fCount, aSession) then
       exit;
+    AddInteger(fSession, fCount, aSession);
     InterfaceArrayAdd(fItem, aInstance);
   finally
     fSafe.WriteUnLock;
@@ -978,65 +1260,555 @@ end;
 function TTunnelList.Delete(aSession: TTunnelSession): boolean;
 var
   ndx: PtrInt;
-  instance: ITunnelLocal;
+  instance: ITunnelTransmit;
 begin
   result := false;
-  if aSession = 0 then
+  if (aSession = 0) or
+     (fCount = 0) then
     exit;
   fSafe.WriteLock;
   try
-    ndx := FindIndexLocked(pointer(fItem), aSession);
+    ndx := IntegerScanIndex(pointer(fSession), fCount, aSession);
     if (ndx < 0) or
        not InterfaceArrayExtract(fItem, ndx, instance) then // weak copy
       exit;
+    DeleteInteger(fSession, fCount, ndx);
   finally
     fSafe.WriteUnLock;
   end;
-  instance := nil; // release outside of the blocking Write lock
-  result := true;
+  try
+    instance := nil; // release outside of the global Write lock
+    result := true;
+  except
+    result := false; // show must go on
+  end;
 end;
 
-procedure TTunnelList.TunnelSend(const Frame: RawByteString);
+function TTunnelList.DeleteFrom(aList: TTunnelList): integer;
 var
-  s: TTunnelSession;
+  i: PtrInt;
+begin
+  result := 0;
+  if (fCount = 0) or
+     (aList = nil) or
+     (aList.fCount = 0) then
+    exit;
+  aList.fSafe.ReadLock;
+  try
+    for i := 0 to aList.fCount - 1 do
+      if Delete(aList.fSession[i]) then // fast enough
+        inc(result);
+  finally
+    aList.fSafe.ReadUnLock;
+  end;
+end;
+
+function TTunnelList.TunnelSend(const Frame: RawByteString;
+  aSession: TTunnelSession): boolean;
+var
   ndx: PtrInt;
 begin
-  s := FrameSession(Frame);
-  if s = 0 then
-    exit; // invalid frame for sure
+  result := false;
+  if fCount = 0 then
+    exit;
+  if aSession = 0 then
+  begin
+    aSession := FrameSession(Frame); // if was not pre-computed
+    if aSession = 0 then
+      exit;
+  end;
   fSafe.ReadLock; // non-blocking Read lock
   try
-    ndx := FindIndexLocked(pointer(fItem), s);
+    ndx := IntegerScanIndex(pointer(fSession), fCount, aSession); // SSE2 asm
     if ndx < 0 then
-      exit;
-    fItem[ndx].TunnelSend(frame); // call ITunnelTransmit method within Read lock
+      exit; // just skip the frame if the session does not exist (anti-fuzzing)
+    fItem[ndx].TunnelSend(frame); // call ITunnelTransmit method within ReadLock
+    result := true;
   finally
     fSafe.ReadUnLock;
   end;
-  if length(Frame) = 8 then // notified end of process from the other party
-    Delete(s); // remove this instance (Send did already make ClosePort)
+  // handle end of process notification from the other side
+  if length(Frame) = TRAIL_SIZE then
+    Delete(aSession); // remove this instance
 end;
 
-function TTunnelList.TunnelInfo: variant;
+procedure TTunnelList.GetInfo(aSession: TTunnelSession; out aInfo: variant);
 var
-  dv: TDocVariantData absolute result;
-  n, i: PtrInt;
+  ndx: PtrInt;
 begin
-  VarClear(result);
-  dv.InitFast(dvArray);
-  if fItem = nil  then
+  if (aSession = 0) or
+     (fCount = 0) then
+    exit;
+  fSafe.ReadLock;
+  try
+    ndx := IntegerScanIndex(pointer(fSession), fCount, aSession);
+    if ndx >= 0 then
+      aInfo := fItem[ndx].TunnelInfo; // ask the remote endpoint
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TTunnelList.GetAllInfo: TVariantDynArray;
+var
+  n, i: PtrInt;
+  tix32: cardinal;
+  invalid: TIntegerDynArray;
+begin
+  result := nil;
+  if fCount = 0  then
+    exit;
+  tix32 := GetTickSec;
+  fInfoCacheSafe.Lock;
+  if tix32 = fInfoCacheTix32 then // cache last info for one second
+    result := fInfoCache          // fast ref-counted pointer assignment
+  else
+    fInfoCacheTix32 := tix32;
+  fInfoCacheSafe.UnLock;
+  if result <> nil then // from cache
     exit;
   fSafe.ReadLock; // non-blocking Read lock
   try
     n := length(fItem);
-    dv.Capacity := n;
+    SetLength(result, n);
     for i := 0 to n - 1 do
-      dv.AddItem(fItem[i].TunnelInfo);
+      try
+        result[i] := fItem[i].TunnelInfo; // call all remote endpoints
+      except
+        AddInteger(invalid, fSession[i]);
+      end;
+  finally
+    fSafe.ReadUnLock;
+  end;
+  if invalid <> nil then
+    for i := 0 to high(invalid) do
+      Delete(invalid[i]); // eventually delete unstable links
+  fInfoCacheSafe.Lock;
+  fInfoCache := result;
+  fInfoCacheSafe.UnLock;
+end;
+
+
+{ ******************** Abstract SOA implementation of a Relay Server }
+
+{ TTunnelRelay }
+
+constructor TTunnelRelay.Create(aLogClass: TSynLogClass;
+  aTransientTimeOutSecs: cardinal);
+begin
+  fLogClass := aLogClass;
+  fLogClass.Add.Log(sllDebug, 'Create timeout=%', [aTransientTimeOutSecs], self);
+  fTransientTimeOutSecs := aTransientTimeOutSecs;
+  fAgent := TTunnelAgent.Create(self, fTransientTimeOutSecs);
+  fAgentInstance := fAgent; // ready to be used e.g. as a sicShared SOA instance
+end;
+
+destructor TTunnelRelay.Destroy;
+var
+  i: PtrInt;
+begin
+  fLogClass.Add.Log(sllDebug, 'Destroy: AgentCount=% ConsoleCount=%',
+    [fAgent.Count, fConsoleCount], self);
+  // remove any reference to this now deprecated pointer
+  if fAgent <> nil then
+    fAgent.fOwner := nil;
+  if fConsoleCount <> 0 then
+    for i := 0 to fConsoleCount - 1 do
+      fConsole[i].fOwner := nil; // paranoid
+  fAgentInstance := nil;
+  inherited Destroy;
+end;
+
+function TTunnelRelay.HasConsolePrepared(aSession: TTunnelSession): boolean;
+var
+  c: ^TTunnelConsole;
+  n: integer;
+begin
+  if (self <> nil) and
+     (fConsoleCount <> 0) then
+  begin
+    fConsoleSafe.ReadLock;
+    try
+      result := true;
+      c := pointer(fConsole);
+      n := fConsoleCount;
+      if n <> 0 then
+        repeat
+          if c^.HasTransient(aSession) then
+            exit;
+          inc(c);
+          dec(n);
+        until n = 0;
+    finally
+      fConsoleSafe.ReadUnLock;
+    end;
+  end;
+  result := false;
+  fLogClass.Add.Log(sllTrace, 'HasConsolePrepared(%)=false', [Int64(aSession)], self);
+end;
+
+function TTunnelRelay.LockedFindConsole(aSession: TTunnelSession): TTunnelConsole;
+var
+  c: ^TTunnelConsole;
+  n: integer;
+begin
+  c := pointer(fConsole);
+  n := fConsoleCount;
+  if n <> 0 then
+    repeat
+      result := c^;
+      if result.fList.Exists(aSession) then
+        exit;
+      inc(c);
+      dec(n);
+    until n = 0;
+  result := nil;
+end;
+
+procedure TTunnelRelay.ConsoleTunnelSend(const Frame: RawByteString);
+var
+  s: TTunnelSession;
+  c: ^TTunnelConsole;
+  n: integer;
+begin
+  s := FrameSession(Frame);
+  if (s = 0) or
+     (self = nil) then
+    exit;
+  fConsoleSafe.ReadLock;
+  try
+    c := pointer(fConsole);
+    n := fConsoleCount;
+    if n <> 0 then
+      repeat
+        if c^.fList.TunnelSend(Frame, s) then
+          exit;
+        inc(c);
+        dec(n);
+      until n = 0;
+  finally
+    fConsoleSafe.ReadUnLock;
+  end;
+  fLogClass.Add.Log(sllDebug, 'ConsoleTunnelSend(%): unknown session',
+    [Int64(s)], self); // unlikely
+end;
+
+function TTunnelRelay.TryResolve(aInterface: PRttiInfo; out Obj): boolean;
+var
+  c: TTunnelConsole;
+begin
+  result := false;
+  if aInterface = TypeInfo(ITunnelConsole) then
+  begin
+    // create a new TTunnelConsole instance (e.g. in sicPerSession mode)
+    c := TTunnelConsole.Create(self, fTransientTimeOutSecs);
+    fConsoleSafe.WriteLock;
+    try
+      PtrArrayAdd(fConsole, c, fConsoleCount);
+    finally
+      fConsoleSafe.WriteUnLock;
+    end;
+    ITunnelConsole(Obj) := c; // resolve as new ITunnelConsole
+    fLogClass.Add.Log(sllTrace, 'TryResolve: new %', [c], self);
+    result := true;
+  end
+  else if aInterface = TypeInfo(ITunnelAgent) then
+    if fAgent <> nil then
+    begin
+      ITunnelAgent(Obj) := fAgent; // resolve as shared ITunnelAgent
+      result := true;
+    end;
+end;
+
+function TTunnelRelay.RemoveConsole(aConsole: TTunnelConsole): boolean;
+var
+  asagent, asconsole: integer;
+begin
+  // remove associated agents (happens e.g. on broken connection)
+  asconsole := aConsole.Count;
+  asagent := 0;
+  if asconsole <> 0 then
+    asagent := fAgent.fList.DeleteFrom(aConsole.fList);
+  // remove from main console list
+  fConsoleSafe.WriteLock;
+  try
+    result := PtrArrayDelete(fConsole, aConsole, @fConsoleCount) >= 0;
+  finally
+    fConsoleSafe.WriteUnLock;
+  end;
+  fLogClass.Add.Log(sllTrace, 'RemoveConsole=% asagent=% asconsole=%',
+    [BOOL_STR[result], asagent, asconsole], self);
+end;
+
+function TTunnelRelay.AgentsInfo: TVariantDynArray;
+begin
+  if (self = nil) or
+     (fAgent = nil) then
+    result := nil
+  else
+    result := fAgent.fList.GetAllInfo; // with 1 second cache
+end;
+
+function TTunnelRelay.ConsolesInfo: TVariantDynArray;
+var
+  c: ^TTunnelConsole;
+  n: integer;
+  dv: PDocVariantData;
+begin
+  result := nil;
+  if (self = nil) or
+     (fConsoleCount = 0) then
+    exit;
+  fConsoleSafe.ReadLock;
+  try
+    SetLength(result, fConsoleCount);
+    dv := pointer(result);
+    c := pointer(fConsole);
+    n := fConsoleCount;
+    if n <> 0 then
+      repeat
+        dv^.InitFast(c^.fInfo.Count + 2, dvObject);
+        dv^.AddFrom(c^.fInfo);
+        dv^.AddValue('count', c^.fList.fCount);
+        dv^.AddValue('list',  c^.TunnelInfo); // with 1 second cache
+        inc(c);
+        inc(dv);
+        dec(n);
+      until n = 0;
+  finally
+    fConsoleSafe.ReadUnLock;
+  end;
+end;
+
+
+{ TTunnelOpen }
+
+constructor TTunnelOpen.Create(aOwner: TTunnelRelay; aTimeOutSecs: cardinal);
+begin
+  fOwner := aOwner;
+  fLogClass := aOwner.fLogClass;
+  fTimeOutSecs := aTimeOutSecs;
+  fList := TTunnelList.Create;
+end;
+
+destructor TTunnelOpen.Destroy;
+begin
+  fLogClass.Add.Log(sllTrace, 'Destroy count=%', [fList.fCount], self);
+  FreeAndNil(fList);
+  inherited Destroy;
+end;
+
+function TTunnelOpen.Count: integer;
+begin
+  result := 0;
+  if (self <> nil) and
+     (fList <> nil) then
+    result := fList.fCount;
+end;
+
+function TTunnelOpen.HasTransient(aSession: TTunnelSession): boolean;
+begin
+  result := false;
+  if fSessionCount = 0 then
+    exit;
+  fSafe.ReadLock;
+  try
+    result := IntegerScanExists(pointer(fSession), fSessionCount, aSession);
   finally
     fSafe.ReadUnLock;
   end;
 end;
 
+function TTunnelOpen.AddTransient(aSession: TTunnelSession;
+  const callback: ITunnelTransmit): boolean;
+var
+  tix32: cardinal;
+  i, n, gc: PtrInt;
+  gctxt: TShort16;
+begin
+  gctxt[0] := #0;
+  result := fList.Add(aSession, callback);
+  try
+    if not result then
+      exit;
+    tix32 := GetTickSec; // outside of WriteLock
+    fSafe.WriteLock;
+    try
+      // add this new transient session and its timestamp
+      n := fSessionCount;
+      AddInteger(fSession, fSessionCount, aSession);
+      if fSessionCount >= length(fSessionTix) then
+        SetLength(fSessionTix, length(fSession));
+      fSessionTix[n] := tix32;
+      // check and remove deprecated transient sessions
+      if (fTimeOutSecs = 0) or
+         (tix32 shr 4 = fDeprecatedTix32) then
+        exit;
+      fDeprecatedTix32 := tix32 shr 4; // next check in 16 seconds
+      if n = 0 then // fSession[n] = just above
+        exit;
+      gc := 0;
+      for i := n - 1 downto 0 do
+        if cardinal(fSessionTix[i]) + fTimeOutSecs < tix32 then
+        begin
+          fList.Delete(fSession[i]);
+          DeleteTransient(i);
+          inc(gc);
+        end;
+      FormatShort16('gc=%, ', [gc], gctxt);
+    finally
+      fSafe.WriteUnLock;
+    end;
+  finally
+    fLogClass.Add.Log(sllTrace, 'AddTransient(%)=% %count=%',
+      [Int64(aSession), BOOL_STR[result], gctxt, fSessionCount], self);
+  end;
+end;
+
+function TTunnelOpen.RemoveTransient(aSession: TTunnelSession): boolean;
+var
+  ndx: PtrInt;
+begin
+  result := false;
+  fSafe.WriteLock;
+  try
+    ndx := IntegerScanIndex(pointer(fSession), fSessionCount, aSession);
+    if ndx < 0 then
+      exit;
+    DeleteTransient(ndx);
+    result := true;
+  finally
+    fSafe.WriteUnLock;
+    fLogClass.Add.Log(sllTrace, 'RemoveTransient(%)=% count=%',
+      [Int64(aSession), BOOL_STR[result], fSessionCount], self);
+  end;
+end;
+
+procedure TTunnelOpen.DeleteTransient(ndx: PtrInt);
+begin
+  DeleteInteger(fSession, fSessionCount, ndx);
+  UnmanagedDynArrayDelete(fSessionTix, fSessionCount, ndx, SizeOf(cardinal));
+end;
+
+function TTunnelOpen.TunnelCommit(aSession: TTunnelSession): boolean;
+begin
+  result := RemoveTransient(aSession);
+end;
+
+function TTunnelOpen.TunnelRollback(aSession: TTunnelSession): boolean;
+begin
+  result := RemoveTransient(aSession) and
+            fList.Delete(aSession);
+end;
+
+
+{ TTunnelConsole }
+
+destructor TTunnelConsole.Destroy;
+begin
+  if fOwner <> nil then
+    fOwner.RemoveConsole(self); // unregister itself from weak fConsole[] list
+  inherited Destroy;
+end;
+
+procedure TTunnelConsole.TunnelSetInfo(const info: variant);
+begin
+  fInfo.Clear;
+  fInfo := _Safe(info)^;
+  fLogClass.Add.Log(sllTrace, 'TunnelSetInfo %', [info], self);
+end;
+
+function TTunnelConsole.TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+var
+  n: integer;
+begin
+  result := 0;
+  if (fOwner = nil) or
+     (fOwner.fAgent = nil) or
+     (callback = nil) then
+    exit;
+  fOwner.fConsoleSafe.WriteLock;
+  try
+    for n := 1 to 50 do // never loop forever
+    begin
+      result := Random31Not0; // a random session seems the best option
+      if not fList.Exists(result) then                 // not in this console
+        if fOwner.LockedFindConsole(result) = nil then // not in main list
+          break;
+      result := 0; // very unlikely with 31-bit range - but try up to 50 times
+      fLogClass.Add.Log(sllDebug, 'TunnelPrepare random collision', self);
+    end;
+    if result <> 0 then
+      if not AddTransient(result, callback) then
+        result := 0; // unexpected failure
+  finally
+    fOwner.fConsoleSafe.WriteUnLock;
+  end;
+end;
+
+function TTunnelConsole.TunnelInfo: variant;
+begin
+  VarClear(result);
+  if fList.fCount <> 0 then // return the list local to this console
+    TDocVariantData(result).InitArrayFromVariants(fList.GetAllInfo, JSON_FAST);
+end;
+
+procedure TTunnelConsole.TunnelSend(const Frame: RawByteString);
+var
+  s: TTunnelSession;
+  ok: boolean;
+begin
+  if (fOwner = nil) or
+     (fOwner.fAgent = nil) then
+    exit;
+  fOwner.fAgent.fList.TunnelSend(Frame);
+  // handle if received end of process notification from the other side
+  if length(Frame) = TRAIL_SIZE then
+  begin
+    s := PTunnelSession(Frame)^;
+    ok := fList.Delete(s); // remove from this console list
+    fLogClass.Add.Log(sllTrace, 'TunnelSend: Delete(%)=% after ClosePort',
+      [Int64(s), BOOL_STR[ok]], self);
+  end;
+end;
+
+
+{ TTunnelAgent }
+
+function TTunnelAgent.TunnelPrepare(aSession: TTunnelSession;
+  const callback: ITunnelTransmit): boolean;
+begin
+  result := fOwner.HasConsolePrepared(aSession) and
+            AddTransient(aSession, callback);
+end;
+
+function TTunnelAgent.TunnelInfo: variant;
+begin
+  VarClear(result); // no global list (unsafe from agent)
+end;
+
+procedure TTunnelAgent.TunnelSend(const Frame: RawByteString);
+var
+  s: TTunnelSession;
+  ok: boolean;
+begin
+  fOwner.ConsoleTunnelSend(Frame); // search for matching fConsole[].TunnelSend
+  // handle end of process notification from the other side
+  if length(Frame) = TRAIL_SIZE then
+  begin
+    s := PTunnelSession(Frame)^;
+    ok := fList.Delete(s); // remove from the global agents list
+    fLogClass.Add.Log(sllTrace, 'TunnelSend: Delete(%)=% after ClosePort',
+      [Int64(s), BOOL_STR[ok]], self);
+  end;
+end;
+
+
+initialization
+  TInterfaceFactory.RegisterInterfaces([
+    TypeInfo(ITunnelTransmit),
+    TypeInfo(ITunnelAgent),
+    TypeInfo(ITunnelConsole)]);
 
 end.
 

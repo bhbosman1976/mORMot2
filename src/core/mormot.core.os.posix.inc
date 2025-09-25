@@ -620,7 +620,7 @@ begin
   end;
 end;
 
-function GetDesktopWindow: PtrInt;
+function GetDesktopWindow: PtrUInt;
 begin
   result := 0; // fixed result on a window-abstracted system
 end;
@@ -1680,6 +1680,33 @@ begin
     fpmunmap(fBuf, fBufSize);
 end;
 
+// we tried sched_yield() on Linux, but since we spin for a while before calling
+// SwitchToThread, it made more syscalls for no wallclock benefit: nanosleep(10us)
+// seems a better solution, and also prevents pathological spinning if the
+// scheduler policy actually is not adapted to this usage
+{ $define OSLINUX_SCHEDYIELD}     // force sched_yield syscall on Linux
+{ $define OSLINUX_SCHEDYIELDONCE} // yield once during DoSpin() - no benefit
+
+{$ifdef OSLINUX_SCHEDYIELD}
+procedure SwitchToThread;
+begin
+  // called more often than nanosleep, with no actual benefit
+  Do_SysCall(syscall_nr_sched_yield); // properly defined in syscall.pp
+end;
+{$else}
+procedure SwitchToThread;
+var
+  t: TTimeSpec;
+begin
+  // note: nanosleep() may flood the kernel with timer/scheduling events under
+  // repeated calls - but here we spin-and-pause between calls so it is fine
+  t.tv_sec := 0;
+  t.tv_nsec := 1000; // 1us seems fair enough in respect to OS timers resolution
+  fpnanosleep(@t, nil);
+  // benchmarks show consistent 50us minimal for tiny requests, so 1us default
+  // could prevent the kernel to jitter with too small intervals like 10ns
+end;
+{$endif OSLINUX_SCHEDYIELD}
 
 procedure SleepHiRes(ms: cardinal);
 var
@@ -1691,9 +1718,10 @@ begin
     // handle SleepHiRes(0) special case
     if SleepHiRes0Yield then
     begin
-      // warning: reported as buggy by Alan on POSIX, and despitable by Linus
+      // reported as unreliable by Alan on most POSIX, and despitable by Linus
       // - from our testing, it gives worse performance than fpnanosleep()
-      ThreadSwitch; // call e.g. POSIX libc's sched_yield API
+      // when waiting for some event (but may be sometimes used for spinning)
+      ThreadSwitch; // FPC RTL redirects to pthread_yield()
       exit;
     end
     else
@@ -1708,17 +1736,6 @@ begin
   end;
   fpnanosleep(@timeout, nil)
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
-end;
-
-procedure SwitchToThread;
-var
-  timeout: Ttimespec;
-begin
-  // nanosleep() seems better than FPC RTL ThreadSwitch = POSIX libc sched_yield
-  timeout.tv_sec := 0;
-  timeout.tv_nsec := 10; // empirically identified on a recent Linux Kernel
-  // note: nanosleep() adds a few dozen of microsecs for context switching
-  fpnanosleep(@timeout, nil);
 end;
 
 
@@ -2102,10 +2119,6 @@ end;
 
 // we bypass crt.pp since this unit cancels the SIGINT signal
 
-procedure AllocConsole;
-begin
-end;
-
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   TextAttr: integer = -1; // always change the color at startup
@@ -2217,8 +2230,10 @@ begin
     until false;
   end
   else
+  begin
     ReadLn;
-  ioresult;
+    ioresult;
+  end;
 end;
 {$I+}
 
@@ -3406,7 +3421,7 @@ procedure XorOSEntropy(var e: THash512Rec);
 var
   tmp: TBuffer4K;
   si: TSysInfo  absolute tmp; // Linuxism
-  rt: TTimeSpec absolute tmp; // with nanoseconds resolution
+  rt: TTimeSpec absolute tmp; // in nanoseconds resolution
 begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt);
   DefaultHasher128(@e.h0, @rt, SizeOf(rt)); // maybe AesNiHash128
@@ -4558,12 +4573,12 @@ var
   f: file;
   fd: THandle;
   pid, res, wr: cint;
-  n, l: TSsize;
+  n: TSsize;
   wait: cardinal;
   endtix: Int64;
   tmp: TBuffer64K;
 
-  function RedirectOutput(flush: boolean; var redir: RawByteString): boolean;
+  function RedirectOutput(killing: boolean; var redir: RawByteString): boolean;
   var
     u: RawUtf8;
   begin
@@ -4575,27 +4590,18 @@ var
         exit; // pipe closed or EINTR = execution finished
       if setresult and
          (n <> 0) then
-      begin
-        if redir = '' then
-          FastSetString(RawUtf8(redir), @tmp, n) // assume CP_UTF8
-        else
-        begin
-          SetLength(redir, l + n); // append
-          MoveFast(tmp, PByteArray(redir)[l], n);
-        end;
-        inc(l, n);
-      end;
+        AppendBufferToUtf8(@tmp, n, RawUtf8(redir)); // assume CP_UTF8
       if Assigned(onoutput) then
       begin
         FastSetString(u, @tmp, n); // console output is likely UTF-8 on POSIX
         if onoutput(u, pid) and
-           not flush then
+           not killing then
           endtix := 1; // returned true: force kill() on abort
       end;
     end
     else if Assigned(onoutput) and // idle
             onoutput('', pid) and
-            not flush then
+            not killing then
       endtix := 1; // returned true to abort -> kill()
     result := true;
   end;
@@ -4611,17 +4617,15 @@ begin
   if Assigned(onoutput) then
     onoutput('', pid);
   wait := 200;
-  if waitfordelayms = INFINITE then
-    endtix := 0
-  else
+  endtix := 0;
+  if waitfordelayms <> INFINITE then
   begin
-    endtix := GetTickCount64 + waitfordelayms;
     if waitfordelayms < wait then
       wait := waitfordelayms;
+    endtix := GetTickCount64 + waitfordelayms;
   end;
-  l := 0;
   repeat
-    if not RedirectOutput({flush=}false, result) then
+    if not RedirectOutput({killing=}false, result) then
       break; // pipe closed = execution finished
     if (endtix <> 0) and
        (GetTickCount64 > endtix) then
@@ -4635,8 +4639,8 @@ begin
         begin
           endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000;
           repeat
-            wr := FpWaitPid(pid, @res, WNOHANG);  // 0 = no state change
-            RedirectOutput({flush=}true, result); // continue redirection
+            wr := FpWaitPid(pid, @res, WNOHANG);    // 0 = no state change
+            RedirectOutput({killing=}true, result); // continue redirection
             if (wr <> 0) or
                (GetTickCount64 > endtix) then
               break;

@@ -872,12 +872,13 @@ begin
         check(s1[j] in [#33 .. #126]);
       // verify Random32 / RandomDouble / RandomDouble distribution
       c := a1.Random32;
-      check(c <> a2.Random32, 'Random32 collision');
       if c < cardinal(maxint) then
         inc(clo)
       else
         inc(chi);
-      check(a1.Random64 <> a2.Random64);
+      check(c <> a2.Random32, 'Random32 collision');
+      check(c <> a1.Random32, 'Random32 twice collision');
+      check(a1.Random64 <> a2.Random64, 'Random64 collision');
       check(a1.Random32(i) < cardinal(i));
       d := a1.RandomDouble;
       check((d >= 0) and (d < 1));
@@ -4153,7 +4154,7 @@ begin
   // sign
   s := c3.Sign(pointer(r), length(r));
   Check(s <> '', 'sign');
-  cv := st1.Verify(s, pointer(r), length(r));
+  cv := st1.Verify(s, r);
   if cv <> cvNotSupported then
     // TCryptStoreOpenSsl.Verify has no way to know which cert signed it
     CheckUtf8(cv = cvValidSigned, 's1=%', [ToText(cv)^]);
@@ -4166,16 +4167,16 @@ begin
   Check(st2.IsValid(c3) = cvValidSigned, '2c3');
   if cv <> cvNotSupported then
   begin
-    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2a');
+    Check(st2.Verify(s, r) = cvValidSigned, 's2a');
     dec(r[1]);
-    Check(st2.Verify(s, pointer(r), length(r)) = cvInvalidSignature, 's2b');
+    Check(st2.Verify(s, r) = cvInvalidSignature, 's2b');
     inc(r[1]);
-    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2c');
+    Check(st2.Verify(s, r) = cvValidSigned, 's2c');
     // validate CRL on buffers (not OpenSSL)
     Check(st2.Revoke(c3, crrWithdrawn));
-    Check(st2.Verify(s, pointer(r), length(r)) = cvRevoked, 's2d');
+    Check(st2.Verify(s, r) = cvRevoked, 's2d');
     Check(st2.Revoke(c3, crrNotRevoked));
-    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2e');
+    Check(st2.Verify(s, r) = cvValidSigned, 's2e');
   end;
   // validate CRL on certificates
   Check(st2.Revoke(c3, crrWithdrawn), 'rev');
@@ -4190,7 +4191,7 @@ begin
     Check(st3.IsValid(c2) = cvUnknownAuthority, '3c2');
     Check(st3.IsValid(c3) = cvUnknownAuthority, '3c3');
     if cv <> cvNotSupported then
-      Check(st3.Verify(s, pointer(r), length(r)) = cvUnknownAuthority, 's3');
+      Check(st3.Verify(s, r) = cvUnknownAuthority, 's3');
   end;
   st3 := st2;
   NotifyTestSpeed('%', [str.AlgoName], 1, 0, @timer, {onlylog=}true);

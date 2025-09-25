@@ -17,6 +17,7 @@ uses
   mormot.core.unicode,
   mormot.core.datetime,
   mormot.core.rtti,
+  mormot.core.interfaces,
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
@@ -42,7 +43,16 @@ uses
   mormot.net.ldap,
   mormot.net.dns,
   mormot.net.rtsphttp,
-  mormot.net.tunnel;
+  mormot.net.tunnel,
+  mormot.soa.core,
+  mormot.rest.core,
+  mormot.rest.server,
+  mormot.rest.memserver,
+  mormot.rest.http.server,
+  mormot.rest.http.client;
+
+const
+  SYNOPSE_IP = '82.67.73.95'; // the mormot's home in the French mountains :)
 
 type
   /// this test case will validate several low-level protocols
@@ -60,14 +70,19 @@ type
     reqthree: boolean;
     reqfour: Int64;
     // for _TTunnelLocal
-    tunnelsession: Int64;
     tunnelappsec: RawUtf8;
     tunneloptions: TTunnelOptions;
-    tunnelexecutedone: boolean;
-    tunnelexecuteremote, tunnelexecutelocal: TNetPort;
+    tunnelsequence: integer;
     procedure TunnelExecute(Sender: TObject);
-    procedure TunnelExecuted(Sender: TObject);
-    procedure TunnelTest(const clientcert, servercert: ICryptCert);
+    function TunnelBackgroundOpen(l: TTunnelLocal; s: TTunnelSession;
+     const r: ITunnelTransmit; const sc, vc: ICryptCert): TLoggedWorkThread;
+    procedure CheckBlocks(const log: ISynLog; const sent, recv: RawByteString;
+      num: integer);
+    procedure TunnelTest(var rnd: TLecuyer; const clientcert, servercert: ICryptCert);
+    procedure TunnelSocket(const log: ISynLog; var rnd: TLecuyer;
+      clientinstance, serverinstance: TTunnelLocal);
+    procedure TunnelRelay(relay: TTunnelRelay; const agent: array of ITunnelAgent;
+      const console: array of ITunnelConsole; var rnd: TLecuyer);
     procedure RunLdapClient(Sender: TObject);
     procedure RunPeerCacheDirect(Sender: TObject);
     function OnPeerCacheDirect(var aUri: TUri; var aHeader: RawUtf8;
@@ -100,7 +115,7 @@ type
     /// RTSP over HTTP, with always temporary buffering
     procedure RTSPOverHTTPBufferedWrite;
     /// validate mormot.net.tunnel
-    procedure _TTunnelLocal;
+    procedure Tunnel;
     /// validate IP processing functions
     procedure IPAddresses;
     /// validate mormot.net.openapi unit
@@ -828,8 +843,8 @@ procedure CheckSynopseReverse(test: TNetworkProtocols; const ip: RawUtf8);
 begin
   if ip = 'blog.synopse.info' then // occurs on some weird DNS servers
     test.Check(true)
-  else
-    test.CheckEqual(ip, '62-210-254-173.rev.poneytelecom.eu');
+  else // French marmots have fiber connection in their mountains
+    test.CheckUtf8(PosEx('fbx.proxad.net', ip) <> 0, ip);
 end;
 
 procedure TNetworkProtocols.RunLdapClient(Sender: TObject);
@@ -983,7 +998,7 @@ begin
       Sleep(100); // some DNS servers may fail at first: wait a little
     until GetTickSec > endtix;
     CheckEqual(NetAddrResolve('synopse.info'), ip, 'NetAddrResolve');
-    rev := '62.210.254.173';
+    rev := SYNOPSE_IP; // the marmots' home IP
     CheckEqual(ip, rev, 'dns1');
     repeat
       inc(fAssertions);
@@ -1499,135 +1514,417 @@ begin
     end;
 end;
 
+type
+   TTunnelExecute = class
+   public
+     local: TTunnelLocal;
+     session: TTunnelSession;
+     remote: ITunnelTransmit;
+     signcert, verifcert: ICryptCert;
+   end;
+
+function TNetworkProtocols.TunnelBackgroundOpen(l: TTunnelLocal; s: TTunnelSession;
+  const r: ITunnelTransmit; const sc, vc: ICryptCert): TLoggedWorkThread;
+var
+  context: TTunnelExecute;
+  name: RawUtf8;
+begin
+  context := TTunnelExecute.Create;
+  context.local := l;
+  context.session := s;
+  context.remote := r;
+  context.signcert := sc;
+  context.verifcert := vc;
+  inc(tunnelsequence);
+  Make(['open', tunnelsequence], name);
+  result := TLoggedWorkThread.Create(TSynLog, name, context,
+    TunnelExecute, {suspended=}false, {ManualWaitForAndFree=}true);
+end;
+
 procedure TNetworkProtocols.TunnelExecute(Sender: TObject);
 var
-  local: TTunnelLocal absolute Sender;
+  exec: TTunnelExecute;
+  port: TNetPort;
 begin
+  exec := Sender as TTunnelExecute;
   // one of the two handshakes should be done in another thread
-  tunnelexecutelocal := local.Open(
-    tunnelsession, tunneloptions, 1000, tunnelappsec, cLocalhost,
-    ['remoteHost', Executable.Host]);
-  tunnelexecuteremote := local.RemotePort;
-  Check(tunnelexecutelocal <> 0);
-  Check(tunnelexecuteremote <> 0);
+  if not CheckFailed(exec <> nil) then
+  try
+    check(exec.local <> nil);
+    check(exec.session <> 0);
+    with exec do
+      port := local.Open(session, remote, tunneloptions, 1000, tunnelappsec,
+        cLocalHost, ['remoteHost', Executable.Host], signcert, verifcert);
+    check(port <> 0);
+    checkEqual(port, exec.local.Port);
+    check(exec.local.Port <> 0);
+    check(exec.local.RemotePort <> 0);
+  finally
+    exec.Free; // always free transient call parameters
+  end;
 end;
 
-procedure TNetworkProtocols.TunnelExecuted(Sender: TObject);
+procedure TNetworkProtocols.CheckBlocks(const log: ISynLog; const sent, recv: RawByteString; num: integer);
 begin
-  tunnelexecutedone := true;
+  CheckUtf8(sent = recv, 'block% %=%', [num, length(sent), length(recv)]);
+  if (sent <> recv) and
+     Assigned(log) then
+  begin
+    log.Log(sllDebug, 'block%: sent=%', [num, sent], self);
+    log.Log(sllDebug, 'block%: recv=%', [num, recv], self);
+  end;
 end;
 
-procedure TNetworkProtocols.TunnelTest(const clientcert, servercert: ICryptCert);
+procedure TNetworkProtocols.TunnelSocket(const log: ISynLog; var rnd: TLecuyer;
+  clientinstance, serverinstance: TTunnelLocal);
 var
-  clientinstance, serverinstance: TTunnelLocal;
-  clientcb, servercb: ITunnelTransmit;
-  clienttunnel, servertunnel: ITunnelLocal;
   i: integer;
-  sent, received, sent2, received2: RawByteString;
+  nr: TNetResult;
   clientsock, serversock: TNetSocket;
   local, remote: TNetPort;
+  closed: PBoolean;
+  sent, sent2: RawUtf8;
+  received, received2: RawByteString;
+  nfo: variant;
 begin
-  // setup the two instances with the specified options and certificates
-  clientinstance := TTunnelLocalClient.Create;
-  clientinstance.SignCert := clientcert;
-  clientinstance.VerifyCert := servercert;
-  clienttunnel := clientinstance;
-  clientcb := clientinstance;
-  serverinstance := TTunnelLocalServer.Create;
-  serverinstance.SignCert := servercert;
-  serverinstance.VerifyCert := clientcert;
-  servertunnel := serverinstance;
-  servercb := serverinstance;
-  clienttunnel.SetTransmit(servercb); // set before Open()
-  servertunnel.SetTransmit(clientcb);
-  // validate handshaking
-  tunnelsession := Random32;
-  tunnelappsec := RandomAnsi7(10);
-  TLoggedWorkThread.Create(
-    TSynLog, 'servertunnel', serverinstance, TunnelExecute, TunnelExecuted);
-  local := clientinstance.Open(
-    tunnelsession, tunneloptions, 1000, tunnelappsec, clocalhost,
-    ['remoteHost', Executable.Host]);
-  Check(local <> 0);
-  remote := clienttunnel.RemotePort;
-  Check(remote <> 0);
-  SleepHiRes(1000, tunnelexecutedone);
-  CheckEqual(local, tunnelexecuteremote);
-  CheckEqual(remote, tunnelexecutelocal);
-  Check(tunnelexecutedone, 'TunnelExecuted');
-  tunnelexecutedone := false; // for the next run
-  Check(clienttunnel.LocalPort <> '');
-  Check(servertunnel.LocalPort <> '');
-  Check(servertunnel.LocalPort <> clienttunnel.LocalPort, 'ports');
-  Check(clienttunnel.Encrypted = (toEncrypted * tunneloptions <> []), 'cEncrypted');
-  Check(servertunnel.Encrypted = (toEncrypted * tunneloptions <> []), 'cEncrypted');
-  Check(NewSocket('127.0.0.1', clienttunnel.LocalPort, nlTcp, {bind=}false,
-    1000, 1000, 1000, 0, clientsock) = nrOk);
-  Check(NewSocket('127.0.0.1', servertunnel.LocalPort, nlTcp, {bind=}false,
-    1000, 1000, 1000, 0, serversock) = nrOk);
+  local := clientinstance.Port;
+  remote := serverinstance.Port;
+  Check(local <> 0, 'no local');
+  Check(remote <> 0, 'no remote');
+  Check(remote = clientinstance.RemotePort);
+  Check(local = serverinstance.RemotePort);
+  Check(clientinstance.LocalPort <> '', 'no client localport');
+  Check(serverinstance.LocalPort <> '', 'no server localport');
+  Check(serverinstance.LocalPort <> clientinstance.LocalPort, 'ports');
+  if Assigned(log) then
+    log.Log(sllTrace, 'TunnelTest: sockets start', self);
+  nr := NewSocket('127.0.0.1', clientinstance.LocalPort, nlTcp, {bind=}false,
+    1000, 1000, 1000, 0, clientsock);
+  CheckUtf8(nr = nrOk, 'clientsock=%', [ToText(nr)^]);
+  nr := NewSocket('127.0.0.1', serverinstance.LocalPort, nlTcp, {bind=}false,
+    1000, 1000, 1000, 0, serversock);
+  CheckUtf8(nr = nrOk, 'serversock=%', [ToText(nr)^]);
+  if not CheckFailed(Assigned(clientinstance.Thread), 'no client thread') and
+     not CheckFailed(Assigned(serverinstance.Thread), 'no server thread') then
   try
     // validate raw TCP tunnelling
-    Check(Assigned(clientinstance.Thread));
-    Check(Assigned(serverinstance.Thread));
-    CheckEqual(clientinstance.Received, 0);
-    CheckEqual(clientinstance.Sent, 0);
-    CheckEqual(serverinstance.Received, 0);
-    CheckEqual(serverinstance.Sent, 0);
+    if Assigned(log) then
+      log.Log(sllTrace, 'TunnelTest: sockets started', self);
+    CheckEqual(clientinstance.BytesIn, 0);
+    CheckEqual(clientinstance.BytesOut, 0);
+    CheckEqual(serverinstance.BytesIn, 0);
+    CheckEqual(serverinstance.BytesOut, 0);
     for i := 1 to 100 do
     begin
-      sent := RandomWinAnsi(Random32(200) + 1);
-      sent2 := RandomWinAnsi(Random32(200) + 1);
+      rnd.FillAscii(rnd.Next(200) + 1, sent);
+      rnd.FillAscii(rnd.Next(200) + 1, sent2);
       Check(clientsock.SendAll(pointer(sent), length(sent)) = nrOk);
       Check(serversock.RecvWait(1000, received) = nrOk);
-      CheckEqual(sent, received);
+      CheckBlocks(log, sent, received, 1);
+      if CheckFailed(clientinstance.Thread.Processing, 'no client process') or
+         CheckFailed(serverinstance.Thread.Processing, 'no server process') then
+        break; // don't try any further
       Check(clientsock.SendAll(pointer(sent2), length(sent2)) = nrOk);
       Check(serversock.SendAll(pointer(sent), length(sent)) = nrOk);
       Check(clientsock.RecvWait(1000, received) = nrOk);
       Check(serversock.RecvWait(1000, received2) = nrOk);
-      CheckEqual(sent, received);
-      CheckEqual(sent2, received2);
-      CheckEqual(clientinstance.Received, serverinstance.Sent);
-      CheckEqual(clientinstance.Sent, serverinstance.Received);
-      Check(clientinstance.Received <> 0);
-      Check(clientinstance.Sent <> 0);
-      Check(serverinstance.Received <> 0);
-      Check(serverinstance.Sent <> 0);
+      CheckBlocks(log, sent, received, 2);
+      CheckBlocks(log, sent2, received2, 3);
+      CheckEqual(clientinstance.BytesIn, serverinstance.BytesOut);
+      CheckEqual(clientinstance.BytesOut, serverinstance.BytesIn);
+      Check(clientinstance.BytesIn <> 0);
+      Check(clientinstance.BytesOut <> 0);
+      Check(serverinstance.BytesIn <> 0);
+      Check(serverinstance.BytesOut <> 0);
     end;
-    Check(clientinstance.Received < clientinstance.Sent, 'smaller');
-    Check(serverinstance.Received > serverinstance.Sent, 'bigger');
-    Check(_Safe(serverinstance.TunnelInfo)^.Count > 4);
-    Check(_Safe(clientinstance.TunnelInfo)^.Count > 4);
-    //writeln(clientinstance.TunnelInfo);
+    Check(clientinstance.BytesIn < clientinstance.BytesOut, 'smaller');
+    Check(serverinstance.BytesIn > serverinstance.BytesOut, 'bigger');
+    CheckEqual(serverinstance.FramesIn, clientinstance.FramesOut, 'frames1');
+    CheckEqual(serverinstance.FramesOut, clientinstance.FramesIn, 'frames2');
+    nfo := serverinstance.TunnelInfo;
+    Check(_Safe(nfo)^.Count > 4);
+    if Assigned(log) then
+      log.Log(sllTrace, 'TunnelTest: server=%', [nfo], self);
+    nfo := clientinstance.TunnelInfo;
+    Check(_Safe(nfo)^.Count > 4);
+    if Assigned(log) then
+      log.Log(sllTrace, 'TunnelTest: client=%', [nfo], self);
   finally
+    if Assigned(log) then
+      log.Log(sllTrace, 'TunnelTest: sockets stop', self);
     clientsock.ShutdownAndClose(true);
     serversock.ShutdownAndClose(true);
   end;
-  servertunnel.SetTransmit(nil); // avoid memory leak due to circular references
+  clientinstance.ClosePort;
+  closed := @serverinstance.Closed; // trick to access this propery by value
+  SleepHiRes(1000, closed^);
 end;
 
-procedure TNetworkProtocols._TTunnelLocal;
+procedure TNetworkProtocols.TunnelTest(var rnd: TLecuyer;
+  const clientcert, servercert: ICryptCert);
 var
-  c, s: ICryptCert;
+  log: ISynLog;
+  sess: TTunnelSession;
+  clientinstance, serverinstance: TTunnelLocal;
+  clienttunnel, servertunnel: ITunnelLocal;
+  local, remote: TNetPort;
+  worker: TLoggedWorkThread;
 begin
-  c := Cert('syn-es256').Generate([cuDigitalSignature]);
-  s := Cert('syn-es256').Generate([cuDigitalSignature]);
+  // setup the two instances with the specified options and certificates
+  TSynLogTestLog.EnterLocal(log, 'TunnelTest [%]', [ToText(tunneloptions)], self);
+  clientinstance := TTunnelLocalClient.Create(TSynLog);
+  serverinstance := TTunnelLocalServer.Create(TSynLog);
+  //clientinstance.VerboseLog := true;
+  //serverinstance.VerboseLog := true;
+  clienttunnel := clientinstance;
+  servertunnel := serverinstance;
+  // perform handshaking
+  repeat
+    sess := rnd.Next31;
+  until sess <> 0;
+  rnd.FillAscii(10, tunnelappsec);
+  worker := TunnelBackgroundOpen(
+    serverinstance, sess, clienttunnel, servercert, clientcert);
+  try
+    local := clientinstance.Open(
+      sess, servertunnel, tunneloptions, 1000, tunnelappsec, clocalhost,
+      ['remoteHost', Executable.Host], clientcert, servercert);
+    worker.WaitFinished(5000);
+  finally
+    worker.Free;
+  end;
+  remote := clienttunnel.RemotePort;
+  CheckEqual(local, servertunnel.RemotePort);
+  CheckEqual(remote, serverinstance.Port);
+  Check(clienttunnel.Encrypted = (toEncrypted * tunneloptions <> []), 'cEncrypted');
+  Check(servertunnel.Encrypted = (toEncrypted * tunneloptions <> []), 'sEncrypted');
+  // create two local sockets and let them play with the tunnel
+  TunnelSocket(log, rnd, clientinstance, serverinstance);
+  // avoid circular references memory leak (not needed over SOA websockets)
+  clientinstance.RawTransmit := nil;
+end;
+
+const
+  AGENT_COUNT = 7;
+  CONSOLE_COUNT = 4;
+
+procedure TNetworkProtocols.TunnelRelay(relay: TTunnelRelay;
+  const agent: array of ITunnelAgent; const console: array of ITunnelConsole;
+  var rnd: TLecuyer);
+var
+  log: ISynLog;
+  a: ITunnelAgent;
+  session: array of TTunnelSession;
+  worker: array of TLoggedWorkThread; // as multi-threaded as possible
+  agentcallback, consolecallback: array of ITunnelTransmit;
+  agentlocal, consolelocal: array of TTunnelLocal;
+  i, j, c: PtrInt;
+  local: TNetPort;
+begin
+  TSynLogTestLog.EnterLocal(log, self, 'TTunnelRelay');
+  if not CheckEqual(relay.ConsoleCount, length(console)) then
+    exit; // avoid "division by zero" below
+  // emulate connection of AGENT_COUNT tunnels using several consoles
+  // (see ITunnelOpen main comment about the typical TTunnelRelay steps)
+  SetLength(agentcallback, AGENT_COUNT);
+  SetLength(consolecallback, AGENT_COUNT);
+  SetLength(agentlocal, AGENT_COUNT);
+  SetLength(consolelocal, AGENT_COUNT);
+  // 1) TTunnelLocal.Create() to have an ITunnelTransmit callback
+  if Assigned(log) then
+    log.Log(sllInfo, 'Tunnel: create % TTunnelLocal callbacks', [AGENT_COUNT], self);
+  for i := 0 to AGENT_COUNT - 1 do
+  begin
+    agentlocal[i]   := TTunnelLocalClient.Create(TSynLog);;
+    consolelocal[i] := TTunnelLocalServer.Create(TSynLog);
+    agentcallback[i]   := agentlocal[i];
+    consolecallback[i] := consolelocal[i];
+    check(Assigned(agentcallback[i]));
+    check(Assigned(consolecallback[i]));
+  end;
+  // 2) ITunnelConsole.TunnelPrepare() to retrieve a session
+  if Assigned(log) then
+    log.Log(sllInfo, 'Tunnel: ITunnelOpen.TunnelPrepare', self);
+  SetLength(session, AGENT_COUNT);
+  for i := 0 to AGENT_COUNT - 1 do
+  begin
+    c := i mod relay.ConsoleCount; // round-robin of agents over consoles
+    Check(c <= high(console));
+    session[i] := console[c].TunnelPrepare(consolecallback[i]);
+    check(session[i] <> 0);
+    for j := 0 to i - 1 do
+      check(session[j] <> session[i], 'unique session');
+    // 3) ITunnelAgent.TunnelPrepare() with this session
+    if i >= length(agent) then
+      a := agent[0]
+    else
+      a := agent[i];
+    check(a.TunnelPrepare(session[i], agentcallback[i]));
+  end;
+  // 4) TTunnelLocal.Open() on the console and agent sides
+  if Assigned(log) then
+    log.Log(sllInfo, 'Tunnel: reciprocal Open() handshake', self);
+  try
+    SetLength(worker, AGENT_COUNT);
+    for i := 0 to AGENT_COUNT - 1 do
+    begin
+      if i >= length(agent) then
+        a := agent[0]
+      else
+        a := agent[i];
+      worker[i] := TunnelBackgroundOpen(agentlocal[i],
+        session[i], a, nil, nil);
+      c := i mod relay.ConsoleCount; // round-robin of agents over consoles
+      local := consolelocal[i].Open(
+        session[i], console[c], tunneloptions, 1000, tunnelappsec, cLocalhost,
+        ['agentNumber', i]);
+      check(local <> 0);
+      checkEqual(local, consolelocal[i].Port);
+    end;
+    if Assigned(log) then
+      log.Log(sllInfo, 'Tunnel: wait for background threads', self);
+    for i := 0 to AGENT_COUNT - 1 do
+    begin
+      worker[i].WaitFinished(1000);
+      CheckEqual(agentlocal[i].RemotePort, consolelocal[i].Port);
+      CheckEqual(agentlocal[i].Port, consolelocal[i].RemotePort);
+    end;
+    // 5a) ITunnelOpen.TunnelCommit or TunnelRollback against Open() result
+    if Assigned(log) then
+      log.Log(sllInfo, 'Tunnel: all TunnelCommit()', self);
+    for i := 0 to AGENT_COUNT - 1 do
+    begin
+      if i >= length(agent) then
+        a := agent[0]
+      else
+        a := agent[i];
+      Check(a.TunnelCommit(session[i]));
+      c := i mod relay.ConsoleCount; // round-robin of agents over consoles
+      Check(console[c].TunnelCommit(session[i]));
+    end;
+    // create two local sockets and let them play with each tunnel
+    if Assigned(log) then
+      log.Log(sllInfo, 'Tunnel: actual sockets relay on loopback', self);
+    for i := 0 to AGENT_COUNT - 1 do
+      TunnelSocket(log, rnd, agentlocal[i], consolelocal[i]);
+  finally
+    for i := 0 to AGENT_COUNT - 1 do
+      worker[i].Free;
+  end;
+  // release internal references
+  if Assigned(log) then
+    log.Log(sllInfo, 'Tunnel: finalize agent/console references', self);
+  // retrieve SOA agents + consoles endpoints (emulated on stack)
+  agentcallback := nil;
+  consolecallback := nil;
+end;
+
+procedure TNetworkProtocols.Tunnel;
+var
+  clientcert, servercert: ICryptCert;
+  bak: TSynLogLevels;
+  relay: TTunnelRelay;
+  rnd: TLecuyer;
+  i: PtrInt;
+  agent: array of ITunnelAgent;     // single instance (sicShared mode)
+  console: array of ITunnelConsole; // one per console (sicPerSession)
+  restserver: TRestServerFullMemory;
+  httpserver: TRestHttpServer;
+  agentclient, consoleclient: array of TRestHttpClientWebsockets;
+begin
+  bak := TSynLog.Family.Level;
+  TSynLog.Family.Level := LOG_VERBOSE; // for convenient LUTI debugging
+  // 1. validate TTunnelLocal and all its handshaking options
+  RandomLecuyer(rnd);
   // plain tunnelling
-  TunnelTest(nil, nil);
+  TunnelTest(rnd, nil, nil);
   // symmetric secret encrypted tunnelling
   tunneloptions := [toEncrypt];
-  TunnelTest(nil, nil);
+  TunnelTest(rnd, nil, nil);
   // ECDHE encrypted tunnelling
   tunneloptions := [toEcdhe];
-  TunnelTest(nil, nil);
+  TunnelTest(rnd, nil, nil);
   // tunnelling with mutual authentication
   tunneloptions := [];
-  TunnelTest(c, s);
+  clientcert := Cert('syn-es256').Generate([cuDigitalSignature]);
+  servercert := Cert('syn-es256').Generate([cuDigitalSignature]);
+  TunnelTest(rnd, clientcert, servercert);
   // symmetric secret encrypted tunnelling with mutual authentication
   tunneloptions := [toEncrypt];
-  TunnelTest(c, s);
+  TunnelTest(rnd, clientcert, servercert);
   // ECDHE encrypted tunnelling with mutual authentication
   tunneloptions := [toEcdhe];
-  TunnelTest(c, s);
+  TunnelTest(rnd, clientcert, servercert);
+  // options (e.g. encryption/ecdhe) are now considered validated
+  tunneloptions := [];
+  // 2. validate TTunnelRelay and its associated TTunnelAgent/TTunnelConsole
+  SetLength(console, CONSOLE_COUNT); // several agents per console
+  relay := TTunnelRelay.Create(TSynLog, {timeoutsecs=}120);
+  try
+    // no SOA transmission first
+    TSynLog.Add.Log(sllInfo, 'Tunnel: retrieve SOA endpoints', self);
+    SetLength(agent, 1);
+    Check(relay.Resolve(ITunnelAgent, agent[0]), 'sicShared agent');
+    Check(Assigned(agent[0]));
+    CheckEqual(relay.ConsoleCount, 0);
+    for i := 0 to high(console) do
+      Check(relay.Resolve(ITunnelConsole, console[i]), 'sicPerSession');
+    TunnelRelay(relay, agent, console, rnd);
+    agent := nil;
+    console := nil;
+    // setup a SOA WebSockets server as actual relay over WebSockets
+    restserver := TRestServerFullMemory.CreateWithOwnModel(
+      [], {withauth=}true, 'tun');
+    try
+      restserver.CreateMissingTables;
+      restserver.ServiceDefine(relay.Agent, [ITunnelAgent]);
+      restserver.ServiceContainer.InjectResolver([relay]);
+      restserver.ServiceDefine(TTunnelconsole, [ITunnelConsole], sicPerSession);
+      restserver.LogClass := TSynLog;
+      httpserver := TRestHttpServer.Create('8888', [restserver], '+',
+        WEBSOCKETS_DEFAULT_MODE);
+      try
+        httpserver.WebSocketsEnable('', 'key', false, []);
+        // setup as many SOA clients over WebSockets as needed
+        SetLength(agentclient, AGENT_COUNT);
+        SetLength(agent, AGENT_COUNT);
+        for i := 0 to high(agentclient) do
+        begin
+          agentclient[i] := TRestHttpClientWebsockets.CreateWithOwnModel(
+            'localhost', '8888', 'tun');
+          agentclient[i].WebSocketsUpgrade('key', false, []);
+          check(agentclient[i].SetUser('User', 'synopse'));
+          agentclient[i].ServiceDefine(ITunnelAgent, sicShared);
+          agentclient[i].Resolve(ITunnelAgent, agent[i]);
+        end;
+        SetLength(consoleclient, CONSOLE_COUNT);
+        SetLength(console, CONSOLE_COUNT);
+        for i := 0 to high(consoleclient) do
+        begin
+          consoleclient[i] := TRestHttpClientWebsockets.CreateWithOwnModel(
+            'localhost', '8888', 'tun');
+          consoleclient[i].WebSocketsUpgrade('key', false, []);
+          check(consoleclient[i].SetUser('User', 'synopse'));
+          consoleclient[i].ServiceDefine(ITunnelConsole, sicPerSession);
+          consoleclient[i].Resolve(ITunnelConsole, console[i]);
+        end;
+        //TunnelRelay(relay, agent, console, rnd);
+      finally
+        agent := nil; // keep refcount clean
+        console := nil;
+        ObjArrayClear(consoleclient);
+        ObjArrayClear(agentclient);
+        httpserver.Free;
+      end;
+    finally
+      restserver.Free;
+    end;
+  finally
+    TSynLog.Add.Log(sllInfo, 'Tunnel: eventual TTunnelRelay.Free', self);
+    relay.Free;
+  end;
+  // 3. cleanup
+  TSynLog.Family.Level := bak;
 end;
 
 procedure TNetworkProtocols.IPAddresses;
@@ -1792,6 +2089,7 @@ begin
     Check(sub.SaveToBinary = bin, 'loadtext');
     Check(sub.Match('1.2.3.4'));
     Check(not sub.Match('1.2.3.5'));
+    //deleteFile('firehol.netset');
     txt := DownloadFile('https://raw.githubusercontent.com/firehol/blocklist-ipsets/' +
       'refs/heads/master/firehol_level1.netset', 'firehol.netset');
     if txt <> '' then
@@ -1802,14 +2100,15 @@ begin
       timer.Start;
       n := sub.AddFromText(txt);
       NotifyTestSpeed('parse TIp4SubNets', n, length(txt), @timer);
-      Check(n > 4000); // typically 4520 subnets, 612,853,888 unique IPs
+      // typically 4491 subnets, 612,537,665 unique IPs, 19 unique subnets
+      Check(n > 4000);
       CheckEqual(sub.AfterAdd, n);
-      CheckUtf8(length(sub.SubNet) in [17 .. 18], 'sub=%', [length(sub.SubNet)]);
+      CheckUtf8(length(sub.SubNet) in [17 .. 20], 'sub=%', [length(sub.SubNet)]);
       Check(not sub.Match('1.2.3.4'));
       Check(not sub.Match('1.2.3.5'));
       Check(not sub.Match('192.168.1.1'), '192'); // only IsPublicIP() was added
       Check(not sub.Match('10.18.1.1'), '10');
-      Check(not sub.Match('62.210.254.173'), 'synopse.info');
+      Check(not sub.Match(SYNOPSE_IP), 'synopse.info');
       // 223.254.0.0/16 as https://check.spamhaus.org/results/?query=SBL212803
       Check(sub.Match('223.254.0.1') ,'a0');
       Check(sub.Match('223.254.1.1'), 'b0');
@@ -1841,7 +2140,7 @@ begin
         Check(not sub.Match('10.18.1.1'), '10');
         n2 := sub.AddFromText(txt);
         Check(n2 > 1000, 'spamhaus=1525');
-        Check(not sub.Match('62.210.254.173'), 'cauterets.site');
+        Check(not sub.Match(SYNOPSE_IP), 'cauterets.site');
         Check(sub.Match('223.254.0.1') ,'a2'); // 223.254.0.0/16
         Check(sub.Match('223.254.1.1'), 'b2');
         Check(sub.Match('223.254.200.129'), 'c2');
