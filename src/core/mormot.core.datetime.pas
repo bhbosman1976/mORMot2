@@ -1635,8 +1635,15 @@ end;
 function TimeToIso8601(Time: TDateTime; Expanded: boolean;
   FirstChar: AnsiChar; WithMS: boolean): RawUtf8;
 // use Thhmmss[.sss] / Thh:mm:ss[.sss] format
+var
+  l : integer;
 begin
-  FastSetString(result, 7 + 2 * integer(Expanded) + 4 * integer(WithMS));
+  l := 6 + 2 * integer(Expanded) + 4 * integer(WithMS);
+  if FirstChar <> #0 then
+  begin
+    inc(l);
+  end;
+  FastSetString(result, l);
   TimeToIso8601PChar(Time, pointer(result), Expanded, FirstChar, WithMS);
 end;
 
@@ -3908,4 +3915,3 @@ finalization
   FinalizeUnit;
 
 end.
-
