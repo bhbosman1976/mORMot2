@@ -1607,6 +1607,7 @@ type
     jcoHttpExceptionIntercept,
     jcoHttpErrorRaise,
     jcoPayloadWithoutVoid,
+    jcoPayloadDateTimeWithZ,
     jcoParseTolerant,
     jcoParseErrorClear,
     jcoParseErrorRaise);
@@ -5378,12 +5379,15 @@ begin
   begin
     two := [];
     if jcoPayloadWithoutVoid in fOptions then
-      two := [twoIgnoreDefaultInRecord];
+      include(two, twoIgnoreDefaultInRecord);
+    if jcoPayloadDateTimeWithZ in fOptions then
+      include(two, twoDateTimeWithZ);
     SaveJson(Payload^, PayloadInfo, two, b);
   end;
   if Assigned(fOnLog) then
-    fOnLog(sllServiceCall, FMT_REQ[((jcoLogFullRequest in fOptions) or
-      (length(b) < 1024))], [Method, Action, b], self);
+    fOnLog(sllServiceCall,
+      FMT_REQ[((jcoLogFullRequest in fOptions) or (length(b) < 1024))],
+      [Method, Action, b], self);
   if Assigned(fOnBefore) then
     fOnBefore(self, Method, Action, b);
   j := nil;

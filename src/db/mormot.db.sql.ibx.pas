@@ -1005,7 +1005,7 @@ begin
       SQL_TYPE_DATE:
         begin
           W.Add('"');
-          W.AddDateTime(fResults[Col].GetAsDateTime, fForceDateWithMS);
+          W.AddDateTime(fResults[Col].GetAsDateTime, dsfForceDateWithMS in fFlags);
           W.AddDirect('"');
         end;
       SQL_BOOLEAN:
@@ -1397,7 +1397,7 @@ begin
   fBatchMaxSentAtOnce := 10000;  // iters <= 32767 for better performance
   if aServerName = '' then
     ThreadingMode := tmMainConnection;
-  fUseCache := true;
+  UseCache := true;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
 end;
 

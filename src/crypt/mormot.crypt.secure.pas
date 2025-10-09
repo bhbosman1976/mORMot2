@@ -1046,6 +1046,7 @@ function HashFile(const aFileName: TFileName; aAlgo: THashAlgo): RawUtf8; overlo
 
 /// compute one or several hexadecimal hash(es) of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
+// - returns the hash in THashAlgo type definition order in aAlgos set
 function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos): TRawUtf8DynArray;
 
 /// compute the hexadecimal hashe(s) of one file, as external .md5/.sha256/.. files
@@ -1149,6 +1150,8 @@ function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
 // - without {checksum} - as returned by ModularCryptIdentify() info^ parameter
 // - used e.g. by TRestServer.ReturnNonce() with an unknown UserName, to avoid
 // the client being able to guess by fuzzing that this UserName is unknown
+// - use SystemEntropy.Startup as seed for consistent results between calls, but
+// eventually reset when the process is restarted
 function ModularCryptFakeInfo(const id: RawUtf8;
   format: TModularCryptFormat = mcfUnknown): RawUtf8;
 
@@ -1709,7 +1712,7 @@ type
   /// a 31-bit increasing sequence used for TBinaryCookieGenerator sessions
   TBinaryCookieGeneratorSessionID = type integer;
 
-  /// TBinaryCookieGenerator execution context - to be persisted on disk
+  /// TBinaryCookieGenerator execution context - may be persisted on disk
   TBinaryCookieContext = packed record
     /// identify this data structure on disk - should equal 1 now
     Version: cardinal;
@@ -10073,7 +10076,7 @@ begin
 end;
 
 const
-  CAA_SIZE: array[TCryptAsymAlgo] of integer = (
+  CAA_SIZE: array[TCryptAsymAlgo] of byte = (
     32,  // caaES256
     48,  // caaES384
     66,  // caaES512

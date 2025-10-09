@@ -2745,13 +2745,13 @@ function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 // $ { "Uid": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
 function TextToGuid(P: PUtf8Char; Guid: PByteArray): PUtf8Char;
 
-/// convert some RTL string text into a TGuid
+/// convert some GUID or UUID RTL string text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
 // is not a valid TGuid
 function StringToGuid(const text: string): TGuid;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
@@ -2759,13 +2759,13 @@ function StringToGuid(const text: string): TGuid;
 // is not a valid TGuid
 function RawUtf8ToGuid(const text: RawByteString): TGuid; overload;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean; overload;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
@@ -10716,7 +10716,7 @@ const
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
    'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
-   'Invalid Request');                  // 513 should be last INDEX_HTTP_INVALID
+   'Invalid Request');                  // last INDEX_HTTP_INVALID = 513
   HTTP_CODE: array[0 .. INDEX_HTTP_INVALID] of word = ( // match HTTP_REASON[]
     HTTP_SUCCESS,
     HTTP_NOCONTENT,
