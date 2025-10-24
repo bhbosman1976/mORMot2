@@ -5337,7 +5337,7 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
   begin
     C := TSynAnsiConvert.Engine(CP);
     CheckEqual(C.CodePage, CP, 'cpa');
-    U := C.AnsiToUtf8(W);
+    C.AnsiToUtf8(W, U);
     A := C.Utf8ToAnsi(U);
     if W = '' then
       exit;
@@ -5368,7 +5368,7 @@ var
   str: string;
   ss: ShortString;
   up4: RawUcs4;
-  U, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
+  U, U1, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
   arr, arr2: TRawUtf8DynArray;
   P: PUtf8Char;
   PB: PByte;
@@ -6141,11 +6141,13 @@ begin
     CheckEqual(json2, json, 'jeu2');
     Unic := Utf8DecodeToUnicodeRawByteString(U);
     CheckEqual(Utf8ToWinAnsi(U), W);
-    CheckEqual(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)), W);
+    WinAnsiConvert.AnsiToUtf8(W, U1);
+    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W);
     CheckEqual(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)), W);
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
-      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(CurrentAnsiConvert.AnsiToUtf8(W)), W);
+      CurrentAnsiConvert.AnsiToUtf8(W, U1);
+      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(U1), W);
       CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)), W);
     end;
     res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
@@ -6336,7 +6338,7 @@ begin
   rb1 := '';
   rb1 := eng.Utf8ToAnsi(U);
   CheckEqual(length(rb1), 7);
-  U2 := eng.AnsiToUtf8(rb1);
+  eng.AnsiToUtf8(rb1, U2);
   CheckEqual(U, U2);
   eng := TSynAnsiConvert.Engine(54936);
   Check(eng <> nil, 'Engine(54936)');
@@ -6349,7 +6351,7 @@ begin
     rb1 := '';
     rb1 := eng.Utf8ToAnsi(U);
     CheckEqual(length(rb1), 7, 'cp54936c');
-    U2 := eng.AnsiToUtf8(rb1);
+    eng.AnsiToUtf8(rb1, U2);
     CheckEqual(U, U2, 'cp54936d');
     {$ifdef HASCODEPAGE}
     rb2 := U;
@@ -6369,7 +6371,7 @@ begin
     Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
     RB2 := eng.UnicodeStringToAnsi(SU);
     Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
-    U2 := eng.AnsiToUtf8(RB1);
+    eng.AnsiToUtf8(RB1, U2);
     CheckEqual(U2, U, 'AnsiToUtf8');
   end;
   CheckEqual(CodePageToText(CP_UTF8), 'utf8');
@@ -6731,11 +6733,11 @@ procedure TTestCoreBase.Charsets;
     eng := TSynAnsiConvert.Engine(cp); // validate "last" cache
     Check(eng <> nil, 'eng3');
     CheckEqual(eng.CodePage, cp, 'eng4');
-    u2 := eng.AnsiToUtf8(a);
+    eng.AnsiToUtf8(a, u2);
     Check(u2 = ru, msg);
     a2 := eng.UnicodeStringToAnsi(su);
     CheckEqual(a2, a, name);
-    u := eng.AnsiToUtf8(ra);
+    eng.AnsiToUtf8(ra, u);
     CheckEqual(u, ru, name);
   end;
 
@@ -7253,13 +7255,19 @@ procedure TTestCoreBase.Iso8601DateAndTime;
       Check(true);
     J.From(E);
     Check(Int64(I) = Int64(J));
-    s := TimeToIso8601(D, Expanded);
+    s := TimeToIso8601(D, Expanded); // e.g. 'T23:36:34'
     Check(PosEx('.', s) = 0);
     Check(abs(frac(D) - Iso8601ToDateTime(s)) < 1 / SecsPerDay);
-    s := TimeToIso8601(D, Expanded, 'T', true);
+    s := TimeToIso8601(D, Expanded, 'T', true); // 'T23:36:34.715'
     Check(PosEx('.', s) > 0);
     F := Iso8601ToDateTime(s);
     Check(abs(frac(D) - F) < 1 / MSecsPerDay, 'withms1');
+    if expanded then
+    begin
+      delete(s, 1, 1); // '23:36:34.715'
+      F := Iso8601ToDateTime(s);
+      Check(abs(frac(D) - F) < 1 / MSecsPerDay, 'withmsNoT');
+    end;
     s := DateToIso8601(D, Expanded);
     Check(trunc(D) = trunc(Iso8601ToDateTime(s)));
     Check(Abs(D - I.ToDateTime) < (1 / SecsPerDay));
@@ -7447,6 +7455,7 @@ var
   buf: RawByteString;
   dt: TDateTime;
   local: TDateTime;
+  s31: TShort31;
 
   procedure testBias(year, expected: integer);
   begin
@@ -7508,8 +7517,8 @@ begin
   dt := HttpDateToDateTime('Sun, 06 Nov 1994 08:49:37 GMT');
   CheckEqual(DateTimeToIso8601Text(dt), '1994-11-06T08:49:37');
   CheckEqual(DateTimeToHttpDate(dt), 'Sun, 06 Nov 1994 08:49:37 GMT');
-  Check(UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt)) =
-    'Sun, 06 Nov 1994 08:49:37 GMT');
+  UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt), s31);
+  Check(s31 = 'Sun, 06 Nov 1994 08:49:37 GMT', 'UnixMSTimeUtcToHttpDate');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Sunday, 06-DEC-94 08:49:37 UTC')), '1994-12-06T08:49:37');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(

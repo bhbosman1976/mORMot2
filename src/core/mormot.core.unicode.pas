@@ -195,8 +195,7 @@ function RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a UTF-16 PWideChar buffer into a UTF-8 buffer
-// - replace system.UnicodeToUtf8 implementation, which is rather slow
-// since Delphi 2009+
+// - replace system.UnicodeToUtf8 implementation, which is slow since Delphi 2009+
 // - append a #0 terminator to the ending PUtf8Char, unless ccfNoTrailingZero is set
 // - if ccfReplacementCharacterForUnmatchedSurrogate is set, this function will identify
 // unmatched surrogate pairs and replace them with UNICODE_REPLACEMENT_CHARACTER -
@@ -608,7 +607,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// convert any Ansi Text into an UTF-8 encoded String
     // - internally calls AnsiBufferToUtf8 virtual method
-    function AnsiToUtf8(const AnsiText: RawByteString): RawUtf8; virtual;
+    procedure AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8); virtual;
     /// direct conversion of a PAnsiChar buffer into a UTF-8 encoded string
     // - will call AnsiBufferToUnicode() overloaded virtual method
     procedure AnsiBufferToRawUtf8(Source: PAnsiChar;
@@ -798,7 +797,7 @@ type
     function Utf8ToAnsi(const u: RawUtf8): RawByteString; override;
     /// convert any Ansi Text into an UTF-8 encoded String
     // - directly assign the input as result, since no conversion is needed
-    function AnsiToUtf8(const AnsiText: RawByteString): RawUtf8; override;
+    procedure AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8); override;
     /// direct conversion of a PAnsiChar buffer into a UTF-8 encoded string
     procedure AnsiBufferToRawUtf8(Source: PAnsiChar;
       SourceChars: cardinal; out Value: RawUtf8); override;
@@ -1255,11 +1254,9 @@ function ToUtf8(const Text: string): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any RTL string into an UTF-8 encoded TSynTempBuffer
-// - returns the number of UTF-8 bytes available in Temp.buf
-// - this overloaded function use a TSynTempBuffer for the result to avoid any
-// memory allocation for the shorter content
+// - returns in Temp.len the number of UTF-8 bytes stored into result
 // - caller should call Temp.Done to release any heap-allocated memory
-function StringToUtf8(const Text: string; var Temp: TSynTempBuffer): integer; overload;
+function StringToUtf8Temp(const Text: string; var Temp: TSynTempBuffer): PUtf8Char;
 
 /// convert any Ansi memory buffer into UTF-8, using a TSynTempBuffer if needed
 // - caller should release any memory by calling Temp.Done
@@ -3962,9 +3959,9 @@ begin
   AnsiToUnicodeStringVar(pointer(Source), length(Source), result);
 end;
 
-function TSynAnsiConvert.AnsiToUtf8(const AnsiText: RawByteString): RawUtf8;
+procedure TSynAnsiConvert.AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8);
 begin
-  AnsiBufferToRawUtf8(pointer(AnsiText), length(AnsiText), result);
+  AnsiBufferToRawUtf8(pointer(AnsiText), length(AnsiText), Value);
 end;
 
 procedure TSynAnsiConvert.AnsiBufferToRawUtf8(Source: PAnsiChar;
@@ -4830,10 +4827,10 @@ begin
   EnsureRawUtf8(result);
 end;
 
-function TSynAnsiUtf8.AnsiToUtf8(const AnsiText: RawByteString): RawUtf8;
+procedure TSynAnsiUtf8.AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8);
 begin
-  result := AnsiText; // may be read-only: no FastAssignUtf8/FakeCodePage
-  EnsureRawUtf8(result);
+  Value := AnsiText; // may be read-only: no FastAssignUtf8/FakeCodePage
+  EnsureRawUtf8(Value);
 end;
 
 procedure TSynAnsiUtf8.AnsiBufferToRawUtf8(
@@ -5359,7 +5356,7 @@ begin
   if Ansi = '' then
     result := ''
   else
-    result := TSynAnsiConvert.Engine(CodePage).AnsiToUtf8(Ansi);
+    TSynAnsiConvert.Engine(CodePage).AnsiToUtf8(Ansi, result);
 end;
 
 function AnsiToString(const Ansi: RawByteString; CodePage: integer): string;
@@ -5461,13 +5458,13 @@ begin
   RawUnicodeToUtf8(pointer(Text), Length(Text), result);
 end;
 
-function StringToUtf8(const Text: string; var Temp: TSynTempBuffer): integer;
+function StringToUtf8Temp(const Text: string; var Temp: TSynTempBuffer): PUtf8Char;
 var
-  len: integer;
+  len: PtrInt;
 begin
   len := length(Text);
-  Temp.Init(len * 3);
-  result := RawUnicodeToUtf8(Temp.buf, Temp.len + 1, pointer(Text), len, []);
+  result := Temp.Init(len * 3);
+  Temp.Len := RawUnicodeToUtf8(result, Temp.len + 1, pointer(Text), len, []);
 end;
 
 function ToUtf8(const Text: string): RawUtf8;
@@ -5587,7 +5584,7 @@ end;
 
 function StringToUtf8(const Text: string): RawUtf8;
 begin
-  result := CurrentAnsiConvert.AnsiToUtf8(Text);
+  CurrentAnsiConvert.AnsiToUtf8(Text, result);
 end;
 
 procedure StringToUtf8(Text: PChar; TextLen: PtrInt; var result: RawUtf8);
@@ -5597,25 +5594,28 @@ end;
 
 procedure StringToUtf8(const Text: string; var result: RawUtf8);
 begin
-  result := CurrentAnsiConvert.AnsiToUtf8(Text);
+  CurrentAnsiConvert.AnsiToUtf8(Text, result);
 end;
 
-function StringToUtf8(const Text: string; var Temp: TSynTempBuffer): integer;
-var
-  len: PtrInt;
+function StringToUtf8Temp(const Text: string; var Temp: TSynTempBuffer): PUtf8Char;
 begin
-  len := length(Text);
-  Temp.Init(len * 3);
-  if len <> 0 then
-    result := CurrentAnsiConvert.
-      AnsiBufferToUtf8(Temp.buf, pointer(Text), len) - PUtf8Char(Temp.buf)
-  else
-    result := 0;
+  Temp.buf := nil;
+  Temp.Len := 0;
+  result := pointer(Text);
+  if result = nil then
+    exit;
+  Temp.Len := PStrLen(result - _STRLEN)^;
+  {$ifdef HASCODEPAGE} if PStrRec(result - _STRRECSIZE)^.CodePage = CP_UTF8 then
+  {$else} if IsAnsiCompatible(PAnsiChar(result), Temp.Len) then {$endif HASCODEPAGE}
+    exit; // no conversion needed
+  result := Temp.Init(Temp.Len * 3);
+  Temp.Len := CurrentAnsiConvert.AnsiBufferToUtf8(result, pointer(Text),
+                PStrLen(PAnsiChar(pointer(Text)) - _STRLEN)^) - result;
 end;
 
 function ToUtf8(const Text: string): RawUtf8;
 begin
-  result := CurrentAnsiConvert.AnsiToUtf8(Text);
+  CurrentAnsiConvert.AnsiToUtf8(Text, result);
 end;
 
 {$ifndef PUREMORMOT2}

@@ -755,6 +755,7 @@ begin
     Compute('/static', '/some/static');
     Compute('/static2', '/static2');
     Compute('/', '/');
+    Compute('/static?fmt=text', '/some/static?fmt=text');
     router.Post('/static2', '/some2/static');
     router.Post('/', '/index');
     Compute('/static', '/some/static');
@@ -771,6 +772,8 @@ begin
     Compute('/user/1234/picture/', '/user/1234/picture/');
     Compute('/user/1234', '/root/user.new?id=1234');
     Compute('/user/1234/', '/user/1234/');
+    Compute('/user/1234?fmt=json', '/root/user.new?id=1234&fmt=json');
+    Compute('/user/123', '/root/user.new?id=123');
     Compute('/static', '/some/static');
     Compute('/static2', '/some2/static');
     Compute('/', '/index');
@@ -2399,6 +2402,7 @@ var
   timer: TPrecisionTimer;
 begin
   CheckEqual(SizeOf(msg), 192);
+  CheckEqual(SizeOf(THttpPeerCacheMessage), 192);
   CheckEqual(PEER_CACHE_MESSAGELEN, SizeOf(msg) + 4 + SizeOf(TAesBlock) * 3);
   CheckEqual(Base64uriToBinLength(PEER_CACHE_BEARERLEN), PEER_CACHE_MESSAGELEN);
   // validate THttpRequestExtendedOptions serialization
@@ -2808,22 +2812,22 @@ begin
   CheckEqual(CookieFromHeaders(HDR4, 'name3'), 'value3');
   // validate HttpRequestLength() and HttpRequestHash()
   h := HttpRequestLength(
-    'Content-Length: 100'#13#10'content-range: bytes 100-199/3083'#13#10, l);
+    'Content-Length: 100'#13#10'content-range: bytes 100-199/3083'#13#10, @l);
   check(h <> nil);
   checkEqual(l, 4);
   Check(IdemPropName('3083', h, 4));
-  h := HttpRequestLength('Content-Length: 100'#13#10, l);
+  h := HttpRequestLength('Content-Length: 100'#13#10, @l);
   check(h <> nil);
   checkEqual(l, 3);
   Check(IdemPropName('100', h, 3));
-  h := HttpRequestLength('Content-Range: 100-199/2000'#13#10, l);
+  h := HttpRequestLength('Content-Range: 100-199/2000'#13#10, @l);
   check(h <> nil);
   checkEqual(l, 4);
   Check(IdemPropName('2000', h, 4));
-  h := HttpRequestLength('Content-Range: 100-199'#13#10, l);
+  h := HttpRequestLength('Content-Range: 100-199'#13#10, @l);
   check(h = nil);
   check(U.From('https://ictuswin.com/toto/titi'));
-  h := HttpRequestLength('Content-Lengths: 100'#13#10, l);
+  h := HttpRequestLength('Content-Lengths: 100'#13#10, @l);
   check(h = nil);
   FillCharFast(dig, SizeOf(dig), 0);
   CheckEqual(ord(dig.Algo), 0);

@@ -342,6 +342,13 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
 function IsLocalHost(Host: PUtf8Char): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// returns length(Address) if there is no ?parameter nor #anchor in the URI
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+
+/// returns length(Address) if there is no ?#anchor in the URI
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
+
 
 { ****************** Gather Operating System Information }
 
@@ -2889,17 +2896,17 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 function FileAgeToWindowsTime(F: THandle): integer;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean; overload;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest, Source: TFileName): boolean; overload;
 
 /// copy the date of one file from a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
 
 /// set the file date/time from a supplied UTC TUnixTime value
@@ -6033,6 +6040,34 @@ begin
             (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
 end;
 
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('?')); // exclude ?arguments
+  if result < 0 then
+    result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
 function {%H-}_RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
 begin
   raise EOSException.Create('No RawToBase64(): needs mormot.core.buffers.pas');
@@ -8596,9 +8631,6 @@ var
   function LoadOne(lib: TFileName; current: PtrInt): boolean;
   var
     j: PtrInt;
-    {$ifdef OSWINDOWS}
-    cwd: TFileName;
-    {$endif OSWINDOWS}
   begin
     // check library name
     result := false;
@@ -8631,16 +8663,18 @@ var
     try
       if nwd <> '' then
       begin
-        GlobalLock; // SetCurrentDir() is for the whole process not the thread
-        cwd := GetCurrentDir;
-        SetCurrentDir(nwd);
-        lib := ExtractFileName(lib); // seems more stable that way
+        GlobalLock; // SetDllDirectoryW() is for the whole process not thread
+        if not LibrarySetDirectory(nwd) then // as documented on microsoft.com
+        begin
+          GlobalUnLock;
+          nwd := '';
+        end;
       end;
       fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box
     finally
       if nwd <> '' then
       begin
-        SetCurrentDir(cwd{%H-});
+        SetDllDirectoryW(nil); // revert to default
         GlobalUnLock;
       end;
     end;
