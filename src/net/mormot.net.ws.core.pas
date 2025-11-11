@@ -935,6 +935,13 @@ type
     pfsDone,
     pfsError);
 
+  TOnSetLastPingTicks = procedure of object;
+  TOnReceiveBytes = function(P: PAnsiChar; count: PtrInt): integer of object;
+  TOnAfterGetFrame = procedure (var frame: TWebSocketFrame)  of object;
+  TOnLog = procedure (const frame: TWebSocketFrame; const aMethodName: ShortString;
+      aEvent: TSynLogLevel = sllTrace; DisableRemoteLog: boolean = false) of object;
+
+
   /// asynchronous state machine to process WebSockets incoming frames
   {$ifdef USERECORDWITHMETHODS}
   TWebProcessInFrame = record
@@ -950,7 +957,17 @@ type
     outputframe: PWebSocketFrame;
     len: integer;
     data: RawByteString; // will eventually be appended to outputframe.payload
-    procedure Init(Owner: TWebSocketProcess; output: PWebSocketFrame);
+    OnReceiveBytes: TOnReceiveBytes;
+    OnAfterGetFrame: TOnAfterGetFrame;
+    OnLog: TOnLog;
+    OnSetLastPingTicks: TOnSetLastPingTicks;
+    procedure Init(
+      Owner: TWebSocketProcess;
+      output: PWebSocketFrame;
+      AOnReceiveBytes: TOnReceiveBytes;
+      AOnAfterGetFrame: TOnAfterGetFrame;
+      AOnLog: TOnLog;
+      AOnSetLastPingTicks: TOnSetLastPingTicks);
     function HasBytes(P: PAnsiChar; count: integer): boolean;
       {$ifdef HASINLINE} inline; {$endif}
     function GetHeader: boolean;
@@ -3435,7 +3452,7 @@ function TWebSocketProcess.GetFrame(out Frame: TWebSocketFrame;
 var
   f: TWebProcessInFrame;
 begin
-  f.Init(self, @Frame);
+  f.Init(self, @Frame, nil, nil, nil, nil);
   fSafeIn.Lock;
   try
     if Blocking then
@@ -3534,10 +3551,20 @@ end;
 
 { TWebProcessInFrame }
 
-procedure TWebProcessInFrame.Init(owner: TWebSocketProcess; output: PWebSocketFrame);
+procedure TWebProcessInFrame.Init(
+  owner: TWebSocketProcess;
+  output: PWebSocketFrame;
+  AOnReceiveBytes: TOnReceiveBytes;
+  AOnAfterGetFrame: TOnAfterGetFrame;
+  AOnLog: TOnLog;
+  AOnSetLastPingTicks: TOnSetLastPingTicks);
 begin
   process := owner;
   outputframe := output;
+  OnReceiveBytes := AOnReceiveBytes;
+  OnAfterGetFrame := AOnAfterGetFrame;
+  OnLog := AOnLog;
+  OnSetLastPingTicks := AOnSetLastPingTicks;
   state := pfsHeader1;
   len := 0;
 end;
@@ -3547,6 +3574,11 @@ begin
   if len > count then
     // we already got that much input data
     result := true
+  else if assigned(OnReceiveBytes) then
+  begin
+    inc(len, OnReceiveBytes(P + len, count - len));
+    result := len = count;
+  end
   else
   begin
     // TWebCrtSocketProcess SockInRead() would raise a ENetSock error on failure
@@ -3676,12 +3708,30 @@ begin
           if opcode = focText then
             // identify text content as UTF-8 - is likely to be JSON anyway
             FakeCodePage(outputframe.payload, CP_UTF8);
-          if (process.fProtocol <> nil) and
+          if assigned(OnAfterGetFrame) then
+          begin
+            OnAfterGetFrame(outputframe^);
+          end
+          else if (process.fProtocol <> nil) and
              (outputframe.payload <> '') then
             process.fProtocol.AfterGetFrame(outputframe^);
-          process.Log(outputframe^, 'GetFrame');
-          if not process.fNoLastSocketTicks then
+
+          if assigned(OnLog) then
+          begin
+            OnLog(outputframe^, 'GetFrame');
+          end
+          else
+          begin
+            process.Log(outputframe^, 'GetFrame');
+          end;
+          if assigned(OnSetLastPingTicks) then
+          begin
+            OnSetLastPingTicks;
+          end
+          else if not process.fNoLastSocketTicks then
             process.SetLastPingTicks;
+
+
           break;
         end;
     else

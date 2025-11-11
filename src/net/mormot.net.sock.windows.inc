@@ -1977,8 +1977,13 @@ end;
 type
   ESChannel = class(Exception);
 
-  TSChannelNetTls = class(TInterfacedObject, INetTls)
+  TSChannelNetTls = class(TInterfacedObject, INetTls, INetTls2)
   private
+    FExternalDataSupplied: boolean;
+    FOnSend: TOnData;
+    FOnRecv: TOnData;
+    FOnError: TOnError;
+    //
     fSocket: TNetSocket;
     fCipherName: RawUtf8;
     fServerAddressW: SynUnicode;
@@ -2001,7 +2006,13 @@ type
     function HandshakeStep(buf: PByteArray; var len: integer): cardinal;
     procedure HandshakeLoop;
     procedure FinalizeCredCtxt;
+    function NewIncomingData(var AContext: TNetTlsContext; const buf: PByteArray; const len: integer): cardinal;
   public
+    constructor Create(
+      const AExternalDataSupplied: boolean;
+      const AOnSend: TOnData;
+      const AOnRecv: TOnData;
+      const AOnError: TOnError);
     destructor Destroy; override;
     // INetTls methods
     procedure AfterConnection(Socket: TNetSocket; var Context: TNetTlsContext;
@@ -2292,9 +2303,12 @@ begin
   fFlags := ASC_REQ_FLAGS;
   // make TLS handshake and prepare for process
   SetLength(fData, TLSRECMAXSIZE);
+  if not FExternalDataSupplied then
+  begin
   HandshakeLoop;
   if CipherName <> nil then
     CipherName^ := GetCipherName;
+  end;
 end;
 
 function TSChannelNetTls.GetCipherName: RawUtf8;
@@ -2349,10 +2363,20 @@ begin
      ((f and ISC_REQ_EXTENDED_ERROR) <> 0) then
     if (b.buf[2].cbBuffer <> 0) and
        (b.buf[2].pvBuffer <> nil) then
+    begin
+      if FExternalDataSupplied and assigned(FOnSend) then
+      begin
+        len := 0;
+        FOnSend(b.buf[2].pvBuffer, b.buf[2].cbBuffer);
+      end
+      else
+      begin
       // need to send back something to the server
       FreeAndCheckSocket('send', mormot.net.sock.Send(
         fSocket.Socket, b.buf[2].pvBuffer, b.buf[2].cbBuffer, 0),
         b.buf[2].pvBuffer);
+      end;
+    end;
   if (b.buf[1].BufferType = SECBUFFER_EXTRA) and
      (b.buf[1].cbBuffer <> 0) then
   begin
@@ -2399,12 +2423,30 @@ begin
   //writeln(fSocket.Socket,' Handshake OUT inputsize=',fInputSize);
 end;
 
+constructor TSChannelNetTls.Create(
+  const AExternalDataSupplied: boolean;
+  const AOnSend: TOnData;
+  const AOnRecv: TOnData;
+  const AOnError: TOnError);
+begin
+  inherited Create;
+
+  FExternalDataSupplied := AExternalDataSupplied;
+  FOnSend := AOnSend;
+  FOnRecv := AOnRecv;
+  FOnError := AOnError;
+end;
+
 destructor TSChannelNetTls.Destroy;
 var
   desc: TSecBufferDesc;
   buf: TSecBuffer;
   dt, f, res: cardinal;
 begin
+  FExternalDataSupplied := false;
+  FOnSend := nil;
+  FOnRecv := nil;
+  FOnError := nil;
   try
     if {%H-}PtrInt(fSocket.Socket) > 0 then
     begin
@@ -2444,6 +2486,42 @@ begin
     if fAcceptCertStore <> nil then
       CertCloseStore(fAcceptCertStore, CERT_CLOSE_STORE_DEFAULT);
     inherited Destroy;
+  end;
+end;
+
+function TSChannelNetTls.NewIncomingData(var AContext: TNetTlsContext; const buf: PByteArray; const len: integer): cardinal;
+begin
+  if AContext.enabled then
+  begin
+
+    move(buf^, PByteArray(fInput)[fInputCount], len);
+    inc(fInputCount, len);
+
+    var n: integer := 0;
+    Receive(nil, n);
+  end
+  else
+  begin
+    move(buf^, PByteArray(fData)[fDataCount], len);
+    inc(fDataCount, len);
+
+    result := HandshakeStep(pointer(fData), fDataCount);
+    if result = 0 then
+    begin
+      AContext.enabled := true;
+      if (fInputSize = 0) then
+      begin
+        // retrieve the TLS field sizes during first handshake
+        CheckSEC_E_OK('QueryContextAttributesW',
+          QueryContextAttributesW(@fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
+        fInputSize := fSizes.cbHeader + fSizes.cbMaximumMessage + fSizes.cbTrailer;
+        if (fInputSize = 0) or
+           (fInputSize > TLSRECMAXSIZE) then
+          raise ESChannel.CreateFmt('InputSize=%d>%d', [fInputSize, TLSRECMAXSIZE]);
+        SetLength(fInput, fInputSize);
+        fInputCount := 0;
+      end;
+    end;
   end;
 end;
 
@@ -2495,6 +2573,8 @@ begin
     desc.cBuffers := 4;
     desc.pBuffers := @buf[0];
     repeat
+      if not FExternalDataSupplied then
+      begin
       read := recv(fSocket.Socket,
                 @PByteArray(fInput)[fInputCount], fInputSize - fInputCount, 0);
       if read <= 0 then
@@ -2510,11 +2590,22 @@ begin
         exit;
       end;
       inc(fInputCount, read);
+      end;
       res := DecryptInput;
-    until res <> SEC_E_INCOMPLETE_MESSAGE;
+    until  FExternalDataSupplied or (res <> SEC_E_INCOMPLETE_MESSAGE);
+    if (FExternalDataSupplied) and (res = SEC_E_INCOMPLETE_MESSAGE) then
+    begin
+      result := nrRetry;
+      exit(nrRetry);
+    end;
     repeat
 //if res <> SEC_E_OK then writeln(fSocket.Socket,' res=',SspiResToText(res));
       case res of
+        SEC_E_UNSUPPORTED_FUNCTION:
+          if FExternalDataSupplied and assigned(FOnError) then
+          begin
+            FOnError(SEC_E_UNSUPPORTED_FUNCTION);
+          end;
         SEC_I_RENEGOTIATE:
           ; // appears with TLS 1.3
         SEC_I_CONTEXT_EXPIRED:
@@ -2553,13 +2644,24 @@ begin
     result := nrFatalError;
     exit;
   end;
+  if FExternalDataSupplied and assigned(FOnRecv) then
+  begin
   read := fDataCount;
+    FOnRecv(Pointer(@PByteArray(fData)[fDataPos]), read);
+    inc(fDataPos, read);
+    dec(fDataCount, read);
+    Length := read;
+  end
+  else
+  begin
+    read := fDataCount;
   if Length < read then
     read := Length;
   MoveFast(PByteArray(fData)[fDataPos], Buffer^, read);
   inc(fDataPos, read);
   dec(fDataCount, read);
   Length := read;
+  end;
   result := nrOK;
 end;
 
@@ -2599,6 +2701,13 @@ begin
     if EncryptMessage(@fCtxt, 0, @desc, 0) <> SEC_E_OK then
       exit; // caller would shutdown the connection on SChannel error
     len := buf[0].cbBuffer + buf[1].cbBuffer + buf[2].cbBuffer;
+    if FExternalDataSupplied and assigned(FOnSend) then
+    begin
+      FOnSend(@temp[0], len);
+      inc(sent, len);
+    end
+    else
+    begin
     sent := 0;
     repeat
       s := mormot.net.sock.Send(fSocket.Socket, @temp[sent], len, MSG_NOSIGNAL);
@@ -2620,6 +2729,7 @@ begin
       SleepHiRes(0); // warning: Sleep(1) waits typically 1-15 ms on Windows
       // loop to try again
     until false;
+    end;
   end;
   result := nrOK;
 end;
@@ -2635,9 +2745,13 @@ begin
     result := nil;
 end;
 
-function NewSChannelNetTls: INetTls;
+function NewSChannelNetTls(
+  const AExternalDataSupplied: boolean;
+  const AOnSend: TOnData;
+  const AOnRecv: TOnData;
+  const AOnError: TOnError): INetTls;
 begin
-  result := TSChannelNetTls.Create;
+  result := TSChannelNetTls.Create(AExternalDataSupplied, AOnSend, AOnRecv,AOnError);
 end;
 
 var

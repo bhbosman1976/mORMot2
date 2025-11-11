@@ -1048,6 +1048,16 @@ type
     function Send(Buffer: pointer; var Length: integer): TNetResult;
   end;
 
+  INetTls2 = interface(INetTls)
+  ['{879DDEF6-D89B-4FCF-B491-DD4C2429A0C9}']
+      function NewIncomingData(
+        var Context: TNetTlsContext;
+        const buf: PByteArray;
+        const len: integer): cardinal;
+  end;
+
+
+
 /// initialize a stack-allocated TNetTlsContext instance
 procedure InitNetTlsContext(var TLS: TNetTlsContext); overload;
 
@@ -1068,11 +1078,19 @@ function GetTlsContext(TlsEnabled, IgnoreTlsCertError: boolean;
 // - won't compare the callbacks
 function SameNetTlsContext(const tls1, tls2: TNetTlsContext): boolean;
 
+type
+  TOnData = procedure(const ADataPtr: Pointer; const Asize: integer) of object;
+  TOnError = procedure(const AErrorCode: Cardinal) of object;
+
 var
   /// global factory for a new TLS encrypted layer for TCrtSocket
   // - on Windows, this unit will set a factory using the system SChannel API
   // - could also be overriden e.g. by the mormot.lib.openssl11.pas unit
-  NewNetTls: function: INetTls;
+  NewNetTls: function(
+    const AExternalDataSupplied: boolean;
+    const AOnSend: TOnData;
+    const AOnRecv: TOnData;
+    const AOnError: TOnError): INetTls;
 
   /// set globally to setup TNetTlsContext.OnAcceptServerName SNI callbacks
   // - default false may be lighter, e.g. for a single-host HTTPS server
@@ -1092,7 +1110,11 @@ var
 // - can be used at runtime to override another implementation e.g.
 // @NewOpenSslNetTls from mormot.lib.openssl11 by executing:
 // ! @NewNetTls := @NewSChannelNetTls;
-function NewSChannelNetTls: INetTls;
+function NewSChannelNetTls(
+  const AExternalDataSupplied: boolean;
+  const AOnSend: TOnData;
+  const AOnRecv: TOnData;
+  const AOnError: TOnError): INetTls;
 {$endif OSWINDOWS}
 
 
@@ -5869,7 +5891,7 @@ begin
     if not Assigned(NewNetTls) then
       DoRaise('DoTlsAfter: TLS support not compiled ' +
         '- try including mormot.lib.openssl11 in your project');
-    fSecure := NewNetTls;
+    fSecure := NewNetTls(false, nil, nil, nil);
     if fSecure = nil then
       DoRaise('DoTlsAfter: TLS is not available - try installing OpenSSL');
     case caller of
