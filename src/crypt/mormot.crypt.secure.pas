@@ -800,6 +800,7 @@ type
   // any password, e.g. > than 72 bytes (following passlib.hash.bcrypt_sha256)
   // - mcfSCrypt is the SCrypt memory-intensive hashing algorithm, implemented in
   // mormot.crypt.other.pas or in mormot.crypt.openssl.pas via global SCrypt()
+  // - in practice: use safest mcfBCryptSha256 or mcfSCrypt if possible
   TModularCryptFormat = (
     mcfInvalid,
     mcfUnknown,
@@ -813,6 +814,7 @@ type
     mcfBCrypt,
     mcfBCryptSha256,
     mcfSCrypt);
+  PModularCryptFormat = ^TModularCryptFormat;
   /// allow to specify several ModularCryptIdentify/ModularCryptVerify algorithms
   TModularCryptFormats = set of TModularCryptFormat;
 
@@ -1123,7 +1125,8 @@ function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
 // !ModularCryptHash('$1$gV5s/FALJ/0x8nyo$', 'password') = '$1$gV5s/FALJ/0x8nyo$6yO.DIuu/ZF/eJaK5oHu90'
 // - the format can e.g. be send back to the client to make the proper modular
 // crypt hashing on its side, and send back the hash (or nonced proof) to the server
-function ModularCryptHash(const format, password: RawUtf8): RawUtf8; overload;
+function ModularCryptHash(const format, password: RawUtf8;
+  decodedFormat: PModularCryptFormat = nil): RawUtf8; overload;
 
 /// identify if a given hash matches any "Modular Crypt" format
 // - e.g. returns true and mcfMd5Crypt for '$1${salt}${checksum}' or
@@ -1152,8 +1155,8 @@ function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
 // - without {checksum} - as returned by ModularCryptIdentify() info^ parameter
 // - used e.g. by TRestServer.ReturnNonce() with an unknown UserName, to avoid
 // the client being able to guess by fuzzing that this UserName is unknown
-// - use SystemEntropy.Startup as seed for consistent results between calls, but
-// eventually reset when the process is restarted
+// - use SystemEntropy.Startup as SHA-256 seed for consistent results between
+// calls, but eventually reset when the process is restarted
 function ModularCryptFakeInfo(const id: RawUtf8;
   format: TModularCryptFormat = mcfUnknown): RawUtf8;
 
@@ -1188,11 +1191,21 @@ function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
 
 { SCRAM-like Client/Server mutual authentication using ModularCryptHash() }
 
+/// compute the SCRAM challenge to be stored on DB for a given "Modular Crypt" hash
+// - the value is bound to the User logon, so that it can't be reassigned to
+// a more sensitive user on a compromised database ("key swap" attack)
+function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8; overload;
+
 /// compute the SCRAM challenge to be stored for a given "Modular Crypt" hash
-function ScramPersistedKey(const Hash: RawUtf8): RawUtf8;
+function ScramPersistedKey(Mcf: TModularCryptFormat;
+  const Password, User: RawUtf8; Rounds: cardinal = 0): RawUtf8; overload;
+
+/// compute the SCRAM challenge to be stored for a given "Modular Crypt" hash
+// - this overload expects the MCF format to be supplied as text
+function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8; overload;
 
 /// compute the SCRAM client proof for a given "Modular Crypt" hash
-function ScramClientProof(const Hash: RawUtf8; var ClientSignature: THash256;
+function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
   const Msg: array of RawByteString): RawUtf8;
 
 /// compute the SCRAM server proof for a given "Modular Crypt" challenge
@@ -1200,8 +1213,10 @@ function ScramClientProof(const Hash: RawUtf8; var ClientSignature: THash256;
 function ScramServerProof(const PersistedKey, ClientProof: RawUtf8;
   const Msg: array of RawByteString): RawUtf8;
 
-// verify a given ScramServerProof() value on client side
-function ScramClientServerAuth(const Hash, ServerProof: RawUtf8;
+/// verify a given ScramServerProof() value on client side
+// - can optionally return the server-side persisted value in DB (if needed
+// to compute the URI secret)
+function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
   var ClientSignature: THash256): boolean;
 
 
@@ -4743,6 +4758,8 @@ begin
       result := mcfSha256Crypt;
     6:
       result := mcfSha512Crypt;
+    7:
+      result := mcfSCrypt; // as in Unix crypt utility (but not identical)
   else
     result := TModularCryptFormat(FindNonVoidRawUtf8(@MCF_IDENT,
       pointer(salt), length(salt), length(MCF_IDENT)) + ord(low(MCF_IDENT)));
@@ -4875,7 +4892,8 @@ begin
   end;
 end;
 
-function ModularCryptHash(const format, password: RawUtf8): RawUtf8;
+function ModularCryptHash(const format, password: RawUtf8;
+  decodedFormat: PModularCryptFormat): RawUtf8;
 var
   mcf: TModularCryptFormat;
   P: PUtf8char;
@@ -4885,6 +4903,8 @@ begin
   FastAssignNew(result);
   P := pointer(format);
   mcf := ModularCryptParse(P, rounds, salt);
+  if decodedFormat <> nil then
+    decodedFormat^ := mcf;
   if mcf in mcfValid then
     result := ModularCryptHash(mcf, password, rounds, 0, salt);
 end;
@@ -4941,11 +4961,15 @@ function ModularCryptFakeInfo(const id: RawUtf8; format: TModularCryptFormat): R
 var
   h: THash256Rec; // always return the same fake content for the same id
   enc: PChar64;
-  salt: TShort23;
+  sha: TSha256;
+  salt: TShort23 absolute sha;
 const
   RANGE = cardinal(high(TModularCryptFormat)) - cardinal(mcfMd5Crypt); // = 9
 begin
-  HmacSha256(@SystemEntropy.Startup, pointer(id), 16, length(id), h.b);
+  sha.Init;
+  sha.Update(@SystemEntropy.Startup, SizeOf(SystemEntropy.Startup));
+  sha.Update(id);
+  sha.Final(h.b, {noinit=}true);
   if format <= mcfMd5Crypt then // compute consistent format if none supplied
     format := TModularCryptFormat(h.b[0] mod RANGE + byte(succ(mcfMd5Crypt)));
   Join(['$', MCF_IDENT[format], '$'], result);
@@ -5043,7 +5067,7 @@ end;
 
 // SCRAM-like mutual auth - see https://github.com/synopse/mORMot2/issues/405
 
-function ScramPersistedKey(const Hash: RawUtf8): RawUtf8;
+function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8;
 var
   clientkey: THash256;
   stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
@@ -5053,16 +5077,27 @@ begin
      (Hash[1] <> '$') or // should be a true KDF/MCF result
      not (ModularCryptIdentify(Hash, @result) in mcfValid) then
     exit;
-  HmacSha256(Hash, 'Client Key', clientkey);
-  Sha256Digest(stored.Lo, clientkey);
-  HmacSha256(Hash, 'Server Key', stored.Hi);
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
+  Sha256Digest(stored.Lo, clientkey); // store H(clientkey) for ScramClientProof
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], stored.Hi, '|');
   result[1] := '#'; // "#MCF prefix" + base64uri(StoredKey + ServerKey)
-  Append(result, BinToBase64uriShort(@stored, SizeOf(stored)));
+  Append(result, BinToBase64uri(stored.b));
   FillZero(clientkey);
   FillZero(stored.b);
 end;
 
-function ScramClientProof(const Hash: RawUtf8; var ClientSignature: THash256;
+function ScramPersistedKey(Mcf: TModularCryptFormat; const Password, User: RawUtf8;
+  Rounds: cardinal): RawUtf8;
+begin
+  result := ScramPersistedKey(ModularCryptHash(mcf, Password, Rounds), User);
+end;
+
+function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8;
+begin
+  result := ScramPersistedKey(ModularCryptHash(McfFormat, Password), User);
+end;
+
+function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
   const Msg: array of RawByteString): RawUtf8;
 var
   clientkey, storedkey: THash256;
@@ -5072,11 +5107,11 @@ begin
      (Hash[1] <> '$') or // should be a true KDF/MCF result
      not (ModularCryptIdentify(Hash) in mcfValid) then
     exit;
-  HmacSha256(Hash, 'Client Key', clientkey);
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
   Sha256Digest(storedkey, clientkey);
   HmacSha256U(@storedkey, SizeOf(storedkey), Msg, ClientSignature, '|');
   Xor256(@clientkey, @ClientSignature);
-  result := BinToBase64uri(@clientkey, SizeOf(clientkey));
+  result := BinToBase64uri(clientkey);
   FillZero(clientkey);
   FillZero(storedkey);
 end;
@@ -5104,13 +5139,13 @@ begin
   if IsEqual(clientkey, stored.Lo) then // H(candidate_ClientKey) = StoredKey
   begin
     Xor256(@stored.Hi, @clientsig);
-    result := BinToBase64uri(@stored.Hi, SizeOf(stored.Hi)); // proof on success
+    result := BinToBase64uri(stored.Hi); // proof on success
   end;
   FillZero(clientkey);
   FillZero(stored.b);
 end;
 
-function ScramClientServerAuth(const Hash, ServerProof: RawUtf8;
+function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
   var ClientSignature: THash256): boolean;
 var
   serverkey, proof: THash256;
@@ -5120,7 +5155,7 @@ begin
      (Hash[1] = '$') and // should be a true KDF/MCF result
      Base64uriToBin(ServerProof, @proof, SizeOf(proof)) then
   begin
-    HmacSha256(Hash, 'Server Key', serverkey);
+    HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], serverkey, '|');
     Xor256(@proof, @ClientSignature);
     result := IsEqual(proof, serverkey);
     FillZero(proof);

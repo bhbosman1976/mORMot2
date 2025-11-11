@@ -360,7 +360,6 @@ type
     // - KeySize is in bits, i.e. 128, 192 or 256
     function EncryptInit(const Key; KeySize: cardinal): boolean;
     /// Initialize AES context for cipher, using CSPRNG as transient key source
-    // - also set the internal IV field to a random value
     // - used e.g. by TAesSignature or Random128() for their initialization
     procedure EncryptInitRandom(Bits: integer = 128);
     /// encrypt an AES data block into another data block
@@ -2803,7 +2802,7 @@ type
   end;
 
   TShaContext = packed record
-    // current hash state (TSha256.Init expect this field to be the first)
+    // current hash state (TSha256/224.Init expect this field to be the first)
     Hash: TShaHash;
     // 64-bit msg length
     MLen: QWord;
@@ -2830,7 +2829,7 @@ const
 
 var
   {$ifdef USEAESNIHASH}
-  // 64 SSE2-aligned random bytes set at startup to avoid hash flooding
+  // SSE2-aligned 64 random bytes set at startup to avoid hash flooding
   AesNiHashKey: PHash512; // = AesNiHashAntiFuzzTable
   {$endif USEAESNIHASH}
   // filled by ComputeAesStaticTables if needed - don't change the order below
@@ -4123,12 +4122,14 @@ procedure TAes.EncryptInitRandom(Bits: integer);
 var
   rnd: THash256Rec;
 begin // note: we can't use Random128() here to avoid endless recursion
-  TAesPrng.Main.FillRandom(rnd.b);    // 256-bit from CSPRNG
-  EncryptInit(rnd, Bits);             // transient AES-128/256 secret
-  if Bits <> 128 then
-    TAesPrng.Main.FillRandom(rnd.Hi); // need 128-bit more CSPRNG for IV
-  TAesContext(Context).iv := rnd.h;   // safe IV from CSPRNG
-  FillZero(rnd.b);                    // anti-forensic
+  {$ifdef OSLINUX}
+  if (MainAesPrng <> nil) or
+     not LinuxGetRandom(@rnd, Bits shr 3) then // 128/256-bit in 1 syscall
+  {$endif OSLINUX}
+    TAesPrng.Main.FillRandom(rnd.b);   // 256-bit from our CSPRNG (if available)
+  EncryptInit(rnd, Bits);              // transient AES-128/256 secret
+  FillZero(TAesContext(Context).iv.b); // as per NIST SP 800-90A
+  FillZero(rnd.b);                     // anti-forensic
 end;
 
 function TAes.DecryptInitFrom(const Encryption: TAes; const Key;
@@ -10472,12 +10473,15 @@ begin
   end;
   {$endif ASMX64}
   {$ifdef USEAESNIHASH}
+  {$ifdef OSWINDOWS}
+  if not IsWow64Emulation then // PRISM seems inconsistent with only few aesenc
+  {$endif OSWINDOWS}
   if (cfAesNi in CpuFeatures) and   // AES-NI
      (cfSSE3 in CpuFeatures) then   // PSHUFB
   begin
     // 32/64/128-bit aesnihash as implemented in Go runtime, using aesenc opcode
-    AesNiHashKey := GetMemAligned(16 * 4, @BaseEntropy);        // non-void init
-    LecuyerDiffusion(AesNiHashKey, 16 * 4, @SystemEntropy.Startup);   // 512-bit
+    AesNiHashKey := GetMemAligned(64, @BaseEntropy);            // non-void init
+    LecuyerDiffusion(AesNiHashKey, 64, @SystemEntropy.Startup); // 512-bit xor
     AesNiHash32      := @_AesNiHash32;
     AesNiHash64      := @_AesNiHash64;
     AesNiHash128     := @_AesNiHash128;
