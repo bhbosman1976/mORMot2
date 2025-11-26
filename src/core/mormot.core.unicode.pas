@@ -1373,7 +1373,12 @@ function Utf8DecodeToUnicode(Text: PUtf8Char; Len: PtrInt; var temp: TSynTempBuf
 /// convert any Ansi 7-bit encoded String into a RTL string
 // - the Text content must contain only 7-bit pure ASCII characters
 function Ansi7ToString(const Text: RawByteString): string; overload;
-  {$ifndef UNICODE}{$ifdef HASINLINE}inline;{$endif}{$endif}
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any Ansi 7-bit encoded String into a RTL string
+// - the Text content must contain only 7-bit pure ASCII characters
+procedure Ansi7ToString(const Text: RawByteString; var Dest: string); overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any Ansi 7-bit encoded String into a RTL string
 // - the Text content must contain only 7-bit pure ASCII characters
@@ -1382,7 +1387,8 @@ function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string; overload;
 
 /// convert any Ansi 7-bit encoded String into a RTL string
 // - the Text content must contain only 7-bit pure ASCII characters
-procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var result: string); overload;
+procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var Dest: string); overload;
+  {$ifndef UNICODE}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// convert any RTL string into Ansi 7-bit encoded String
 // - the Text content must contain only 7-bit pure ASCII characters
@@ -4411,8 +4417,7 @@ begin
   inherited;
   if not IsFixedWidthCodePage(aCodePage) then
     // warning: CreateUtf8() uses Utf8ToString() -> call CreateFmt() here
-    raise ESynUnicode.CreateFmt('%s.Create - Invalid code page %d',
-      [ClassNameShort(self)^, fCodePage]);
+    ESynUnicode.RaiseFmt(self, 'Create - Invalid code page %d', [fCodePage]);
   // create internal look-up tables
   SetLength(fAnsiToWide, 256);
   if (aCodePage = CP_WINANSI) or
@@ -4438,8 +4443,7 @@ begin
     if (len < 500) or
        (len > 512) then
       // warning: CreateUtf8() uses Utf8ToString() -> call CreateFmt() now
-      raise ESynUnicode.CreateFmt('OS error for %s.Create(%d) [%d]',
-        [ClassNameShort(self)^, aCodePage, len]);
+      ESynUnicode.RaiseFmt(self, 'Create(%d): OS error [%d]', [aCodePage, len]);
     MoveFast(u[0], fAnsiToWide[0], 512);
   end;
   SetLength(fWideToAnsi, 65536);
@@ -4780,7 +4784,7 @@ end;
 constructor TSynAnsiUtf8.Create(aCodePage: cardinal);
 begin
   if aCodePage <> CP_UTF8 then
-    raise ESynUnicode.CreateFmt('%s.Create(%d)', [ClassNameShort(self)^, aCodePage]);
+    ESynUnicode.RaiseFmt(self, 'Create(%d) is unexpected', [aCodePage]);
   inherited Create(aCodePage);
 end;
 
@@ -4874,7 +4878,7 @@ end;
 constructor TSynAnsiUtf16.Create(aCodePage: cardinal);
 begin
   if aCodePage <> CP_UTF16 then
-    raise ESynUnicode.CreateFmt('%s.Create(%d)', [ClassNameShort(self)^, aCodePage]);
+    ESynUnicode.RaiseFmt(self, 'Create(%d)', [aCodePage]);
   inherited Create(aCodePage);
 end;
 
@@ -5396,27 +5400,23 @@ end;
 
 {$ifdef UNICODE}
 
-function Ansi7ToString(const Text: RawByteString): string;
+procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var Dest: string);
 var
   i: PtrInt;
 begin
-  FastSynUnicode(result, nil, Length(Text));
-  for i := 0 to Length(Text) - 1 do
-    PWordArray(result)[i] := cardinal(PByteArray(Text)[i]); // 7-bit assign
+  FastSynUnicode(Dest, nil, Len);
+  for i := 0 to Len - 1 do
+    PWordArray(Dest)[i] := cardinal(PByteArray(Text)[i]); // 7-bit assign
+end;
+
+procedure Ansi7ToString(const Text: RawByteString; var Dest: string);
+begin
+  Ansi7ToString(pointer(Text), length(Text), Dest);
 end;
 
 function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string;
 begin
   Ansi7ToString(Text, Len, result);
-end;
-
-procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var result: string);
-var
-  i: PtrInt;
-begin
-  FastSynUnicode(result, nil, Len);
-  for i := 0 to Len - 1 do
-    PWordArray(result)[i] := cardinal(PByteArray(Text)[i]); // 7-bit assign
 end;
 
 function StringToAnsi7(const Text: string): RawByteString;
@@ -5544,12 +5544,12 @@ end;
 
 {$else}
 
-function Ansi7ToString(const Text: RawByteString): string;
+procedure Ansi7ToString(const Text: RawByteString; var Dest: string); overload;
 begin
-  result := Text; // if we are SURE this text is 7-bit Ansi -> direct assign
-  {$ifdef FPC} // if Text is CP_RAWBYTESTRING then FPC won't handle it properly
-  SetCodePage(RawByteString(result), Unicode_CodePage, false);
-  {$endif FPC} // no FakeCodePage() since Text may be read-only
+  Dest := Text; // if we are SURE this text is 7-bit Ansi -> direct assign
+  {$ifdef FPC}  // if Text is CP_RAWBYTESTRING then FPC won't handle it properly
+  SetCodePage(RawByteString(Dest), Unicode_CodePage, false);
+  {$endif FPC}  // no FakeCodePage() since Text may be read-only
 end;
 
 function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string;
@@ -5557,9 +5557,9 @@ begin
   SetString(result, PAnsiChar(Text), Len);
 end;
 
-procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var result: string);
+procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var Dest: string);
 begin
-  SetString(result, PAnsiChar(Text), Len);
+  SetString(Dest, PAnsiChar(Text), Len);
 end;
 
 function StringToAnsi7(const Text: string): RawByteString;
@@ -5690,6 +5690,11 @@ begin
 end;
 
 {$endif UNICODE}
+
+function Ansi7ToString(const Text: RawByteString): string;
+begin
+  Ansi7ToString(Text, result);
+end;
 
 function ToUtf8(const Ansi7Text: ShortString): RawUtf8;
 begin
@@ -9576,7 +9581,7 @@ function SanitizePascalName(const aName: RawUtf8; KeyWordCheck: boolean): RawUtf
 begin
   CamelCase(aName, result);
   if result = '' then
-    raise ESynUnicode.CreateFmt('Unexpected SanitizePascalName(%s)', [aName]);
+    ESynUnicode.RaiseFmt(nil, 'Unexpected SanitizePascalName(%s)', [aName]);
   result[1] := UpCase(result[1]);
   if KeyWordCheck and
      IsReservedKeyWord(result) then

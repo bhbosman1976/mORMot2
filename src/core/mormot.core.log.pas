@@ -692,7 +692,7 @@ type
     fNoEnvironmentVariable: boolean;
     {$endif OSWINDOWS}
     {$ifndef NOEXCEPTIONINTERCEPT}
-    fHandleExceptions: boolean;
+    fHandleExceptions, fExceptionIgnoreLibrary: boolean;
     fOnBeforeException: TOnBeforeException;
     {$endif NOEXCEPTIONINTERCEPT}
     fAutoFlushTimeOut: cardinal;
@@ -798,6 +798,10 @@ type
     // to this flag
     property ExceptionIgnoreCurrentThread: boolean
       index tiExceptionIgnore read GetCurrentThreadFlag write SetCurrentThreadFlag;
+    /// set true will log exceptions only from the main executable, not from library
+    // - will follow IsMainExecutable() result
+    property ExceptionIgnoreLibrary: boolean
+      read fExceptionIgnoreLibrary write fExceptionIgnoreLibrary;
     /// allow to temporarly avoid logging in the current thread
     // - won't affect exceptions logging, as one would expect for safety reasons
     // - after setting true to this property, should eventually be reset to false:
@@ -5857,7 +5861,7 @@ var
 begin
   fWriter.AddDirect(' ', '"');
   GetErrorShortVar(Error, msg);
-  fWriter.AddOnSameLine(@msg[0], ord(msg[0]));
+  fWriter.AddOnSameLine(@msg[1], ord(msg[0]));
   fWriter.AddDirect('"', ' ', '(');
   fWriter.AddU(Error);
   fWriter.AddDirect(')', ' ');
@@ -6490,7 +6494,11 @@ begin
     exit; // disabled for this thread (avoid nested call)
   log := HandleExceptionFamily.Add;
   if log = nil then
-   exit;
+    exit;
+  if log.fFamily.ExceptionIgnoreLibrary and
+     (Ctxt.EAddr <> 0) and
+     not IsMainExecutable(pointer(Ctxt.EAddr)) then // fast guess
+    exit;
   thrdnam := CurrentThreadNameShort;
   log.LockAndDisableExceptions; // ignore result = tiTemporaryDisable flag
   try

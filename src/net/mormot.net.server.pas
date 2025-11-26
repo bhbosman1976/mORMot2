@@ -1560,7 +1560,7 @@ type
   // - pcoVerboseLog will log all details, e.g. raw UDP frames
   // - pcoHttpDirect extends the HTTP endpoint to initiate a download process
   // from localhost, and return the cached content (used e.g. as proxy + cache)
-  // using a URI + Bearer returned by HttpDirectUri() overloaded methods
+  // requiring URI + Bearer as returned by HttpDirectUri() overloaded methods
   // - pcoHttpDirectNoBroadcast would disable UDP peer search for pcoHttpDirect
   // - pcoHttpDirectTryLastPeer could make pcoTryLastPeer for pcoHttpDirect
   // - pcoHttpReprDigest would include a 'Repr-Digest:' header as per RFC 9530
@@ -1775,7 +1775,7 @@ type
       aClient: THttpClientSocket; aRecvTimeout: integer);
     function LocalPeerRequest(const aRequest: THttpPeerCacheMessage;
       var aResp : THttpPeerCacheMessage; const aUrl: RawUtf8;
-      aOutStream: TStreamRedirect; aRetry: boolean): integer;
+      aOutStream: TStreamRedirect; aBanInstable: boolean): integer;
     function GetUuidText: RawUtf8;
   public
     /// initialize the cryptography of this peer-to-peer node instance
@@ -3271,18 +3271,18 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
       // STATICFILE_PROGSIZE: file is not fully available: wait for sending
       if ((not (rfWantRange in Context.ResponseFlags)) or
           Context.ValidateRange) then
-      begin
-        if FileInfoByName(fn, fsiz, Context.ContentLastModified) and
-          (fsiz >= 0) and // not a folder
-          (fsiz <= Context.ContentLength) then
+        if IsHead(Context.CommandMethod) or // HEAD needs no file but a length
+           (FileInfoByName(fn, fsiz, Context.ContentLastModified) and
+            (fsiz >= 0) and // not a folder
+            (fsiz <= Context.ContentLength)) then
         begin
-          Context.ContentStream := TStreamWithPositionAndSize.Create; // <> nil
+          // void Context.ContentStream <> nil needed with both GET and HEAD
+          Context.ContentStream := TStreamWithPositionAndSize.Create;
           Context.ResponseFlags := Context.ResponseFlags +
             [rfAcceptRange, rfContentStreamNeedFree, rfProgressiveStatic];
         end
         else
-          fRespStatus := HTTP_NOTFOUND;
-      end
+          fRespStatus := HTTP_NOTFOUND
       else
         fRespStatus := HTTP_RANGENOTSATISFIABLE
     else if (not Assigned(fServer.OnSendFile)) or
@@ -4765,6 +4765,7 @@ begin
   fBanned := THttpAcceptBan.Create; // for hsoBan40xIP or BlackList
   if ServerThreadPoolCount > 0 then
   begin
+    ThreadCountAdjust(ServerThreadPoolCount); // e.g. WinARM PRISM
     fThreadPool := TSynThreadPoolTHttpServer.Create(self, ServerThreadPoolCount);
     fHttpQueueLength := 1000;
     if hsoThreadCpuAffinity in ProcessOptions then
@@ -6009,7 +6010,7 @@ end;
 
 function THttpPeerCrypt.LocalPeerRequest(const aRequest: THttpPeerCacheMessage;
   var aResp : THttpPeerCacheMessage; const aUrl: RawUtf8;
-  aOutStream: TStreamRedirect; aRetry: boolean): integer;
+  aOutStream: TStreamRedirect; aBanInstable: boolean): integer;
 var
   head, ip, method: RawUtf8;
 
@@ -6019,7 +6020,7 @@ var
       [method, ip, fPort, aUrl, StatusCodeToText(result)^, E], self);
     if (fInstable <> nil) and // add to RejectInstablePeersMin list
        (E <> nil) and         // on OpenBind() error
-       not aRetry then        // not from partial request before broadcast
+       aBanInstable then      // not from partial request before broadcast
       fInstable.BanIP(aResp.IP4); // this peer may have a HTTP firewall issue
     FreeAndNil(fClient);
     fClientIP4 := 0;
@@ -6060,7 +6061,7 @@ begin
       method := 'GET';
     end;
     result := fClient.Request(
-      aUrl, method, 30000, head, '',  '', aRetry, nil, aOutStream);
+      aUrl, method, 30000, head, '',  '', {AsRetry=}false, nil, aOutStream);
     fLog.Add.Log(sllTrace, 'OnDownload: request=%', [result], self);
     if result in HTTP_GET_OK then
       fClientIP4 := aResp.IP4 // success or not found (HTTP_NOCONTENT)
@@ -6830,7 +6831,7 @@ begin
   result := (Params.Hash <> '') and
             (Params.Hasher <> nil) and
             Params.Hasher.InheritsFrom(TStreamRedirectSynHasher) and
-       TStreamRedirectSynHasher(Params.Hasher).GetHashDigest(Params.Hash, Hash);
+       TStreamRedirectSynHasherClass(Params.Hasher).GetHashDigest(Params.Hash, Hash);
 end;
 
 function THttpPeerCache.CachedFileName(const aParams: THttpClientSocketWGet;
@@ -7025,7 +7026,7 @@ begin
       resp[0] := req;
       FillZero(resp[0].Uuid);
       // OnRequest() returns HTTP_NOCONTENT (204) - and not 404 - if not found
-      result := LocalPeerRequest(req, resp[0], u, OutStream, {aRetry=}true);
+      result := LocalPeerRequest(req, resp[0], u, OutStream, {BanInstable=}false);
       if result in [HTTP_SUCCESS, HTTP_PARTIALCONTENT] then
       begin
         Params.SetStep(wgsAlternateLastPeer, [fClient.Server]);
@@ -7063,7 +7064,7 @@ begin
     exit; // partial download would fail the hash anyway
   fClientSafe.Lock;
   try
-    result := LocalPeerRequest(req, resp[0], u, OutStream, {aRetry=}false);
+    result := LocalPeerRequest(req, resp[0], u, OutStream, {BanInstable=}true);
   finally
     fClientSafe.UnLock;
   end;
@@ -7078,7 +7079,7 @@ begin
       if fClientSafe.TryLock then
       try
         Params.SetStep(wgsAlternateGetNext, [IP4ToShort(@resp[i].IP4)]);
-        result := LocalPeerRequest(req, resp[i], u, OutStream, {aRetry=}false);
+        result := LocalPeerRequest(req, resp[i], u, OutStream, {Ban=}true);
         if (result in [HTTP_SUCCESS, HTTP_PARTIALCONTENT]) or
            not ResetOutStreamPosition then
           exit; // success
@@ -7598,7 +7599,7 @@ begin
           SetLength(peers, 1);
           peers[0] := req;
           FillZero(peers[0].Uuid); // "fake" HEAD request to check this peer
-          result := LocalPeerRequest(req, peers[0], Ctxt.Url, nil, {retry=}false);
+          result := LocalPeerRequest(req, peers[0], Ctxt.Url, nil, {Ban=}false);
           if fSettings = nil then
             exit; // shutdown in progress
           if result <> HTTP_SUCCESS then // returns HTTP_NOCONTENT if not found
@@ -7669,7 +7670,7 @@ begin
     try
       // make the actual blocking GET request in this background thread
       res := cs.Request(cs.RemoteUri, 'GET', 30000, cs.RemoteHeaders, '', '',
-        {retry=}false, {instream=}nil, {outstream=}cs.DestStream);
+        {AsRetry=}false, {instream=}nil, {outstream=}cs.DestStream);
       if fSettings = nil then
         exit; // shutdown
       if not (res in HTTP_GET_OK) then
