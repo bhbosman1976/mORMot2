@@ -1599,6 +1599,7 @@ type
     fHttps: THttpRequest;
     fOnlyUseClientSocket: boolean;
     {$endif USEHTTPREQUEST}
+    fOnLog: TSynLogProc;
   public
     /// initialize the instance
     // - aOnlyUseClientSocket=true will use THttpClientSocket even for HTTPS
@@ -1613,6 +1614,9 @@ type
     /// low-level connection point of this instance, using an TUri as input
     // - rather use the Connected() more usable method
     procedure RawConnect(const Server: TUri); override;
+    /// optional verbose log output, transmitted to THttpClientSocket
+    property OnLog: TSynLogProc
+      read fOnLog write fOnLog;
     // IHttpClient methods
     procedure Close; override;
     function Options: PHttpRequestExtendedOptions; override;
@@ -3192,7 +3196,7 @@ begin
           not SockIsDefined then
     DoRetry('connection closed (keepalive timeout or max)', [])
   else if not fSock.Available(@loerr) then
-    DoRetry('connection broken (socketerror=%)', [loerr])
+    DoRetry('connection broken (socketerror=%)', [NetErrorText(loerr)])
   else if not SockConnected then
     DoRetry('getpeername() failed', [])
   else
@@ -3215,7 +3219,7 @@ begin
       if ctxt.Header <> '' then
         SockSendHeaders(ctxt.Header); // normalizing CRLF
       if Http.CompressList <> nil then
-        SockSendHeaders(Http.CompressList^.AcceptEncoding);
+        SockSendHeaders(Http.CompressList^.AcceptEncodingClient); // advertise
       SockSendCRLF;
       // flush headers and Data/InStream body
       SockSendFlush(dat);
@@ -3243,7 +3247,14 @@ begin
         cspDataAvailable:
           ; // ok
         cspDataAvailableOnClosedSocket:
-          include(Http.HeaderFlags, hfConnectionClose); // socket is closed
+          begin
+            include(Http.HeaderFlags, hfConnectionClose); // socket is closed
+            if not Sock.Available(@loerr, {nowait=}true) then // e.g. on Windows
+            begin
+              DoRetry('Closed FIN/RST during headers', [NetErrorText(loerr)]);
+              exit;
+            end;
+          end;
         cspNoData:
           if SockConnected then // getpeername()=nrOK
           begin
@@ -3265,7 +3276,7 @@ begin
       else // cspSocketError, cspSocketClosed
         begin
           DoRetry('% % waiting %ms for headers',
-            [ToText(pending)^, CardinalToHexShort(loerr), TimeOut]);
+            [ToText(pending)^, NetErrorText(loerr), TimeOut]);
           exit;
         end;
       end;
@@ -4424,8 +4435,8 @@ begin
       if comp <> nil then
         InternalAddHeader(Join(['Content-Encoding: ', comp^.Name]));
     end;
-    if fCompressList.AcceptEncoding <> '' then
-      InternalAddHeader(fCompressList.AcceptEncoding);
+    if fCompressList.AcceptEncodingClient <> '' then
+      InternalAddHeader(fCompressList.AcceptEncodingClient);
     upload:= IsPost(method) or IsPut(method);
     // send request to remote server
     if Assigned(fOnUpload) and
@@ -5446,6 +5457,8 @@ begin
        (fHttps.Server <> Server.Server) or
        (fHttps.Port <> Server.PortInt) then
     begin
+      if Assigned(fOnLog) then
+        fOnLog(sllDebug, 'RawConnect(%:%)', [Server.Server, Server.Port], self);
       Close; // need a new https connection
       fHttps := MainHttpClass.Create(Server, @fConnectOptions); // connect
     end;
@@ -5458,8 +5471,11 @@ begin
      (fHttp.Port <> Server.Port) or
      not fHttp.SockConnected then
   begin
+    if Assigned(fOnLog) then
+      fOnLog(sllDebug, 'RawConnect(%:%)', [Server.Server, Server.Port], self);
     Close;
-    fHttp := THttpClientSocket.OpenOptions(Server, fConnectOptions); // connect
+    fHttp := THttpClientSocket.OpenOptions(
+      Server, fConnectOptions, fOnLog); // connect
     include(fHttp.Http.Options, hroHeadersUnfiltered); // least astonishment
   end;
 end;

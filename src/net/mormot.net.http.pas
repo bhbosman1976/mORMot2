@@ -106,8 +106,8 @@ type
   public
     /// the compression algorithms currently registered
     Algo: THttpSocketCompressRecDynArray;
-    /// the 'Accept-Encoding:' header value corresponding to Algo[]
-    AcceptEncoding: RawUtf8;
+    /// the 'Accept-Encoding:' client header value corresponding to Algo[]
+    AcceptEncodingClient: RawUtf8;
     /// enable a give compression function for a HTTP link
     // - returns the newly added record in the Compress.Algo[] list
     // - returns nil if this algorithm was already defined, updating existing
@@ -3207,10 +3207,10 @@ begin
   result^.Func := @CompFunction;
   result^.CompressMinSize := CompMinSize;
   result^.Priority := (CompPriority shl 14) or n; // by CompPriority, then call order
-  if AcceptEncoding = '' then
-    Join(['Accept-Encoding: ', name], AcceptEncoding)
+  if AcceptEncodingClient = '' then
+    Join(['Accept-Encoding: ', name], AcceptEncodingClient)
   else
-    Append(AcceptEncoding, ',', name);
+    Append(AcceptEncodingClient, ',', name); // transmit algos as CSV
   DynArray(TypeInfo(THttpSocketCompressRecDynArray), Algo).Sort(ByPriority);
 end;
 
@@ -3993,12 +3993,6 @@ function THttpRequestContext.CompressContentAndFinalizeHead(
 var
   date: TShort31;
 begin
-  // same logic than THttpSocket.CompressDataAndWriteHeaders below
-  if (integer(CompressAcceptHeader) <> 0) and
-     (CompressList <> nil) and
-     (ContentStream = nil) then // no stream compression (yet)
-    ContentEncoding := CompressList^.CompressContent(
-                         CompressAcceptHeader, ContentType, Content);
   // DoRequest will use Head buffer by default (and send the body separated)
   result := @Head;
   // handle response body with optional range support
@@ -4007,6 +4001,12 @@ begin
     result^.AppendShort('Accept-Ranges: bytes'#13#10);
   if ContentStream = nil then // <> nil e.g. for rfProgressiveStatic
   begin
+    // same logic than THttpSocket.CompressDataAndWriteHeaders below
+    if (integer(CompressAcceptHeader) <> 0) and
+       (CompressList <> nil) and
+       (Content <> '') then // no stream compression (yet)
+      ContentEncoding := CompressList^.CompressContent(
+                           CompressAcceptHeader, ContentType, Content);
     fContentPos := pointer(Content); // for ProcessBody below
     ContentLength := length(Content);
     if rfWantRange in ResponseFlags then
@@ -4065,13 +4065,6 @@ begin
   begin
     if rfHttp10 in ResponseFlags then // implicit with HTTP/1.1
       result^.AppendShort('Connection: Keep-Alive'#13#10);
-    if (CompressList <> nil) and
-       (CompressList^.AcceptEncoding <> '') and
-       not (hhAcceptEncoding in HeadCustom) then
-    begin
-      result^.Append(CompressList^.AcceptEncoding);
-      result^.AppendCRLF;
-    end;
     result^.AppendCRLF; // end with a void line
   end;
   // try to send both headers and body in a single socket syscall

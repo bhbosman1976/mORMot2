@@ -219,10 +219,14 @@ type
   PPollAsyncConnections = ^TPollAsyncConnections;
 
   /// possible options for low-level TPollAsyncSockets process
-  // - as translated from homonymous high-level acoWritePollOnly
-  // TAsyncConnectionsOptions item
+  // - as translated from homonymous high-level acoWritePollOnly/acoWriteNoLoop
+  // TAsyncConnectionsOptions items
+  // - paoWritePollOnly will delay TPollAsyncSockets.Write() sending to the
+  // poll/epoll/iocp subscription pool
+  // - paoWriteNoLoop will disable socket send() loop until short-write occurs
   TPollAsyncSocketsOptions = set of (
-    paoWritePollOnly
+    paoWritePollOnly,
+    paoWriteNoLoop
   );
 
   /// callback prototype for TPollAsyncSockets.OnStart events
@@ -528,7 +532,8 @@ type
   // unless acoOnErrorContinue is defined
   // - acoNoLogRead and acoNoLogWrite could reduce the log verbosity
   // - acoVerboseLog will log transmitted frames content, for debugging purposes
-  // - acoWritePollOnly will be translated into paoWritePollOnly on server
+  // - acoWritePollOnly and acoWriteNoLoop will be translated into
+  // paoWritePollOnly/paoWriteNoLoop raw async TPollAsyncSockets options
   // - acoDebugReadWriteLog would make low-level send/receive logging
   // - acoNoConnectionTrack would force to by-pass the internal Connections list
   // if it is not needed - not used by now
@@ -554,7 +559,8 @@ type
     acoThreadCpuAffinity,
     acoThreadSocketAffinity,
     acoReusePort,
-    acoThreadSmooting
+    acoThreadSmooting,
+    acoWriteNoLoop
   );
 
   /// dynamic array of TAsyncConnectionsThread instances
@@ -2351,44 +2357,50 @@ begin
     if connection.TryLock({writer=}true) then // no need to wait
     {$endif USE_WINIOCP}
     try
-      buflen := connection.fWr.Len;
-      if buflen = 0 then
-        exit;
-      buf := connection.fWr.Buffer;
-      if sent > 0 then // e.g. after IOCP wieSend
-      begin
-        inc(connection.fBytesSend, sent);
-        inc(buf, sent);
-        dec(buflen, sent);
-      end;
-      if buflen > 0 then
-      begin
-        w := buflen;
-        if fDebugLog <> nil then
-          QueryPerformanceMicroSeconds(start);
-        if not RawWrite(connection, buf, buflen) then
+      repeat
+        buflen := connection.fWr.Len;
+        if buflen = 0 then
+          exit;
+        buf := connection.fWr.Buffer;
+        if sent > 0 then // e.g. after IOCP wieSend
         begin
-          {$ifndef USE_WINIOCP} // no TWinIocp.PrepareNext() call is enough
-          fWrite.Unsubscribe(connection.fSocket, TPollSocketTag(connection));
-          exclude(connection.fFlags, fSubWrite);
-          {$endif USE_WINIOCP}
-          res := soClose;
-          exit; // socket closed gracefully or unrecoverable error -> abort
+          inc(connection.fBytesSend, sent);
+          inc(buf, sent);
+          dec(buflen, sent);
         end;
-        dec(w, buflen); // buflen = remaining data to send
-        inc(sent, w);   // beforewrite = actually sent by RawWrite()
-        if fDebugLog <> nil then
-          fDebugLog.Add.Log(sllTrace, 'ProcessWrite RawWrite(%)=% sent=% remain=% in % pw=%',
-            [pointer(connection.fSocket), w, sent, buflen,
-             MicroSecFrom(start), fProcessingWrite], self);
-      end
-      else if fDebugLog <> nil then
-        fDebugLog.Add.Log(sllTrace, 'ProcessWrite sent(%)=% pw=%',
-          [pointer(connection.fSocket), sent, fProcessingWrite], self);
-      connection.fWr.Remove(sent); // is very likely to just set fWr.Len := 0
-      if connection.fWr.Len = 0 then
-        // no more data in output buffer - AfterWrite may refill connection.fWr
-        res := DoAfterWrite('ProcessWrite', connection);
+        if buflen > 0 then
+        begin
+          w := buflen;
+          if fDebugLog <> nil then
+            QueryPerformanceMicroSeconds(start);
+          if not RawWrite(connection, buf, buflen) then
+          begin
+            {$ifndef USE_WINIOCP} // no TWinIocp.PrepareNext() call is enough
+            fWrite.Unsubscribe(connection.fSocket, TPollSocketTag(connection));
+            exclude(connection.fFlags, fSubWrite);
+            {$endif USE_WINIOCP}
+            res := soClose;
+            exit; // socket closed gracefully or unrecoverable error -> abort
+          end;
+          dec(w, buflen); // buflen = remaining data to send
+          inc(sent, w);   // beforewrite = actually sent by RawWrite()
+          if fDebugLog <> nil then
+            fDebugLog.Add.Log(sllTrace,
+              'ProcessWrite RawWrite(%)=% sent=% remain=% in % pw=%',
+              [pointer(connection.fSocket), w, sent, buflen,
+               MicroSecFrom(start), fProcessingWrite], self);
+        end
+        else if fDebugLog <> nil then
+          fDebugLog.Add.Log(sllTrace, 'ProcessWrite sent(%)=% pw=%',
+            [pointer(connection.fSocket), sent, fProcessingWrite], self);
+        connection.fWr.Remove(sent); // is very likely to just set fWr.Len := 0
+        if connection.fWr.Len <> 0 then
+          break; // still some data in the output buffer - subscribe for writes
+        sent := 0;
+        res := DoAfterWrite('ProcessWrite', connection); // refill fWr
+      until (paoWriteNoLoop in fOptions) or
+            (res <> soContinue) or
+            (connection.fWr.Len = 0);
       {$ifdef USE_WINIOCP}
       if res = soContinue then
         if not connection.IocpPrepareNextWrite(fIocpRecvSend) then
@@ -2817,6 +2829,8 @@ begin
   opt := [];
   if acoWritePollOnly in aOptions then
     include(opt, paoWritePollOnly);
+  if acoWriteNoLoop in aOptions then
+    include(opt, paoWriteNoLoop);
   fSockets := TAsyncConnectionsSockets.Create(opt, aThreadPoolCount);
   fSockets.fOwner := self;
   fSockets.OnStart := ProcessClientStart;
@@ -4826,8 +4840,8 @@ begin
   end;
   // state = hrsResponseDone: whole headers (+ body) outgoing content were sent
   if acoVerboseLog in fOwner.fOptions then
-    fOwner.DoLog(sllTrace, 'AfterWrite Done ContentLength=% Wr=% Flags=%',
-      [fHttp.ContentLength, fWr.Len, ToText(fHttp.HeaderFlags)], self);
+    fOwner.DoLog(sllTrace, 'AfterWrite Done=% ContentLength=% Wr=% Flags=%',
+      [fRespStatus, fHttp.ContentLength, fWr.Len, ToText(fHttp.HeaderFlags)], self);
   if hfConnectionClose in fHttp.HeaderFlags then
     exit; // return soClose
   // kept alive connection -> reset the HTTP parser and continue
@@ -5605,6 +5619,8 @@ begin // this method is protected by fSafe.Lock
       client.Options^.TLS.IgnoreCertificateErrors := true;
     if Assigned(fSettings.OnRemoteClient) then
       fSettings.OnRemoteClient(self, uri, client.Options^.TLS);
+    if psoLogVerbose in fOwner.fSettings.Server.Options then
+      client.OnLog := TSynLog.DoLog;
   end;
   keepalive := fSettings.HttpKeepAlive * MilliSecsPerSec;
   // always first try with a clean HEAD request
