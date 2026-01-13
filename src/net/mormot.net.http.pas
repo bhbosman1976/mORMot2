@@ -265,7 +265,7 @@ const
   XPOWEREDNAME = 'X-Powered-By';
 
   /// the full text of the current Synopse mORMot framework version
-  // - e.g. 'mORMot 2.3' : won't supply full version number with build revision
+  // - e.g. 'mORMot 2.4' : won't supply full version number with build revision
   // (as SYNOPSE_FRAMEWORK_VERSION), to reduce potential attacker knowledge
   XPOWEREDVALUE = SYNOPSE_FRAMEWORK_NAME + ' 2.' + SYNOPSE_FRAMEWORK_BRANCH;
 
@@ -3070,7 +3070,8 @@ begin
   if P <> nil then
   begin
     result := true;
-    inc(P);
+    if P^ = '?' then
+      inc(P);
     repeat
       if UrlDecodeValue(P, UpperName, Value, @P) then
         exit;
@@ -3085,7 +3086,8 @@ begin
   if P <> nil then
   begin
     result := true;
-    inc(P);
+    if P^ = '?' then
+      inc(P);
     repeat
       if UrlDecodeCardinal(P, UpperName, Value, @P) then
         exit;
@@ -3100,7 +3102,8 @@ begin
   if P <> nil then
   begin
     result := true;
-    inc(P);
+    if P^ = '?' then
+      inc(P);
     repeat
       if UrlDecodeInt64(P, UpperName, Value, @P) then
         exit;
@@ -5388,11 +5391,11 @@ begin
   // caller made fWriterHostSafe.Lock
   fWriterHostMain := THttpLoggerWriter.Create(self, '',
     {error=}false, fSettings.DefaultRotate, fSettings.DefaultRotateFiles);
-  ObjArrayAdd(fWriterHost, fWriterHostMain);
+  PtrArrayAdd(fWriterHost, fWriterHostMain);
   // DefineHost() filters '!' so error.log has a fake name for debugging
   fWriterHostError := THttpLoggerWriter.Create(self, '!error.log!',
     {error=}true, fSettings.DefaultRotate, fSettings.DefaultRotateFiles);
-  ObjArrayAdd(fWriterHost, fWriterHostError);
+  PtrArrayAdd(fWriterHost, fWriterHostError);
 end;
 
 function THttpLogger.GetWriter(Tix32: cardinal;
@@ -5512,7 +5515,7 @@ begin
     if aRotateFiles < 0 then
       aRotateFiles := fSettings.DefaultRotateFiles;
     w := THttpLoggerWriter.Create(self, h, {err=}false, aRotate, aRotateFiles);
-    ObjArrayAdd(fWriterHost, w);
+    PtrArrayAdd(fWriterHost, w);
     include(fFlags, ffHadDefineHost);
   finally
     fWriterHostSafe.UnLock;
@@ -6502,7 +6505,7 @@ constructor THttpAnalyzerPersistAbstract.CreateOwned(aOwner: THttpAnalyzer);
 begin
   Create(''); // Rotate.FileName will be set in OnSave() from fOwner.DestFolder
   fRotate.Trigger := hrtDaily;
-  ObjArrayAdd(aOwner.fPersisters, self);
+  PtrArrayAdd(aOwner.fPersisters, self);
   fOnContinue := aOwner.fOnSave;
   aOwner.fOnSave := OnSave;
   fOwner := aOwner;

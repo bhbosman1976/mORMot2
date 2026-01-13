@@ -2586,6 +2586,9 @@ function StringDynArrayToRawUtf8DynArray(
 procedure StringListToRawUtf8DynArray(Source: TStringList;
   var result: TRawUtf8DynArray);
 
+/// parse UTF-8 lines of text into a TRawUtf8DynArray
+procedure LinesToRawUtf8DynArray(const Lines: RawUtf8; var List: TRawUtf8DynArray);
+
 /// retrieve the index where to insert a PUtf8Char in a sorted PUtf8Char array
 // - R is the last index of available entries in P^ (i.e. Count-1)
 // - string comparison is case-sensitive StrComp (so will work with any PAnsiChar)
@@ -2675,7 +2678,7 @@ procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
 procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
   caseInsensitive: boolean = false); overload;
 
-/// compute the sum of all length(Values^[...))
+/// compute the sum of all length(Values^[0..n-1])
 function SumRawUtf8Length(Values: PRawUtf8; n: integer): TStrLen;
 
 /// sort and remove any duplicated RawUtf8 from Values[]
@@ -4036,7 +4039,7 @@ begin
           result := TSynAnsiFixedWidth.Create(CodePage) // use lookup table
         else
           result := TSynAnsiConvert.Create(CodePage); // use system API
-        ObjArrayAdd(List.Engine, result);
+        PtrArrayAdd(List.Engine, result);
         AddWord(List.CodePage, List.Count, CodePage);
       end
       else
@@ -4198,6 +4201,7 @@ procedure TSynAnsiConvert.UnicodeBufferToAnsiVar(Source: PWideChar;
   SourceChars: cardinal; var Result: RawByteString);
 var
   tmp: TSynTempBuffer;
+  l: PtrInt;
 begin
   if (Source = nil) or
      (SourceChars = 0) then
@@ -4205,8 +4209,8 @@ begin
   else
   begin
     tmp.Init(SourceChars * 3);
-    FastSetStringCP(Result, tmp.buf, UnicodeBufferToAnsi(
-      tmp.buf, Source, SourceChars) - PAnsiChar(tmp.buf), fCodePage);
+    l := UnicodeBufferToAnsi(tmp.buf, Source, SourceChars) - PAnsiChar(tmp.buf);
+    FastSetStringCP(Result, tmp.buf, l, fCodePage);
     tmp.Done;
   end;
 end;
@@ -4411,6 +4415,7 @@ const
 constructor TSynAnsiFixedWidth.Create(aCodePage: cardinal);
 var
   i, len, c: PtrInt;
+  w: PByteArray; // FPC arm32 prefers a local variable even at -O2 :(
   a: array[0..255] of AnsiChar;
   u: array[0..255] of WideChar;
 begin
@@ -4447,14 +4452,15 @@ begin
     MoveFast(u[0], fAnsiToWide[0], 512);
   end;
   SetLength(fWideToAnsi, 65536);
+  w := pointer(fWideToAnsi);
   for i := 1 to 126 do
-    fWideToAnsi[i] := i;
-  FillcharFast(fWideToAnsi[127], 65536 - 127, ord('?')); // '?' for unknown char
+    w[i] := i;
+  FillcharFast(w^[127], 65536 - 127, ord('?')); // '?' for unknown char
   for i := 127 to 255 do
   begin
     c := fAnsiToWide[i];
     if c <> 0 then
-      fWideToAnsi[c] := i;
+      w[c] := i;
   end;
   // fixed width Ansi will never be bigger than UTF-8
   fAnsiCharShift := 0;
@@ -9809,6 +9815,34 @@ begin
   SetLength(Result, Source.Count);
   for i := 0 to Source.Count - 1 do
     StringToUtf8(Source[i], Result[i]);
+end;
+
+procedure LinesToRawUtf8DynArray(const Lines: RawUtf8; var List: TRawUtf8DynArray);
+var
+  p, pend: PUtf8Char;
+  n, l: PtrInt;
+begin
+  List := nil;
+  p := pointer(Lines);
+  if p = nil then
+    exit;
+  pend := p + {%H-}PStrLen(PtrUInt(Lines) - _STRLEN)^;
+  n := 0;
+  repeat
+    l := BufferLineLength(p, pend); // may use SSE2
+    if l <> 0 then
+    begin
+      if length(List) = n then
+        SetLength(List, NextGrow(n));
+      FastSetString(List[n], p, l);
+      inc(n);
+      inc(p, l);
+    end;
+    while p^ in [#10, #13] do
+      inc(p);
+  until p >= pend;
+  if List <> nil then
+    DynArrayFakeLength(List, n);
 end;
 
 function FastLocatePUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char): PtrInt;

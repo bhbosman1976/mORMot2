@@ -1125,6 +1125,7 @@ begin
   if aServiceClass = nil then
     aServiceClass := TSynAngelizeService;
   fServiceClass := aServiceClass;
+  fAfterCreateLog := aLog;
   inherited Create(TSynAngelizeSettings,
     aWorkFolder, aSettingsFolder, aLogFolder, aSettingsExt, aSettingsName,
     aSettingsOptions, aSectionName);
@@ -1414,7 +1415,7 @@ type
     aaHttp,
     aaHttps,
     aaSleep,
-    aaService
+    aaService // Windows only by definition
   );
   TAglActions = set of TAglAction;
   TAglActionDynArray = array of TAglAction;
@@ -1496,8 +1497,8 @@ begin
   if not ToInteger(SplitRight(Param, '=', @p), expectedstatus) or
      (p = '') then
   begin
+    expectedstatus := -1; // mark <0 as "not set" to use default
     p := Param; // was not a valid "http:...=200" input
-    expectedstatus := 0; // e.g. executable file exitcode = 0 as success
   end;
   if p = '' then
     p := Service.Run; // "exec" = "exec:%run%" (exename or servicename)
@@ -1506,11 +1507,18 @@ begin
     aaWait,
     aaStart,
     aaStop:
-      fn := NormalizeFileName(Utf8ToString(p));
+      begin
+        fn := NormalizeFileName(Utf8ToString(p));
+        if expectedstatus < 0 then
+          expectedstatus := 0; // default executable file exitcode
+      end;
     aaHttp,
     aaHttps:
-      if expectedstatus = 0 then // not overriden by ToInteger()
-        expectedstatus := HTTP_SUCCESS;
+      if expectedstatus < 0 then
+        expectedstatus := HTTP_SUCCESS; // default response is 200
+    aaService: // Windows only by definition
+      if expectedstatus < 0 then
+        expectedstatus := ord(ssRunning); // = 4
   end;
   result := false;
   Status := 0;
@@ -1618,9 +1626,17 @@ begin
               sc.Start([]);
             acDoStop:
               sc.Stop;
+            acDoWatch:
+              begin
+                status := ord(sc.State);
+                // e.g. notinstalled=0 stopped=1 running=4 failed=8
+                if (status <> expectedstatus) and
+                   (status <> ord(ssErrorRetrievingState)) then
+                  StatusFailed;
+              end;
           end;
-          Service.SetState(sc.State,
-            'As Windows Service "%"', [p], {resetmessage=}true);
+          Service.SetState(sc.State, // current state (acDoWatch may restart)
+            'Windows Service "%"', [p], {resetmessage=}true);
         finally
           sc.Free;
         end;

@@ -209,16 +209,15 @@ const
     'u_getDataDirectory',
     'u_setDataDirectory',
     'u_init');
+  ICU_MAX = 80; // latest ICU 78 was released 2025-10-30
   {$ifdef OSANDROID}
   // https://developer.android.com/guide/topics/resources/internationalization
-  ICU_VER: array[1..15] of string = (
+  ICU_VER: array[1..18] of string = (
     '_3_8', '_4_2', '_44', '_46', '_48', '_50', '_51', '_53', '_55',
-    '_56', '_58', '_60', '_63', '_66', '_68');
-  ICU_MAX = 80;
-  ICU_MIN = 69; // previous versions are known and listed within ICU_VER[]
+    '_56', '_58', '_60', '_63', '_66', '_68', '_70', '_72', '_75');
+  ICU_MIN = 76; // previous versions are known and listed within ICU_VER[]
   SYSDATA: PAnsiChar = '/system/usr/icu';
   {$else}
-  ICU_MAX = 80;
   ICU_MIN = 44;
   SYSDATA: PAnsiChar = '';
   {$endif OSANDROID}
@@ -235,7 +234,7 @@ begin
   GlobalLock;
   try
     if fLoaded then
-      exit;
+      exit; // try once
     fLoaded := true;
     fSharedCount := 0;
     if LibName <> '' then
@@ -299,7 +298,7 @@ begin
     else
     begin
       {$ifdef OSANDROID}
-      for i := high(ICU_VER) downto 1 do
+      for i := high(ICU_VER) downto 1 do // only check official version numbers
       begin
         if dlsym(icu, pointer(NAMES[0] + ICU_VER[i])) <> nil then
         begin
@@ -4686,16 +4685,15 @@ begin
   result := '';
 end;
 
-{$ifdef CPUARM}
-const getpagesize = 4096; // ARM32 does not seem to have getpagesize in clib :(
+{$ifdef CPU32}
+const getpagesize = 4096; // ARM32/i386 have no getpagesize in clib :(
 {$else}
 // we used to hardcode this to 4096 on Android, but Android 15 uses 16KB
 function getpagesize: integer; cdecl external clib name 'getpagesize';
-{$endif CPUARM}
+{$endif CPU32}
 
 {$else}
-function getpagesize: integer;
-  cdecl external clib name 'getpagesize';
+function getpagesize: integer; cdecl external clib name 'getpagesize';
 {$endif OSANDROID}
 
 {$ifdef OSLINUX}
@@ -4709,7 +4707,7 @@ var
   rel, dist: RawUtf8;
 begin
   rel := UpperCase(release);
-  for distrib := osArch to high(distrib) do
+  for distrib := osArch to pred(osAndroid) do
   begin
     dist := UpperCase(OS_NAME[distrib]);
     if PosEx(dist, rel) > 0 then
@@ -4949,7 +4947,7 @@ var
   {$else}
   cache, cpuinfo: PUtf8Char;
   release: RawUtf8;
-  procid, phyid, phyndx: integer;
+  procid, phyid, phyndx, cacheshr: integer;
   phy: TIntegerDynArray;
   auxv: PPtrUInt;
   {$ifdef OSLINUX}
@@ -5154,18 +5152,31 @@ begin
       inc(cache);
     case upcase(cache^) of
       'K':
-        CpuCacheSize := CpuCacheSize shl 10;
+        cacheshr := 10;
       'M':
-        CpuCacheSize := CpuCacheSize shl 20;
+        cacheshr := 20;
       'G':
-        CpuCacheSize := CpuCacheSize shl 30;
+        cacheshr := 30;
+    else
+      cacheshr := 0;
     end;
+    CpuCacheSize := CpuCacheSize shl cacheshr;
   end;
   SystemInfo.release := release;
   {$endif OSBSDDARWIN}
   SystemInfo.dwPageSize := getpagesize; // call libc API
   if CpuCacheSize <> 0 then
+  begin
     _fmt('[%s]', [KBNoSpace(CpuCacheSize)], CpuInfoText);
+    {$ifdef CPUINTEL}
+    with CpuCache[3] do // rough guess without /sys/devices/system/cpu/* lookup
+      if Count = 0 then
+      begin
+        Count := 1;
+        Size := CpuCacheSize;
+      end;
+    {$endif CPUINTEL}
+  end;
   if CpuSockets = 0 then
     CpuSockets := 1;
   if fpuname(uts) < 0 then
@@ -5306,7 +5317,7 @@ begin
   while auxv[0] <> 0 do
   begin
     if auxv[0] = 25 then // AT_RANDOM: 16 random bytes (used for stacks canary)
-      with SystemEntropy do
+      with SystemEntropy do // should be available from 2.6.29 on glibc
       begin
         LiveFeed := PHash128Rec(auxv[1])^; // great initial source from Kernel
         XorMemory(Startup, PHash128Rec(auxv[1])^); // won't hurt
@@ -5315,6 +5326,7 @@ begin
   end;
   crc32c128(@SystemEntropy.Startup, P, PAnsiChar(auxv) - P); // all auxv info
   {$endif OSLINUXANDROID}
+  // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
 end;
 
 procedure FinalizeSpecificUnit;

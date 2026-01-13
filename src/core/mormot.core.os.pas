@@ -477,8 +477,8 @@ const
     '13 Ventura',
     '14 Sonoma',
     '15 Sequoia',
-    '26 Tahoe',
-    '27 Next');
+    '26 Tahoe', // last ARM+Intel suport
+    '27 Next'); // expected in 2026, ARM-only
 
   /// the recognized Windows versions, as plain text
   // - defined even outside OSWINDOWS to allow process e.g. from monitoring tools
@@ -4909,7 +4909,7 @@ procedure MakeRandomGuid(u: PHash128);
 /// check if the supplied UUid value was randomly-generated according to RFC 4122
 function IsRandomGuid(u: PHash128): boolean;
 
-/// seed the global gsl_rng_taus2 Random32/RandomBytes generator
+/// re-seed the global gsl_rng_taus2 Random32/RandomBytes generator
 // - use XorEntropy() and optional entropy/entropylen as derivation source
 procedure Random32Seed(entropy: pointer = nil; entropylen: PtrInt = 0);
 
@@ -8932,6 +8932,7 @@ end;
 procedure InitializeProcessInfo; // called once at startup
 var
   dt: TDateTime;
+  rnd: PBlock128;
 begin
   TrimDualSpaces(OSVersionText); // clean InitializeSpecificUnit info
   TrimDualSpaces(OSVersionInfoEx);
@@ -8974,10 +8975,13 @@ begin
     Command.Parse;
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
-  // finalize SystemEntropy.Startup
-  crcblocks(@SystemEntropy.Startup, @BaseEntropy, 512 div 128); // cpuid+rdrand+rdtsc
-  crcblock(@SystemEntropy.Startup, @Executable.Hash);
-  crcblocks(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache) div SizeOf(THash128));
+  // finalize SystemEntropy.Startup and setup SharedRandom instance
+  rnd := @SystemEntropy.Startup;
+  crcblocks(rnd, @BaseEntropy, SizeOf(BaseEntropy) shr 4); // cpuid+rdrand+rdtsc
+  PBlock128(@SharedRandom.Generator)^ := rnd^;
+  SharedRandom.Generator.SeedGenerator; // we have enough entropy yet
+  crcblock(rnd, @Executable.Hash);
+  crcblocks(rnd, @CpuCache, SizeOf(CpuCache) div SizeOf(THash128));
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -10164,9 +10168,12 @@ const
   SpinFactor = 2; // ARM yield has smaller latency than Intel's pause
 
 // "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
+// - but our FPC arm32 asm seems not knowledgable of this
 procedure DoPause; assembler; nostackframe;
 asm
+     {$ifdef CPUARMYIELD}
      yield // a few cycles, but helps modern CPU adjust their power requirements
+     {$endif CPUARMYIELD}
 end;
 {$endif FPC_CPUARM}
 

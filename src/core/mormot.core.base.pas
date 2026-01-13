@@ -56,10 +56,10 @@ const
   // - specific branches may have prefixes, e.g. 'lts-2.3.#'
   SYNOPSE_FRAMEWORK_VERSION = {$I ..\mormot.commit.inc};
 
-  /// the corresponding branch of the mORMot framework, e.g. as '3' for 2.3 trunk
+  /// the corresponding branch of the mORMot framework, e.g. as '4' for 2.4 trunk
   // - as used by DefaultUserAgent() in mormot.net.client as 'mORMot) HCS/#'
   // - for a client application, the branch main revision is safe and meaningful
-  SYNOPSE_FRAMEWORK_BRANCH = '3';
+  SYNOPSE_FRAMEWORK_BRANCH = '4';
 
   /// a text including the version and the main active conditional options
   // - usefull for low-level debugging purpose
@@ -96,7 +96,7 @@ const
   // - TJsonWriter.AddAnyAnsiBuffer will recognize it and use Base-64 encoding
   CP_RAWBLOB = 65534;
 
-  /// US English Windows Code Page, i.e. WinAnsi standard character encoding
+  /// US English Windows Code Page, i.e. WinAnsi/Western character encoding
   CP_WINANSI = 1252;
 
   /// Latin-1 ISO/IEC 8859-1 Code Page
@@ -3276,7 +3276,7 @@ var StrLen: function(S: pointer): PtrInt = StrLenSafe;
 /// our fast version of StrLen(), to be used with PWideChar
 function StrLenW(S: PWideChar): PtrInt;
 
-/// fast go to next text line, ended by #13 or #13#10
+/// fast go to next text line, ended by #10 or #13#10
 // - source is expected to be not nil
 // - returns the beginning of next line, or nil if source^=#0 was reached
 function GotoNextLine(source: PUtf8Char): PUtf8Char;
@@ -3818,7 +3818,7 @@ var
   // check for data integrity
   crcblock: procedure(crc128, data128: PBlock128)  = crcblockfast;
 
-  /// compute a proprietary 128-bit CRC of 128-bit binary buffers
+  /// compute a proprietary 128-bit CRC of 128-bit / 16-bytes binary buffers
   // - apply four crc32c() calls on the 128-bit input chunks, into a 128-bit crc
   // - its output won't match crc128c() value, which works on 8-bit input
   // - will use SSE 4.2 or ARMv8 hardware accelerated instruction, if available
@@ -4031,6 +4031,13 @@ procedure DynArrayHashTableAdjust(P: PIntegerArray; deleted: integer; count: Ptr
 
 /// DynArrayHashTableAdjust() version for 16-bit HashTable[] - SSE2 asm on x86_64
 procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: PtrInt);
+
+/// simple symmetric obfuscation scheme using a 32-bit key and crc32c lookup tables
+// - used e.g. by TObjectWithPassword and mormot.db.proxy from mormot.crypt.secure
+//  to obfuscate password or content - so it is not a real encryption
+// - fast, but not cryptographically secure, since naively xor data bytes with
+// crc32ctab[]: consider using mormot.crypt.core proven algorithms instead
+procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
 
 
 { ************ Efficient Variant Values Conversion }
@@ -9890,13 +9897,13 @@ label
   _0, _1, _2, _3; // ugly but faster
 begin
   repeat
-    if source[0] < #13 then
+    if source[0] <= #10 then
       goto _0
-    else if source[1] < #13 then
+    else if source[1] <= #10 then
       goto _1
-    else if source[2] < #13 then
+    else if source[2] <= #10 then
       goto _2
-    else if source[3] < #13 then
+    else if source[3] <= #10 then
       goto _3
     else
     begin
@@ -11154,7 +11161,7 @@ begin
         AT_HWCAP2:
           caps[1] := p[1];
         AT_RANDOM: // 16 random bytes (used as stacks canaries) are just perfect
-          XorMemory(BaseEntropy.r[3], PHash128Rec(p[1])^);
+          XorMemory(BaseEntropy.r[3], PHash128Rec(p[1])^); // 2.6.29 + glibc
       end;
       inc(e^, ((p[0] shl 20) xor p[1]) * 3266489917); // fill BaseEntropy
       inc(e);
@@ -11965,6 +11972,31 @@ begin
     end;
   end;
   result := PAnsiChar(dst) - dststart;
+end;
+
+procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
+var
+  i, len: integer;
+  d: PCardinal;
+  tab: PCrc32tab;
+begin
+  if data = '' then
+    exit; // nothing to cypher
+  {$ifdef FPC}
+  UniqueString(data); // @data[1] won't call UniqueString() under FPC :(
+  {$endif FPC}
+  d := @data[1];
+  len := length(data);
+  key := key xor cardinal(len);
+  tab := @crc32ctab; // use first 1KB of this 8KB table generated at startup
+  for i := 0 to (len shr 2) - 1 do
+  begin
+    key := key xor tab[0, (cardinal(i) xor key) and 1023];
+    d^ := d^ xor key; // 32-bit loop
+    inc(d);
+  end;
+  for i := 0 to (len and 3) - 1 do // trailing 1..3 bytes from tab[0, 17..136]
+    PByteArray(d)^[i] := PByteArray(d)^[i] xor key xor tab[0, 17 shl i];
 end;
 
 

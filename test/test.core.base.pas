@@ -36,6 +36,7 @@ uses
   mormot.db.core,
   mormot.orm.base,
   mormot.orm.core,
+  mormot.rest.core,
   mormot.rest.client;
 
 const
@@ -922,6 +923,9 @@ begin
   CheckEqual(FindIniNameValueU(Content, 'NAME 3='), 'value3');
   CheckEqual(FindIniNameValueU(Content, 'NAME4='), 'value 4');
   CheckEqual(FindIniNameValueU(Content, 'NAME4:'), 'value 4');
+  Check(ExistsIniName(pointer(Content), 'NAME='), 'exist1');
+  Check(ExistsIniName(pointer(Content), 'NAME2='), 'exist2');
+  Check(ExistsIniName(pointer(Content), 'NAME 3='), 'exist2');
   Check(ExistsIniNameValue(pointer(Content), 'NAME=', @VUP));
   Check(ExistsIniNameValue(pointer(Content), 'NAME2=', @VUP));
   Check(not ExistsIniNameValue(pointer(Content), 'NAME3=', @VUP));
@@ -1341,7 +1345,8 @@ type
   TDataItems = array of TDataItem;
 
   TRawUtf8DynArray1 = type TRawUtf8DynArray;
-  TRawUtf8DynArray2 = array of RawUtf8;
+  TRawUtf8DynArray2 = array of SpiUtf8;
+  TAnsiStringDynArray = array of AnsiString;
 
 function FVSort(const A, B): integer;
 begin
@@ -1475,6 +1480,8 @@ begin
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray)), 'IsRawUtf8DynArray1');
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray1)), 'IsRawUtf8DynArray11');
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray2)), 'IsRawUtf8DynArray12');
+  Check(not IsRawUtf8DynArray(TypeInfo(TRawByteStringDynArray)), 'TRawByteStringDynArray');
+  Check(not IsRawUtf8DynArray(TypeInfo(TAnsiStringDynArray)), 'TAnsiStringDynArray');
   Check(not IsRawUtf8DynArray(TypeInfo(TAmount)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TIntegerDynArray)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TPointerDynArray)), 'IsRawUtf8DynArray3');
@@ -2478,6 +2485,29 @@ type
     Enum: TEnum;
   end;
 
+  TTipoUsuario = (ti0, ti1, ti2);
+
+  TUsuario = class(TAuthUser)
+   protected
+     FTipo: TTipoUsuario;
+     FEmpresaID: TID;
+     FIdExterno: TNullableInteger;
+   public
+     function IdExternoEquals(const value: variant): boolean;
+   published
+     property Tipo: TTipoUsuario read FTipo write FTipo;
+     property EmpresaID: TID read FEmpresaID write FEmpresaID;
+     property IdExterno: TNullableInteger read FIdExterno write FIdExterno;
+   end;
+
+   TDTOUsuario = packed record
+     ID: Int64;
+     IdExterno: variant;
+     Email: RawUtf8;
+     Nome: RawUtf8;
+     Cpf: RawUtf8;
+   end;
+
 function TPeople2.GetEnum: TEnum;
 begin
   result := fEnum;
@@ -2486,6 +2516,11 @@ end;
 procedure TPeople2.SetEnum(const Value: TEnum);
 begin
   fEnum := Value;
+end;
+
+function TUsuario.IdExternoEquals(const value: variant): boolean;
+begin // circumvent weird FPC compiler issue with variant sub types
+  result := VariantCompare(PVariant(@FIdExterno)^, value) = 0;
 end;
 
 procedure TTestCoreBase._Records;
@@ -2502,6 +2537,8 @@ var
   err, err2: string;
   oa: TOrmPeopleObjArray;
   pa: array of TRecordPeople;
+  ua: TUsuario;
+  ub: TDTOUsuario;
 begin
   // FillZeroRtti()
   CheckEqual(lic.CustomerName, '', 'c1');
@@ -2627,9 +2664,11 @@ begin
     o2.Enum := e4;
     {$ifndef HASEXTRECORDRTTI} // oldest Delphi or FPC
     Rtti.RegisterType(TypeInfo(TEnum));
-    Rtti.RegisterFromText(TypeInfo(TPeopleR),
-      'LastName,FirstName:RawUtf8 YearOfBirth,Unused:integer Enum:TEnum');
+    if not RecordHasFields(TypeInfo(TPeopleR)) then
+      Rtti.RegisterFromText(TypeInfo(TPeopleR),
+        'LastName,FirstName:RawUtf8 YearOfBirth,Unused:integer Enum:TEnum');
     {$endif HASEXTRECORDRTTI}
+    Check(RecordHasFields(TypeInfo(TPeopleR)), 'RecordHasFields');
     r.YearOfBirth := -1;
     CheckEqual(r.YearOfBirth, -1);
     RecordZero(@r, TypeInfo(TPeopleR));
@@ -2772,6 +2811,27 @@ begin
   CheckEqual(oa[0].FirstName, p.FirstName);
   CheckEqual(m.Compare(oa[0], @pa[0]), 0, 'array1');
   ObjArrayClear(oa);
+  //  A:TDTOUsuario B:TUsuario with TNullableInteger
+  Rtti.RegisterFromText(TypeInfo(TDTOUsuario),
+    'ID:Int64 IdExterno:variant Email,Nome,Cpf:RawUtf8');
+  m.Init(TUsuario, TypeInfo(TDTOUsuario)).AutoMap
+   .Map([
+     'DisplayName', 'Nome',
+     'LogonName',   'Email'
+  ]);
+  ua := TUsuario.Create;
+  try
+    m.RandomA(ua);
+    Check(m.Compare(ua, @ub) <> 0, 'ua0');
+    m.ToA(ua, @ub);
+    Check(ua.IdExternoEquals(ub.IdExterno));
+    Check(m.Compare(ua, @ub) = 0, 'ua1');
+    ub.IdExterno := 10;
+    m.ToA(ua, @ub);
+    Check(ua.IdExternoEquals(10));
+  finally
+    ua.Free;
+  end;
   // TRttiFilter validation with p record
   fr := TRttiFilter.Create(TypeInfo(TRecordPeople));
   try
@@ -5401,7 +5461,7 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
 var
   i, j, k, len, len120, lenup100, CP, L, lcid: integer;
   bak, bakj: AnsiChar;
-  W: WinAnsiString;
+  W, W2: WinAnsiString;
   WS: WideString;
   SU, SU2: SynUnicode;
   WU: array[0..3] of WideChar;
@@ -5816,6 +5876,20 @@ begin
   Check(RawUtf8DynArrayContains(arr, arr2, {insens=}true), 'RawUtf8DynArrayContains5i');
   Check(not RawUtf8DynArraySame(arr, arr2), 'RawUtf8DynArraySame5');
   Check(not RawUtf8DynArraySame(arr, arr2, true), 'RawUtf8DynArraySame5i');
+  LinesToRawUtf8DynArray('', arr);
+  CheckEqual(length(arr), 0);
+  LinesToRawUtf8DynArray('one', arr);
+  CheckEqual(length(arr), 1);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'one');
+  LinesToRawUtf8DynArray('first'#13#10#13#10'one', arr);
+  CheckEqual(length(arr), 2);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'first,one');
+  LinesToRawUtf8DynArray('first'#13#10#13#10'one'#10'two'#10#13#10, arr);
+  CheckEqual(length(arr), 3);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'first,one,two');
+  LinesToRawUtf8DynArray(#13#10'one'#13#10, arr);
+  CheckEqual(length(arr), 1);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'one');
   CheckEqual(Join([]), '');
   CheckEqual(Join(['one']), 'one');
   CheckEqual(Join(['one', 'two']), 'onetwo');
@@ -6051,6 +6125,7 @@ begin
   for i := 0 to 1000 do
   begin
     len := i * 5;
+    // test encodings on ASCII 7-bit content
     W := RandomAnsi7(len, CP_WINANSI);
     CheckEqual(length(W), len);
     lenup100 := len;
@@ -6089,12 +6164,12 @@ begin
     Test(949, W);
     Test(874, W);
     Test(CP_UTF8, W); // note: CP_UTF16 is not a true ANSI charset for Test()
-    L := Length(W);
-    if L and 1 <> 0 then
-      SetLength(W, L - 1); // force exact UTF-16 buffer length
+    // test WinAnsi/CP1252 encoding with proper accents support
     W := RandomWinAnsi(len);
-    Check(length(W) = len);
-    U := WinAnsiToUtf8(W);
+    if CheckEqual(length(W), len, 'len') then
+      for j := 1 to len do
+        Check(W[j] >= ' ', '#32');
+    U := WinAnsiToUtf8(W);  // ConsoleWrite(U);
     Check(length(U) >= len);
     check(IsValidUtf8(U), 'IsValidUtf8');
     P := UniqueRawUtf8(U);
@@ -6180,15 +6255,20 @@ begin
     json2 := JsonReformat(json1, jsonNoEscapeUnicode);
     CheckEqual(json2, json, 'jeu2');
     Unic := Utf8DecodeToUnicodeRawByteString(U);
-    CheckEqual(Utf8ToWinAnsi(U), W);
+    CheckEqual(Utf8ToWinAnsi(U), W, 'ua');
     WinAnsiConvert.AnsiToUtf8(W, U1);
-    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W);
-    CheckEqual(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)), W);
+    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W, 'uw');
+    SU := WinAnsiConvert.AnsiToUnicodeString(W);
+    W2 := WinAnsiConvert.UnicodeStringToAnsi(SU);
+    //ConsoleWrite(['SU len=', length(SU), ' =', SU]); ConsoleWrite(['W2 len=', length(W2), ' =', W2]); readln;
+    CheckEqual(W2, W, 'A2U(U2A)');
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
       CurrentAnsiConvert.AnsiToUtf8(W, U1);
-      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(U1), W);
-      CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)), W);
+      W2 := CurrentAnsiConvert.Utf8ToAnsi(U1);
+      CheckEqual(W2, W, 'u2a(a2u)');
+      SU := CurrentAnsiConvert.AnsiToUnicodeString(W);
+      CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(SU), W, 'U2A(A2U)');
     end;
     res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
     CheckEqual(res, U);
@@ -6263,9 +6343,9 @@ begin
     SetString(Up2, PAnsiChar(pointer(U)), L);
     L := Utf8UpperCopy(pointer(Up), pointer(U), L) - pointer(Up);
     Check(L <= length(U));
-    CheckEqual(ConvertCaseUtf8(pointer(Up2), pointer(Up2), NormToUpperByte), L);
+    CheckEqual(ConvertCaseUtf8(pointer(U), pointer(Up2), NormToUpperByte), L);
     if Up <> '' then
-      Check(EqualBuf(Up, Up2));
+      Check(CompareMem(pointer(Up), pointer(Up2), L));
     if CurrentAnsiConvert.CodePage = CODEPAGE_US then
        // initial text above is WinAnsiString (CP 1252)
       CheckEqual(StringToUtf8(Utf8ToString(U)), U, '1252');

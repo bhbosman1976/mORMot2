@@ -13,6 +13,7 @@ unit mormot.lib.z;
    - Simple Wrapper Functions for Deflate/ZLib Process
 
   FPC Intel-Linux and Win32 use the faster libdeflate for in-memory compression
+  Note: when compiling on i386-linux .so library, define NOLIBDEFLATESTATIC
 
   *****************************************************************************
 
@@ -39,7 +40,11 @@ interface
       {$ifdef OSANDROID}
         {$define ZLIBPAS}  // FPC Android: paszlib (Alf reported problems)
       {$else}
-        {$define ZLIBEXT}  // FPC other POSIX: system's libz.so
+        {$ifdef CPUARM}
+          {$define ZLIBSTATIC} // use our static/arm-linux/libz.a for FPC
+        {$else}
+          {$define ZLIBEXT}  // FPC other POSIX: system's libz.so
+        {$endif CPUARM}
       {$endif OSANDROID}
     {$endif OSWINDOWS}
   {$else not FPC}
@@ -202,7 +207,7 @@ function zlibCompressMax(input: PtrUInt): PtrUInt;
 
 
 const
-  ZLIB_VERSION = '1.2.3';
+  ZLIB_VERSION = '1.2.3'; // conservative API version
 
   // block methods results
   Z_NO_FLUSH      = 0;
@@ -226,11 +231,12 @@ const
   Z_VERSION_ERROR = -6;
 
   // compression levels
-  Z_DEFAULT_COMPRESSION = -1; // documented to match Z_USUAL_COMPRESSION (6)
-  Z_NO_COMPRESSION      = 0;
-  Z_BEST_SPEED          = 1;
-  Z_USUAL_COMPRESSION   = 6;
-  Z_BEST_COMPRESSION    = {$ifdef LIBDEFLATESTATIC} 12 {$else} 9 {$endif};
+  Z_DEFAULT_COMPRESSION   = -1; // documented to match Z_USUAL_COMPRESSION (6)
+  Z_NO_COMPRESSION        = 0;
+  Z_BEST_SPEED            = 1;
+  Z_USUAL_COMPRESSION     = 6;
+  Z_BEST_COMPRESSION      = {$ifdef LIBDEFLATESTATIC} 12 {$else} 9 {$endif};
+  Z_BEST_COMPRESSION_ZLIB = 9; // for zlib stream functions
 
   // compression strategies/algorithms
   Z_DEFAULT_STRATEGY = 0;
@@ -626,6 +632,10 @@ end;
     {$L ..\..\static\x86_64-win64\crc32.o}
   {$endif WIN64}
 
+  {$ifdef CPUARM}
+    {$linklib ../../static/arm-linux/libz.a}
+  {$endif CPUARM}
+
 {$else} // for Delphi Win32 - Delphi 7 has no reliable zlib.pas
 
   {$L ..\..\static\delphi\zlibdeflate.obj}
@@ -781,7 +791,7 @@ begin
   Stream.next_out := dst;
   Stream.avail_out := dstLen;
   {$ifndef ZLIBPAS}
-  Stream.zalloc := @zlibAllocMem; // even under Linux, use program heap
+  Stream.zalloc := @zlibAllocMem; // even under Linux/BSD, use program heap
   Stream.zfree  := @zlibFreeMem;
   {$endif ZLIBPAS}
   Written := 0;
@@ -810,8 +820,8 @@ end;
 
 function TZLib.CompressInit(CompressionLevel: integer; ZlibFormat: boolean): boolean;
 begin
-  if CompressionLevel > Z_BEST_COMPRESSION then
-    CompressionLevel := Z_BEST_COMPRESSION; // libdeflate is up to 12
+  if CompressionLevel > Z_BEST_COMPRESSION_ZLIB then // zlib limit is 9
+    CompressionLevel := Z_BEST_COMPRESSION_ZLIB; // libdeflate is up to 12
   result := deflateInit2_(
     Stream, CompressionLevel, Z_DEFLATED, Z_MAX_BITS[ZLibFormat],
     DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY, ZLIB_VERSION, SizeOf(Stream)) >= 0;
@@ -996,6 +1006,7 @@ begin
   FreeMem(P);
 end;
 
+{$ifndef ZLIBPAS}
 function crc32(crc: TZCRC; buf: pointer; len: cardinal): TZCRC;
 begin
   result := libdeflate_crc32(crc, buf, len);
@@ -1005,6 +1016,7 @@ function adler32(adler: TZCRC; buf: pointer; len: cardinal): TZCRC;
 begin
   result := libdeflate_adler32(adler, buf, len);
 end;
+{$endif ZLIBPAS}
 
 {$endif LIBDEFLATESTATIC}
 
@@ -1222,6 +1234,10 @@ end;
 {$endif LIBDEFLATESTATIC}
 
 initialization
+  (*{$ifdef ZLIBSTATIC} writeln('ZLIBSTATIC'); {$endif}
+  {$ifdef ZLIBPAS} writeln('ZLIBPAS');  {$endif}
+  {$ifdef ZLIBEXT} writeln('ZLIBEXT');  {$endif}
+  {$ifdef LIBDEFLATESTATIC} writeln('LIBDEFLATE'); {$endif}*)
   mormot.core.base.crc32   := @crc;
   mormot.core.base.adler32 := @adler;
 

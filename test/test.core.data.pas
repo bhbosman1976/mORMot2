@@ -114,6 +114,8 @@ uses
   mormot.rest.client,
   mormot.rest.server,
   mormot.net.client,
+  mormot.net.server,
+  mormot.net.async,
   mormot.net.ldap,
   test.core.base;
 
@@ -126,6 +128,7 @@ type
   // defined and implemented in the mormot.core.*.pas units
   TTestCoreProcess = class(TSynTestCase)
   protected
+    procedure Setup; override;
     procedure MustacheTranslate(var English: string);
     procedure MustacheHelper(const Value: variant; out Result: variant);
   published
@@ -422,6 +425,18 @@ end;
 
 
 { TTestCoreProcess }
+
+procedure TTestCoreProcess.Setup;
+var
+  refzip: RawByteString;
+begin
+  // one url to rule them all: avoid github https calls for Mustache + JSON
+  if FileExists(WorkDir + discogsFileName) then
+    exit;
+  refzip := DownloadFile('https://synopse.info/files/process-ref.zip');
+  if not CheckFailed(refzip <> '', 'process-ref') then
+    Check(UnZipMemAll(refzip, WorkDir), 'process-unzip');
+end;
 
 procedure TTestCoreProcess.Variants;
 var
@@ -967,6 +982,7 @@ begin
     JSONPARSER_TOLERANTOPTIONS, []);
   for spec := 0 to High(MUSTACHE_SPECS) do
   begin
+    // may have been downloaded+unzipped from process-ref.zip in Setup
     mustacheJson := DownloadFile(
       'https://raw.githubusercontent.com/mustache/spec/' +
       'master/specs/' + StringToAnsi7(MUSTACHE_SPECS[spec]) + '.json',
@@ -1432,6 +1448,7 @@ type
     property Enum: TSimpleEnum
       read fEnum write SetEnum;
   end;
+  TSimpleExampleObjArray = array of TSimpleExample;
 
 procedure TSimpleExample.SetEnumSet(const Value: TEnumSet);
 begin
@@ -1447,6 +1464,47 @@ procedure TSimpleExample.SetEnum(const Value: TSimpleEnum);
 begin
   fEnum := Value;
 end;
+
+type
+  TPropTest = class(TSynJsonFileSettings)
+  private
+    fProp1: RawUtf8;
+    fProp2: RawUtf8;
+    fSimple: TSimpleExampleObjArray;
+    procedure Setprop1(AValue: RawUtf8);
+    procedure Setprop2(AValue: RawUtf8);
+  published
+    property prop1: RawUtf8
+      read fProp1 write Setprop1;
+    property prop2: RawUtf8
+      read fProp2 write Setprop2;
+    property simple: TSimpleExampleObjArray
+      read fSimple;
+  end;
+
+procedure TPropTest.Setprop1(AValue: rawUtf8);
+begin
+  if fprop1 = AValue then 
+    exit;
+  fprop1 := AValue;
+end;
+
+procedure TPropTest.Setprop2(AValue: rawUtf8);
+begin
+  if fprop2 = AValue then 
+    exit;
+  fprop2 := AValue;
+end;
+
+type
+  TMySettings = class(THttpProxyServerSettings)
+  protected
+    fLines: TRawUtf8DynArray;
+  published
+    // validate custom text lines (e.g. 'name=value') in its own section
+    property Lines: TRawUtf8DynArray
+      read fLines;
+  end;
 
 const
   SIMPLEENUM2TXT: array[TSimpleEnum] of RawUtf8 = (
@@ -1467,9 +1525,6 @@ var
   JA, JA2: TTestCustomJsonArray;
   JAS: TTestCustomJsonArraySimple;
   JAV: TTestCustomJsonArrayVariant;
-  GDtoObject, G2, G3: TDtoObject;
-  GNest: TDtoObject3;
-  owv: TObjectWithVariant;
   Trans: TTestCustomJson2;
   Disco, Disco2: TTestCustomDiscogs;
   Cache: TEntry;
@@ -1482,6 +1537,7 @@ var
   Coll, C2: TCollTst;
   MyItem: TCollTest;
   Comp: TComplexNumber;
+  t: TPropTest;
   DA: TDynArray;
   F: TFV;
   TLNow: TTimeLog;
@@ -1839,10 +1895,14 @@ var
     ab0, ab1: TSubAB;
     cd0, cd1, cd2: TSubCD;
     agg, agg2: TAggregate;
-    X: RawUtf8;
+    X, U, J: RawUtf8;
     AA, AB: TRawUtf8DynArrayDynArray;
     i, a, v: PtrInt;
     mix1: TTestCustomJsonMixed;
+    ps: TMySettings;
+    GDtoObject, G2, G3: TDtoObject;
+    GNest: TDtoObject3;
+    owv: TObjectWithVariant;
     {$ifdef HASEXTRECORDRTTI}
     nav, nav2: TConsultaNav;
     nrtti, nrtti2: TNewRtti;
@@ -2017,6 +2077,14 @@ var
     Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
     CheckEqual(length(agg.abArr), 2);
     CheckEqual(agg.abArr[0].a, '2,3');
+    CheckEqual(agg.abArr[0].b, 1);
+    CheckEqual(agg.abArr[1].a, '3');
+    CheckEqual(agg.abArr[1].b, 7);
+    Finalize(agg);
+    U := 'c;b;a'#13#10'5;1;"2;3"'#13#10'6;7;3'#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs), nil, ';'));
+    CheckEqual(length(agg.abArr), 2);
+    CheckEqual(agg.abArr[0].a, '2;3');
     CheckEqual(agg.abArr[0].b, 1);
     CheckEqual(agg.abArr[1].a, '3');
     CheckEqual(agg.abArr[1].b, 7);
@@ -2219,8 +2287,157 @@ var
     Check(IsObjectDefaultOrVoid(GDtoObject));
     Check(IsObjectDefaultOrVoid(G2));
     Check(ObjectEquals(G2, GDtoObject));
+    U := ObjectToIni(G2);
+    CheckHash(U, $79F2E094);
+    U := '[Main]'#10'[NestedObject]'#10'FIeldVariant : [ 1, 2, 3 ]';
+    Check(IniToObject(U, G2));
+    CheckEqual(VariantSaveJson(G2.NestedObject.FieldVariant), '[1,2,3]');
+    U := '[Main]'#10'[NestedObject]'#10'FIeldVariant : [ 1,2, '#10'3]'#10'[dummy]'#10;
+    Check(not IniToObject(U, G2));
+    CheckEqual(VariantSaveJson(G2.NestedObject.FieldVariant), 'null');
+    Check(IniToObject(U, G2, 'Main', nil, 0, [ifClassSection, ifMultiLineJsonArray]));
+    CheckEqual(VariantSaveJson(G2.NestedObject.FieldVariant), '[1,2,3]');
     G2.Free;
     GDtoObject.Free;
+    t := TPropTest.Create;
+    try
+      CheckEqual(t.prop1, '');
+      CheckEqual(t.prop2, '');
+      Check(t.simple = nil);
+      u := '[global]'#13#10'prop1=test'#13#10#13#10 +
+           '[other]'#13#10'prop2=other'#13#10;
+      Check(t.LoadFromJson(u, 'Global'));
+      CheckEqual(t.prop1, 'test');
+      CheckEqual(t.prop2, '');
+      Check(t.simple = nil);
+      ClearObject(t);
+      CheckEqual(t.prop1, '');
+      CheckEqual(t.prop2, '');
+      Check(t.simple = nil);
+      Append(u, '[simple 1]'#13#10'FullName = fn1'#13#10 +
+                '[simples]'#13#10'FullName=fn'#13#10 + // ignored
+                '[simple.two]'#13#10'FullName = fn 2'#13#10);
+      Check(t.LoadFromJson(u, 'Global'));
+      CheckEqual(t.prop1, 'test');
+      CheckEqual(t.prop2, '');
+      if CheckEqual(length(t.simple), 2, 't.simple') then
+      begin
+        Check(t.simple[0].FullName = 'fn1');
+        Check(t.simple[1].FullName = 'fn 2');
+      end;
+    finally
+      t.Free;
+    end;
+    u := '[MemCache]'#13#10 +
+         'MaxSizeKB = 2'#13#10 +
+         'TimeoutSec = 300'#13#10 +
+         #13#10 +
+         '[DiskCache]'#13#10 +
+         'Path = /home/proxycache'#13#10 +
+         #13#10 +
+         '[Url-Debian]'#13#10 +
+         'Methods = get,head'#13#10 +
+         'Source = http://ftp.debian.org'#13#10 +
+         'HttpHeadCacheSec = 60'#13#10 +
+         'HttpKeepAlive = 30'#13#10 +
+         'HttpDirectGetKB = 16'#13#10 +
+         'MemCache.ForceCsv = csv'#13#10 +
+         #13#10 +
+         '[Url-Ubuntu]'#13#10 +
+         'Methods = get, post, "head" '#13#10 +
+         'Source = http://ftp.ubuntu.org'#13#10 +
+         'HttpHeadCacheSec = 160'#13#10 +
+         'HttpKeepAlive = 130'#13#10 +
+         'HttpDirectGetKB = 161'#13#10 +
+         #13#10 +
+         '[UrlIgnored]'#13#10 +
+         'Methods = post'#13#10 +
+         'Source = http://neverused.org'#13#10 +
+         #13#10 +
+         '[Lines]'#13#10 +
+         ''#13#10 +
+         'one=1'#13#10 +
+         ''#13#10 +
+         'two=2'#13#10 +
+         #13#10 +
+         '[Server]'#13#10 +
+         'Port = 809'#13#10 +
+         'ThreadCount = 7'#13#10;
+    for i := 1 to 6 do
+    begin
+      ps := TMySettings.Create;
+      try
+        CheckEqual(ps.Server.Port, '8098');
+        Check(ps.Server.Log.DestMainFile = 'access.log');
+        Check(ps.Server.Log.DestErrorFile = 'error.log');
+        CheckEqual(ps.Server.Log.DefaultRotateFiles, 9);
+        CheckEqual(ps.MemCache.MaxSizeKB, 4);
+        Check(ps.DiskCache.Path = Executable.ProgramFilePath + 'proxycache');
+        CheckEqual(length(ps.Url), 0);
+        CheckEqual(length(ps.Lines), 0);
+        case i of
+          1:
+            j := u +
+              #13#10 +
+              '[Server.Log]'#13#10 +
+              'DestMainFile = access1.log'#13#10 +
+              'DestErrorFile = error1.log'#13#10 +
+              'DefaultRotate = After10MB'#13#10 +
+              'DefaultRotateFiles = 5'#13#10 +
+              #13#10;
+          2:
+            j := u +
+              'Log.DestMainFile = access1.log'#13#10 +
+              'Log.DestErrorFile = error1.log'#13#10 +
+              'Log.DefaultRotate = After10MB'#13#10 +
+              'Log.DefaultRotateFiles = 5';
+        //else writeln(i,'='#10,j);
+        end;
+        if i >= 5 then
+          Check(IniToObject(j, ps, 'Main')) // we need [Main] for URL=[...]
+        else
+          Check(IniToObject(j, ps, ''));
+        CheckEqual(ps.Server.Port, '809');
+        CheckEqual(ps.Server.ThreadCount, 7);
+        Check(ps.Server.Log.DestMainFile = 'access1.log');
+        Check(ps.Server.Log.DestErrorFile = 'error1.log');
+        CheckEqual(ps.Server.Log.DefaultRotateFiles, 5);
+        CheckEqual(ps.MemCache.MaxSizeKB, 2);
+        Check(ps.DiskCache.Path = '/home/proxycache');
+        CheckEqual(length(ps.Lines), 2);
+        CheckEqual(RawUtf8ArrayToCsv(ps.Lines), 'one=1,two=2');
+        if CheckEqual(length(ps.Url), 2) then
+        begin
+          Check(ps.Url[0].Methods = [urmGet, urmHead]);
+          CheckEqual(ps.Url[0].Source, 'http://ftp.debian.org');
+          CheckEqual(ps.Url[0].HttpHeadCacheSec, 60);
+          CheckEqual(ps.Url[0].HttpKeepAlive, 30);
+          CheckEqual(ps.Url[0].HttpDirectGetKB, 16);
+          CheckEqual(ps.Url[0].MemCache.ForceCsv, 'csv');
+          Check(ps.Url[1].Methods = [urmGet, urmHead, urmPost]);
+          CheckEqual(ps.Url[1].Source, 'http://ftp.ubuntu.org');
+          CheckEqual(ps.Url[1].HttpHeadCacheSec, 160);
+          CheckEqual(ps.Url[1].HttpKeepAlive, 130);
+          CheckEqual(ps.Url[1].HttpDirectGetKB, 161);
+          CheckEqual(ps.Url[1].MemCache.ForceCsv, '');
+        end;
+        case i of // validate all possible combination of INI generation
+          2:
+            j := ObjectToIni(ps, '');
+          3:
+            j := ObjectToIni(ps, '', [], 0,
+              [ifClassValue, ifArraySection, ifMultiLineSections]);
+          4:
+            j := ObjectToIni(ps, 'Main', [], 0,
+              [ifClassSection, ifMultiLineSections]);
+          5:
+            j := ObjectToIni(ps, 'Main', [], 0,
+              [ifClassValue, ifMultiLineSections]);
+        end;
+      finally
+        ps.Free;
+      end;
+    end;
 
     owv := TObjectWithVariant.Create;
     J := ObjectToJson(owv);
@@ -3334,11 +3551,13 @@ begin
   Check(JA.D = '1234');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayWithoutF), '');
 
+  // may have been downloaded+unzipped from process-ref.zip in Setup
   discogsJson := DownloadFile(
     'https://api.discogs.com/artists/45/releases?page=1&per_page=100',
     discogsFileName);
   Check(IsValidJson(discogsJson), 'discogsJson');
 
+  // may have been downloaded+unzipped from process-ref.zip in Setup
   zendframeworkJson := DownloadFile(
     'https://api.github.com/users/zendframework/repos',
     zendframeworkFileName);
@@ -4757,6 +4976,22 @@ begin
   d.Merge(d2);
   CheckEqual(d.Json, '{"name":"Mustermann","address":{"city":"Musterstadt",' +
     '"street":"Lindenallee","postal_code":"12345"},"surname":"Max"}');
+  l := DocList([1, 2, 3, DocDict(['a', '1', 'b', 2]), '5']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 5);
+  CheckEqual(l.Json, '[1,2,3,{"a":"1","b":2},"5"]');
+  l := DocList([1, _ObjFast(['a', '1', 'b', 2]), '3']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 3);
+  CheckEqual(l.Json, '[1,{"a":"1","b":2},"3"]');
+  l := DocList([1, 2, 3, '{', 'a', '1', 'b', 2, '}', '5']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 5);
+  CheckEqual(l.Json, '[1,2,3,{"a":"1","b":2},"5"]');
+  l := DocList([1, 2, '{', 'a', '[', ']', '}', '5']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 4);
+  CheckEqual(l.Json, '[1,2,{"a":[]},"5"]');
   // validate IDocList/IDocDict as published properties
   any := TDocAnyTest.Create;
   try
@@ -5928,6 +6163,21 @@ begin
   for i := 1 to a.Count do
     CheckEqual(a.GetValueIndex(ToUtf8(-i)), a.Count - i, 'negative indexes');
   a.Clear;
+  a.InitObject(['a', 1, 'obj', '{', 'o', 2, '}']);
+  CheckEqual(a.ToJson, '{"a":1,"obj":{"o":2}}');
+  a.Clear;
+  a.InitObject(['a', 1, 'obj', '{', 'b', 2, 'c', 'cest', '}', 'd', 0]);
+  CheckEqual(a.ToJson, '{"a":1,"obj":{"b":2,"c":"cest"},"d":0}');
+  a.Clear;
+  a.InitObject(['a', 1, 'obj', '{', 'arr', '[', 0, 1, 2, ']', '}']);
+  CheckEqual(a.ToJson, '{"a":1,"obj":{"arr":[0,1,2]}}');
+  a.Clear;
+  a.InitArray(['a', '{', 'arr', '[', 0, 1, 2, ']', '}', 2]);
+  CheckEqual(a.ToJson, '["a",{"arr":[0,1,2]},2]');
+  a.Clear;
+  a.InitArray(['a', '{', 'arr', '[', 0, 1, ']', '}']);
+  CheckEqual(a.ToJson, '["a",{"arr":[0,1]}]');
+  a.Clear;
   a.Init;
   a.AddObject(['source', 'source0', // not same order as in for loop below
                'id',     0,
@@ -6654,14 +6904,21 @@ begin
   CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
   CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
   Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
-  // CSV to set
+  // CSV (or JSON array) to set
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ''), 0, 'TSetMyEnum0');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'none'), 0, 'TSetMyEnum?');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'enFirst'), 1, 'TSetMyEnum1');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'entwo'), 2, 'TSetMyEnum2');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'two,first'), 3, 'TSetMyEnum3');
-  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '*'), 31, 'TSetMyEnum*');
-  // JSON to set
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '"two","first"'), 3, 'TSetMyEnum4');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '["two","first"]'), 3, 'TSetMyEnum5');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '[ "FIRST" ]'), 1, 'TSetMyEnum6');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'two,"first"'), 3, 'TSetMyEnum7');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '"two" , first'), 3, 'TSetMyEnum8');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '*'), 31, 'TSetMyEnum*1');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '["*"]'), 31, 'TSetMyEnum*2');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ' ONE , *'), 31, 'TSetMyEnum*3');
+  // JSON array to set
   ep := [enTwo];
   CheckEqual(byte(ep), 2);
   tmp := '["enTwo"]';
@@ -6743,6 +7000,7 @@ begin
       Check(GetEnumNameTrimedValue(tmp) = i);
       Check(GetEnumNameTrimedValue(pointer(tmp)) = i);
       Check(GetEnumNameValue(tmp) = i);
+      Check(GetEnumNameValue(QuotedStrJson(tmp)) = i);
       Check(GetEnumNameValue(pointer(tmp)) = i);
       Check(GetEnumNameValue(
         mormot.core.rtti.GetEnumName(TypeInfo(TSynLogLevel), i)^) = i);
@@ -8410,6 +8668,14 @@ end;
 
 {$endif OSWINDOWS}
 
+
+initialization
+  {$ifndef HASDYNARRAYTYPE}
+  Rtti.RegisterObjArray(TypeInfo(TSimpleExampleObjArray), TSimpleExample);
+  {$endif HASDYNARRAYTYPE}
+
+
+finalization
 
 end.
 

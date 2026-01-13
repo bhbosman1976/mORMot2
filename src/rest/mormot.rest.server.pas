@@ -5712,8 +5712,10 @@ end;
 // https://learn.microsoft.com/en-us/previous-versions/ms995330(v=msdn.10)
 
 // note that Negotiate/Kerberos is two-way so a single call is enough
-// (NTLM three-way is deprecated since Windows 11 version 24H2 and Server 2025
-// so was removed from mORMot in August 2025)
+// - NTLM three-way is deprecated since Windows 11 version 24H2 and Server 2025
+// so was removed from mORMot in August 2025, together with multiple roundtrips
+// - probably wrongly in case of credential delegation on the AD - see
+// https://github.com/synopse/mORMot2/issues/407
 
 function TRestServerAuthenticationSspi.Auth(Ctxt: TRestServerUriContext;
   const aUserName: RawUtf8): boolean;
@@ -6374,11 +6376,17 @@ begin
   if fModel.TablesMax < 0 then // before AuthenticationRegister() User+Group add
     fOptions := [rsoNoTableURI, rsoNoInternalState]; // no table/state to send
   if aHandleUserAuthentication then
-    AuthenticationRegister([
-      TRestServerAuthenticationDefault
-      {$ifdef DOMAINRESTAUTH},
-      TRestServerAuthenticationSspi
-      {$endif DOMAINRESTAUTH}]);
+  begin
+    AuthenticationRegister(TRestServerAuthenticationDefault);
+    {$ifdef DOMAINRESTAUTH}
+    // detect mormot.lib.sspi/gssapi unit depending on the OS and availability
+    if InitializeDomainAuth then // avoid ESecurityException at startup
+      AuthenticationRegister(TRestServerAuthenticationSspi)
+    else
+      TSynLog.Add.Log(sllWarning, 'Create: no % available: bypass %',
+        [SECPKGNAMEAPI, TRestServerAuthenticationSspi], self);
+    {$endif DOMAINRESTAUTH}
+  end;
   // initialize TRestServer
   fRootRedirectForbiddenToAuth := Model.Root + '/auth';
   fAssociatedServices := TServicesPublishedInterfacesList.Create(0);

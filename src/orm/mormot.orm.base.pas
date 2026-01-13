@@ -5663,7 +5663,7 @@ end;
 function TOrmPropInfoRttiAnsi.GetHash(Instance: TObject;
   CaseInsensitive: boolean): cardinal;
 var
-  Up: TByteToAnsiChar; // temp stack buffer (no heap allocation)
+  up: TByteToAnsiChar; // temp stack buffer (no heap allocation)
   p, tmp: pointer;
   l: PtrInt;
 begin
@@ -5683,7 +5683,7 @@ begin
     end
     else
     begin
-      p := @Up;
+      p := @up;
       if fEngine.CodePage = CP_WINANSI then
         l := UpperCopyWin255(p, RawUtf8(tmp)) - p
       else
@@ -5973,8 +5973,8 @@ var
 begin
   fPropInfo.GetLongStrProp(Instance, Value);
   if CaseInsensitive then
-    result := DefaultHasher(OrmHashSeed, Up{%H-},
-      UpperCopy255W(Up{%H-}, pointer(Value), length(Value) shr 1) - {%H-}Up)
+    result := DefaultHasher(OrmHashSeed, @Up,
+      UpperCopy255W(@Up, pointer(Value), length(Value) shr 1) - PAnsiChar(@Up))
   else
     result := DefaultHasher(OrmHashSeed, pointer(Value), length(Value));
 end;
@@ -6181,8 +6181,8 @@ var
 begin
   fPropInfo.GetWideStrProp(Instance, Value);
   if CaseInsensitive then
-    result := DefaultHasher(OrmHashSeed, Up{%H-},
-      UpperCopy255W(Up{%H-}, pointer(Value), length(Value)) - {%H-}Up)
+    result := DefaultHasher(OrmHashSeed, @Up,
+      UpperCopy255W(@Up, pointer(Value), length(Value)) - PAnsiChar(@Up))
   else
     result := DefaultHasher(OrmHashSeed, pointer(Value), length(Value) * 2);
 end;
@@ -6286,8 +6286,8 @@ var
 begin
   fPropInfo.GetUnicodeStrProp(Instance, Value);
   if CaseInsensitive then
-    result := DefaultHasher(OrmHashSeed, Up{%H-},
-      UpperCopy255W(Up{%H-}, pointer(Value), length(Value)) - {%H-}Up)
+    result := DefaultHasher(OrmHashSeed, @Up,
+      UpperCopy255W(@Up, pointer(Value), length(Value)) - PAnsiChar(@Up))
   else
     result := DefaultHasher(OrmHashSeed, pointer(Value), length(Value) * 2);
 end;
@@ -11722,7 +11722,7 @@ var
   ptc: TRttiParserComplexType;
 begin
   // in-memory hashing are seeded from random to avoid hash flooding
-  OrmHashSeed := SystemEntropy.Startup.c1;
+  OrmHashSeed := SystemEntropy.Startup.c1; // not the same as mormot.core.data
   // manual set of OrmFieldTypeComp[] which are not exact TUtf8Compare match
   pointer(@OrmFieldTypeComp[oftAnsiText])   := @AnsiIComp;
   pointer(@OrmFieldTypeComp[oftUtf8Custom]) := @AnsiIComp;

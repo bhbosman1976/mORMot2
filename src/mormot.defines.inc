@@ -448,13 +448,14 @@
   {$ifend}
 
   // note: you may remove all unexpected hints by setting in your project options
-  // -vm11047,3187,3123,3124,4055,4079,4081,5023,5024,5027,5028,5036,5037,5058,5059,5060,5089,5090,5091,5092,5093,5094,6018,6058
+  // -vm11047,3187,3123,3124,4055,4079,4081,5023,5024,5027,5028,5036,5037,5058,5059,5060,5066,5089,5090,5091,5092,5093,5094,6018,6058
 
   // disable some no-brainer warnings - let FPC align with Delphi in that matter
   {$WARN 5027 off} // local assigned variable never used
   {$WARN 5036 off} // uninitialized local variable 1
   {$WARN 5037 off} // uninitialized local variable 2
   {$WARN 5059 off} // function result variable does not seem to be initialized
+  {$WARN 5066 off} // symbol is deprecated
   {$WARN 5089 off} // uninitialized managed variables 1
   {$WARN 5090 off} // uninitialized managed variables 2
   {$WARN 5091 off} // uninitialized managed variables 3
@@ -764,7 +765,8 @@
 
   {$define MORMOT22}  // defined since mORMot 2.2 stable
   {$define MORMOT23}  // defined since mORMot 2.3 stable
-  {.$define MORMOT24} // defined since mORMot 2.4 stable
+  {$define MORMOT24}  // defined since mORMot 2.4 stable
+  {.$define MORMOT25} // defined since mORMot 2.5 stable
 
 // -----------
 // -- about pascal code expectations
@@ -861,10 +863,14 @@
   {$ifdef CPUARM}
     {$define CPUARM3264}
     {$define CPUINTELARM}
+    {$ifndef OSANDROID}
+      {$define CPUARMYIELD}
+    {$endif OSANDROID}
   {$endif CPUARM}
   {$ifdef CPUAARCH64}
     {$define CPUARM3264}
     {$define CPUINTELARM}
+    {$define CPUARMYIELD}
   {$endif CPUAARCH64}
   {$ifdef CPU32}
     {$define THREADID32}    // TThreadID = PtrUInt/pointer on pthread
@@ -895,8 +901,8 @@
       {$undef LIZARD_EXTERNALONLY}  // static liblizard.a
     {$endif CPUINTEL}
     {$ifdef CPUARM}
+      {$define LIBDEFLATESTATIC}    // seems stable enough since mORMot 2.4
       {.$undef LIZARD_EXTERNALONLY} // static liblizard.a is not tested
-      {.$define LIBDEFLATESTATIC}   // compiles, but untested
       {.$define LIBQUICKJSSTATIC}   // compiles, but untested
     {$endif CPUARM}
     {$ifdef CPUAARCH64}
@@ -1002,7 +1008,9 @@
 
     // for Android, consider using https://github.com/gcesarmza/curl-android-ios
     // static libraries and force USELIBCURL in the project conditionals
-    {$define LIBCURLSTATIC}
+    {$ifdef CPUARM3264}
+      {$define LIBCURLSTATIC}
+    {$endif CPUARM3264}
 
   {$else}
 

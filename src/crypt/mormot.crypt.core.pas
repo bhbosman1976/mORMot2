@@ -6735,7 +6735,8 @@ begin
     CryptoApiAesProvider := nil;
     if CryptoApi.Available then
     begin
-      if not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil, PROV_RSA_AES, 0) then
+      if not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil,
+              PROV_RSA_AES, CRYPT_VERIFYCONTEXT) then
         if (HRESULT(GetLastError) <> NTE_BAD_KEYSET) or
            not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil,
              PROV_RSA_AES, CRYPT_NEWKEYSET) then
@@ -7678,13 +7679,6 @@ begin
     // 512-bit from _Fill256FromOs + RdRand/Rdtsc + threadid
     XorEntropy(data);
     sha3.Update(@data, SizeOf(data));
-    // opportunity to initialize the shared gsl_rng_taus2 instance if needed
-    if PPtrInt(@SharedRandom.Generator)^ = 0 then // inlined TLecuyer.Seed
-    begin
-      Xor512(@BaseEntropy, @data); // TLecuyer instances forward secrecy
-      DefaultHasher128(@SharedRandom.Generator, @BaseEntropy, SizeOf(BaseEntropy));
-      SharedRandom.Generator.SeedGenerator;
-    end;
     // 512-bit of low-level Operating System entropy from mormot.core.os
     XorOSEntropy(data); // detailed system cpu and memory info + system random
     sha3.Update(@data, SizeOf(data));
@@ -7893,6 +7887,8 @@ begin
     {$ifdef OSWINDOWS}
     // Windows is case insensitive, so mORMot 1 Base64-URI file name may collide
     fn := FormatString('%syn_%', [usrdata, BinToHexLower(@k256, 15)]);
+    if IsWow64Emulation then // inconsistent CryptDataForCurrentUserDPAPI()
+      fn := fn + '_prism';   // another encryption of local key for PRISM
     if not FileExists(fn) then
     begin
       fn64 := FormatString('%_%', [usrdata, BinToBase64uri(@k256, 15)]);

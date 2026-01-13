@@ -171,15 +171,6 @@ type
   end;
 
 
-/// simple symmetric obfuscation scheme using a 32-bit key
-// - used e.g. by TObjectWithPassword and mormot.db.proxy to obfuscate
-// password or content - so it is not a real encryption
-// - fast, but not cryptographically secure, since naively xor data bytes with
-// crc32ctab[]: consider using mormot.crypt.core proven algorithms instead
-procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
-
-
-
 { ***************** Reusable Authentication Classes }
 
 type
@@ -839,8 +830,8 @@ var
   // Sheet, NIST SP 800-63B and RFC 8018, and are higher than "$pbkdf2" passlib
   // - typical values on my Core i5-13500 PC with SHA-NI are Pbkdf2Sha1=68.28ms
   // Pbkdf2Sha256=35.89ms Pbkdf2Sha512=110.55ms and Pbkdf2Sha3=112.58ms
-  // - made as a global variable, since you can adjust those values for your
-  // own purpose, as they are part of the hash text itself
+  // - made as a global variable, since you can adjust/tune those values for your
+  // own purpose, since they are published with the MCF prefix text itself
   MCF_ROUNDS: array[mcfMd5Crypt .. mcfPbkdf2Sha3] of cardinal = (
     1000, 535000, 535000, 600000, 310000, 210000, 200000);
 
@@ -6670,32 +6661,6 @@ end;
 
 
 { ***************** Password-Safe and TSynConnectionDefinition Classes }
-
-procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
-var
-  i, len: integer;
-  d: PCardinal;
-  tab: PCrc32tab;
-begin
-  if data = '' then
-    exit; // nothing to cypher
-  {$ifdef FPC}
-  UniqueString(data); // @data[1] won't call UniqueString() under FPC :(
-  {$endif FPC}
-  d := @data[1];
-  len := length(data);
-  key := key xor cardinal(len);
-  tab := @crc32ctab; // use first 1KB of this 8KB table generated at startup
-  for i := 0 to (len shr 2) - 1 do
-  begin
-    key := key xor tab[0, (cardinal(i) xor key) and 1023];
-    d^ := d^ xor key;
-    inc(d);
-  end;
-  for i := 0 to (len and 3) - 1 do
-    PByteArray(d)^[i] := PByteArray(d)^[i] xor key xor tab[0, 17 shl i];
-end;
-
 
 { TObjectWithPassword }
 

@@ -963,7 +963,13 @@ begin
   case dpapi of
     {$ifdef OSWINDOWS}
     0:
-      func := CryptDataForCurrentUserDPAPI;
+      begin
+        if IsWow64Emulation then // PRISM seems inconsistent about this API
+          exit;
+        func := CryptDataForCurrentUserDPAPI;
+        if OSVersion < wVista then
+          max := 100; // slow API on Windows XP
+      end;
     {$endif OSWINDOWS}
     1:
       func := CryptDataForCurrentUser;
@@ -976,9 +982,9 @@ begin
     exit;
   end;
   enc := func('warmup', 'appsec', true);
-  Check(enc <> '');
+  Check(enc <> '', 'warmup');
   test := func(enc, 'appsec', false);
-  Check(test <> '');
+  Check(test <> '', 'appsec');
   CheckEqual(test, 'warmup');
   size := 0;
   tim.Start;
@@ -988,11 +994,10 @@ begin
     CheckEqual(length(plain), i);
     UInt32ToUtf8(i, appsec);
     enc := func(plain, appsec, true);
-    if not ((plain = '') or
-            (enc <> '')) then
-      enc := func(plain, appsec, true);
     check((plain = '') or
-          (enc <> ''));
+          (enc <> ''), 'not void');
+    check((plain = '') or
+          (enc <> plain), 'enc<>plain');
     check(length(enc) >= length(plain));
     test := func(enc, appsec, false);
     CheckEqual(length(test), i);
@@ -1472,7 +1477,7 @@ begin
   FillCharFast(time, SizeOf(time), 0);
   size := 0;
   n := 0;
-  for s := 0 to high(SIZ) do
+  for s := 0 to high(SIZ) do // up to 10KB of CP1252 text
   begin
     data := RandomWinAnsi(SIZ[s]);
     CheckEqual(length(data), SIZ[s]);
@@ -1769,7 +1774,7 @@ const
     if expected = 0 then
       expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
     else
-      CheckEqual(hash(0, buf, HASHESMAX), expected, 'alignement problem');
+      CheckEqual(Int64(hash(0, buf, HASHESMAX)), Int64(expected), 'hash64');
     for L := 0 to HASHESMAX do
     begin
       c := hash(0, buf, L);
@@ -1780,7 +1785,7 @@ const
         dec(buf[modif]);
         CheckUtf8(c <> c2, 'L=% modif=%', [L, modif]);
       end;
-      CheckEqual(hash(0, buf, L), c, 'after reset');
+      CheckEqual(Int64(hash(0, buf, L)), Int64(c), 'after reset');
     end;
   end;
 
@@ -1910,7 +1915,7 @@ begin
       Hash32Test(P, @AesNiHash32, exp324);
     Hash32Test(P, @crc32fast,     exp325);
     Hash32Test(P, @adler32,       exp326);
-    Hash64Test(P, @crc32cTwice, exp641);
+    Hash64Test(P, @crc32cTwice,   exp641);
     if Assigned(AesNiHash64) then
       Hash64Test(P, @AesNiHash64, exp642);
     Hash128Test(P, @crc32c128);
@@ -1923,7 +1928,7 @@ begin
   CheckEqual(exp325, 3408302637);
   CheckEqual(exp326, 4027950528);
   CheckEqual(adler32fast(0, P, HASHESMAX), exp326);
-  CheckEqual(exp641, -1170836861443089901);
+  CheckEqual(Int64(exp641), -1170836861443089901);
   // verify "Modular Crypt" hashing functions
   u := '$5$rounds=12345$q3hvJE5mn5jKRsW.$BbbYTFiaImz9rTy03GGi.Jf9YY5bmxN0LU3p3uI1iUB';
   Check(ModularCryptIdentify(u) = mcfSha256Crypt);
@@ -2497,8 +2502,8 @@ begin
   Check(Zeroed(UnZeroed('~'#0#0'~~')) = '~'#0#0'~~', 'unz4');
   enc.Init;
   dec.Init;
-  tmp := RandomWinAnsi(1 shl 20);
-  Check(length(tmp) = 1 shl 20);
+  tmp := RandomWinAnsi(1 shl 20); // 1MB of 8-bit random
+  CheckEqual(length(tmp), 1 shl 20);
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
   CheckEqual(length(tmp2), length(tmp));
@@ -2702,7 +2707,7 @@ begin
   SetLength(crypted, MAX + 256);
   st := '1234essai';
   orig := RandomWinAnsi(8000);
-  Check(length(orig) = 8000);
+  CheckEqual(length(orig), 8000);
   PInteger(UniqueRawUtf8(RawUtf8(st)))^ := Random32;
   for noaesni := false to true do
   begin
@@ -3904,7 +3909,7 @@ var
   u: TCryptCertUsage;
   fields: TCryptCertFields;
   cpe: TCryptCertPerUsage;
-  eccpub1, eccpub2: TEccPublicKey;
+  eccpub: TEccPublicKey;
 begin
   timer.Start;
   check(PosEx(UpperCase(CAA_JWT[crt.AsymAlgo]), UpperCase(crt.AlgoName)) > 0);
@@ -3970,7 +3975,7 @@ begin
     if cka = ckaEcc256 then
     begin
       CheckEqual(jwk, c1.JwkCompute);
-      Check(JwkToEcc(jwk, eccpub1));
+      Check(JwkToEcc(jwk, eccpub));
       pub := TCryptPublicKeyEcc.Create;
       x := c1.GetPublicKey;
       Check(pub.Load(cka, x));
