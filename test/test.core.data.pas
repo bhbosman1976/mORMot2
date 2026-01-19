@@ -176,6 +176,7 @@ type
   protected
     Data: RawByteString; // contains the first 1MB of mormot2tests executable
     DataFile: TFileName; // (may be truncated) mormot2tests executable copy
+    Raw10K: RawByteString; // https://github.com/ebiggers/libdeflate/issues/323
     M: TMemoryStream;
     crc0, crc1: cardinal; // crc0=plain crc1=deflated
     ZipFile: TFileName;
@@ -7969,6 +7970,24 @@ end;
 
 { TTestCoreCompression }
 
+procedure MakeHardlyCompressible(p: PByteArray);
+var
+  i: PtrInt;
+  c1, c2: byte;
+begin
+  c1 := $40;
+  c2 := $07;
+  for i := 1 to 10240 shr 1 do
+  begin
+    p[0] := c1;
+    p[1] := c2;
+    inc(c1);
+    if c1 = 0 then
+      inc(c2);
+    p := @p[2];
+  end;
+end;
+
 procedure TTestCoreCompression.Setup;
 begin
   Data := StringFromFile(Executable.ProgramFileName);
@@ -7976,6 +7995,8 @@ begin
     SetLength(Data, 1 shl 20 + 1 shl 10); // no need to compress more than 1.1MB
   DataFile := WorkDir + 'exe.1mb';
   FileFromString(Data, DataFile);
+  MakeHardlyCompressible(FastNewRawByteString(Raw10K, 10240));
+  CheckEqual(Crc32String(Raw10K), $BF4C2F58, 'raw10k');
 end;
 
 procedure TTestCoreCompression.CleanUp;
@@ -7985,7 +8006,7 @@ begin
 end;
 
 const
-  // regression tests use a const table instead of our computed array
+  // regression tests use a const table instead of our runtime-computed array
   crc32tab: array[byte] of cardinal = ($00000000, $77073096, $EE0E612C,
     $990951BA, $076DC419, $706AF48F, $E963A535, $9E6495A3, $0EDB8832, $79DCB8A4,
     $E0D5E91E, $97D2D988, $09B64C2B, $7EB17CBD, $E7B82D07, $90BF1D91, $1DB71064,
@@ -8080,9 +8101,9 @@ begin
     dec(L, n);
   end;
   Check(crc0 = ReferenceCrc32(0, Pointer(Data), length(Data)));
-  Check(crc0 = Z.CRC, 'crc32');
-  Check(crc2 = crc0, 'crc32');
-  Check(crc3 = crc0, 'crc32');
+  Check(crc0 = Z.CRC, '0crc32');
+  Check(crc2 = crc0,  '2crc32');
+  Check(crc3 = crc0,  '3crc32');
   Z.Free;
   Check(GZRead(M.Memory, M.Position) = Data, 'gzread');
   crc1 := crc32(0, M.Memory, M.Position);
@@ -8472,6 +8493,8 @@ procedure TTestCoreCompression._TAlgoCompress;
       Check(s2 <> '');
       Check(algo.Decompress(s2) = t);
     end;
+    s2 := algo.Decompress(algo.Compress(Raw10K));
+    checkUtf8(s2 = Raw10k, 'uncompressible%', [algo]);
     plain := 0;
     comp := 0;
     timecomp := 0;
@@ -8508,22 +8531,21 @@ procedure TTestCoreCompression._TAlgoCompress;
     Check(s2 = s, algo.ClassName);
   end;
 
+var
+  i: PtrInt;
 begin
-  TestAlgo(AlgoSynLZ);
-  TestAlgo(AlgoRleLZ); // don't compress much better, but validate the class
-  TestAlgo(AlgoRle);   // don't compress exe nor log, but validate the class
+  CheckEqual(AlgoSynLZ.AlgoID, COMPRESS_SYNLZ);
+  CheckEqual(AlgoDeflateFast.AlgoID, COMPRESS_DEFLATEFAST);
   Check(AlgoSynLZ.AlgoName = 'synlz');
+  Check(AlgoDeflateFast.AlgoName = 'deflatefast');
   {$ifdef OSWINDOWS}
   if (Lizard = nil) and
      FileExists(Executable.ProgramFilePath + LIZARD_LIB_NAME) then
     Lizard := TSynLizardDynamic.Create;
   {$endif OSWINDOWS}
-  TestAlgo(AlgoLizard);
-  TestAlgo(AlgoLizardFast);
-  TestAlgo(AlgoLizardHuffman);
-  TestAlgo(AlgoDeflate);
-  TestAlgo(AlgoDeflateFast);
-  Check(AlgoDeflateFast.AlgoName = 'deflatefast');
+  // validate all registered compression classes
+  for i := 0 to high(SynCompressAlgos) do
+    TestAlgo(SynCompressAlgos[i]);
 end;
 
 {$ifdef OSWINDOWS}

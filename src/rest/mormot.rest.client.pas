@@ -324,6 +324,15 @@ type
 
   {$endif DOMAINRESTAUTH}
 
+  /// used internally to store one "soa" entry after authentication
+  TRestClientService = packed record
+    Name, ExpectedContract: RawUtf8;
+    Creation: TServiceInstanceImplementation;
+  end;
+  PRestClientService = ^TRestClientService;
+  /// used internally to store "soa" array information after authentication
+  TRestClientServices = array of TRestClientService;
+
   /// store the information about the current session
   // - as set after a successful TRestClientUri.SetUser() method
   TRestClientSession = record
@@ -375,6 +384,8 @@ type
     // 25 minutes matches the default service timeout of 30 minutes
     // - you may set 0 to disable this SOA-level heartbeat feature
     HeartbeatSeconds: integer;
+    /// decoded "soa" array information after authentication
+    Services: TRestClientServices;
   end;
 
 
@@ -580,7 +591,8 @@ type
     fMaximumAuthentificationRetry: integer;
     fRetryOnceOnTimeout: boolean;
     fServiceRoutingSupports: TRestClientSideInvoke;
-    fInternalState: set of (isDestroying, isInAuth, isClientError, needsBearer);
+    fInternalState: set of (
+      isDestroying, isInAuth, isClientError, needsBearer, hasSoa);
     fLastErrorCode: integer;
     fLastErrorMessage: RawUtf8;
     fLastErrorException: ExceptClass;
@@ -835,6 +847,7 @@ type
     property ServiceRoutingSupports: TRestClientSideInvoke
       read fServiceRoutingSupports;
     // internal methods used by mormot.soa.client
+    function ParseSoa(p: PUtf8Char): PRestClientService;
     function FakeCallbackRegister(Sender: TServiceFactory;
       const Method: TInterfaceMethod; const ParamInfo: TInterfaceMethodArgument;
       ParamValue: pointer): TRestClientCallbackID; virtual;
@@ -1229,7 +1242,7 @@ end;
 { TRestClientAuthentication }
 
 const
-  AUTH_N: array[0..11] of PUtf8Char = (
+  AUTH_N: array[0..12] of PUtf8Char = (
     'result',        // 0
     'data',          // 1
     'server',        // 2
@@ -1241,7 +1254,56 @@ const
     'timeout',       // 8
     'algo',          // 9
     'bearer',        // 10
-    'proof');        // 11
+    'proof',         // 11
+    'soa');          // 12
+
+function TRestClientUri.ParseSoa(p: PUtf8Char): PRestClientService;
+var
+  soa: RawUtf8;
+  s: PRestClientService;
+  n: PtrInt;
+begin
+  result := nil;
+  if p = nil then
+  begin
+    // from TServiceFactoryClient.Create before SetUser()
+    if hasSoa in fInternalState then
+      exit; // call GET /stat/soa once
+    include(fInternalState, hasSoa);
+    if (CallBack(mGET, 'stat/soa', '', soa) <> HTTP_SUCCESS) or
+       (soa = '') then
+      exit;
+    p := pointer(soa);
+  end;
+  // manual "soa" array parsing of ["name","contract",sic,...] triplets
+  if p^ <> '[' then
+    exit;
+  n := 0;
+  repeat
+    inc(p); // ignore initial '[' or in-between ','
+    if n = length(fSession.Services) then
+      SetLength(fSession.Services, NextGrow(n));
+    s := @fSession.Services[n];
+    if not GetJsonItemAsRawUtf8(p, s^.Name) then // parse e.g. "Calculator"
+      break;
+    GetJsonItemAsRawJson(p, RawJson(s^.ExpectedContract)); // keep double-quoted
+    if (p = nil) or
+       (p^ < '0') or
+       (p^ > AnsiChar(ord(high(TServiceInstanceImplementation)) + ord('0'))) then
+      break;
+    s^.Creation := TServiceInstanceImplementation(ord(p^) - ord('0'));
+    inc(p); // parsed '0'..'6' char
+    inc(n);
+    if p^ = ']' then
+    begin
+      include(fInternalState, hasSoa);
+      SetLength(fSession.Services, n);
+      result := pointer(fSession.Services);
+      exit;
+    end;
+  until p^ <> ',';
+  fSession.Services := nil; // parsing error
+end;
 
 class function TRestClientAuthentication.ClientGetSessionKey(
   Sender: TRestClientUri; User: TAuthUser;
@@ -1254,7 +1316,7 @@ var
 begin
   if (Sender.CallBackGet('auth', aNameValueParameters, resp,
         nil, 0, @hdr, {nolog=}true) <> HTTP_SUCCESS) or
-     (JsonDecode(pointer({%H-}resp), @AUTH_N, length(AUTH_N), @values) = nil) then
+     (JsonDecode(pointer({%H-}resp), @AUTH_N, length(AUTH_N), @values, true) = nil) then
   begin
     Sender.fSession.Data := ''; // reset temporary 'data' field
     result := ''; // error
@@ -1277,6 +1339,8 @@ begin
     include(Sender.fInternalState, needsBearer);
   if values[11].Text <> nil then
     Sender.fSession.ScramServerProof := values[11].ToUtf8;
+  if values[12].Text <> nil then
+    Sender.ParseSoa(values[12].Text);
   if values[9].Text <> nil then
   begin
     // decode TRestClientAuthenticationSignedUri "algo"
@@ -2935,6 +2999,7 @@ function TRestClientUri.SetUser(const aUserName, aPassword: RawUtf8;
   aHashedPassword: boolean): boolean;
 var
   kind: TRestClientSetUserPassword;
+  dummy: RawUtf8;
 begin
   result := false;
   if self = nil then
@@ -2953,6 +3018,11 @@ begin
     kind := passHashed;
   result := TRestClientAuthenticationDefault.ClientSetUser(self, aUserName,
     aPassword, kind);
+  if result and
+     (ServicePublishOwnInterfaces <> '') and
+     (fSession.Services <> nil) then
+    // we won't call _contract_: notify the server of our client services
+    CallBack(mPOST, 'stat/soa', ServicePublishOwnInterfaces, dummy);
 end;
 
 {$ifndef PUREMORMOT2}

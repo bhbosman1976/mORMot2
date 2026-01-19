@@ -1814,7 +1814,7 @@ type
     /// direct access to the TOrmProperties info of an existing TOrm instance
     // - same as OrmProps, but when we know that PropsCreate is never needed
     function Orm: TOrmProperties;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifndef NOPATCHVMT}{$ifdef HASINLINE}inline;{$endif}{$endif}
     /// the Table name in the database, associated with this TOrm class
     // - 'TSql' or 'TOrm' chars are trimmed at the beginning of the ClassName
     // - or the ClassName is returned as is, if no 'TSql' or 'TOrm' at first
@@ -6258,7 +6258,7 @@ end;
 class function TOrm.OrmProps: TOrmProperties;
 begin
   {$ifdef NOPATCHVMT}
-  result := LastOrmProps;
+  result := LastOrmProps; // atomic shared pointer access
   if (result <> nil) and
      (result.Table = self) then
     exit;
@@ -6282,7 +6282,7 @@ function TOrm.Orm: TOrmProperties;
 begin
   // we know TRttiCustom is in the slot, and PrivateSlot is TOrmProperties
   {$ifdef NOPATCHVMT} // no need of a TOrmProperties field (LastOrmProps is ok)
-  result := LastOrmProps;
+  result := LastOrmProps; // atomic shared pointer access
   if (result <> nil) and
      (result.Table = PClass(self)^) then
     exit;
@@ -8662,48 +8662,48 @@ function TOrm.Validate(const aRest: IRestOrm; const aFields: TFieldBits;
   aInvalidFieldIndex: PInteger; aValidator: PSynValidate): string;
 var
   f, i: PtrInt;
-  Value: RawUtf8;
-  Validate: TSynValidate;
+  value: RawUtf8;
+  validator: TSynValidate;
   valid: boolean;
+  o: TOrmProperties;
 begin
   result := '';
   if (self = nil) or IsZero(aFields) then
     // avoid GPF and handle case if no field was selected
     exit;
-  with Orm do
-    if Filters <> nil then
-      for f := 0 to Fields.Count - 1 do
-        if Fields.List[f].OrmFieldType in COPIABLE_FIELDS then
-        begin
-          for i := 0 to length(Filters[f]) - 1 do
-          begin
-            Validate := TSynValidate(Filters[f, i]);
-            if Validate.InheritsFrom(TSynValidate) then
-            begin
-              if {%H-}Value = '' then
-                Fields.List[f].GetValueVar(self, false, Value, nil);
-              if Validate.InheritsFrom(TSynValidateRest) then
-                valid := TSynValidateRest(Validate).Validate(
-                  f, Value, result, aRest, self)
-              else
-                valid := Validate.Process(f, Value, result);
-              if not valid then
-              begin
-                // TSynValidate process failed -> notify caller
-                if aInvalidFieldIndex <> nil then
-                  aInvalidFieldIndex^ := f;
-                if aValidator <> nil then
-                  aValidator^ := Validate;
-                if result = '' then
-                   // no custom message -> show a default message
-                  result := format(sValidationFailed,
-                    [GetCaptionFromClass(PClass(Validate)^)]);
-                exit;
-              end;
-            end;
-          end;
-          Value := '';
-        end;
+  o := Orm;
+  if o.Filters = nil then
+    exit;
+  for f := 0 to o.Fields.Count - 1 do
+    if o.Fields.List[f].OrmFieldType in COPIABLE_FIELDS then
+    begin
+      for i := 0 to length(o.Filters[f]) - 1 do
+      begin
+        validator := TSynValidate(o.Filters[f, i]); // TSynFilterOrValidate
+        if not validator.InheritsFrom(TSynValidate) then
+          continue;
+        if {%H-}value = '' then // retrieve once per field for all validators
+          o.Fields.List[f].GetValueVar(self, false, value, nil);
+        if validator.InheritsFrom(TSynValidateRest) then
+          valid := TSynValidateRest(validator).Validate(
+            f, value, result, aRest, self)
+        else
+          valid := validator.Process(f, value, result);
+        if valid then
+          continue;
+        // TSynValidate process failed -> notify caller
+        if aInvalidFieldIndex <> nil then
+          aInvalidFieldIndex^ := f;
+        if aValidator <> nil then
+          aValidator^ := validator;
+        if result = '' then
+           // no custom message -> show a default message
+          result := format(sValidationFailed,
+            [GetCaptionFromClass(PClass(validator)^)]);
+        exit;
+      end;
+      value := ''; // next field
+    end;
 end;
 
 function TOrm.Validate(const aRest: IRestOrm; const aFields: array of PUtf8Char;
@@ -9977,7 +9977,7 @@ function TOrmModel.GetTableIndex(aTable: TOrmClass): PtrInt;
 var
   {$ifndef NOPATCHVMT}
   max: integer;
-  Props: TOrmProperties;
+  o: TOrmProperties;
   m: ^TOrmPropertiesModelEntry;
   {$endif NOPATCHVMT}
   c: POrmClass;
@@ -9986,14 +9986,14 @@ begin
      (aTable <> nil) then
   begin
     {$ifndef NOPATCHVMT}
-    Props := aTable.OrmProps;
-    if Props <> nil then
+    o := aTable.OrmProps;
+    if o <> nil then
     begin
-      max := Props.fModelMax;
+      max := o.fModelMax;
       if (max >= 0) and (max <= fTablesMax) then
       begin
         // fastest O(1) search in all registered models (if worth it)
-        m := pointer(Props.fModel);
+        m := pointer(o.fModel);
         repeat
           if m^.Model = self then
           begin

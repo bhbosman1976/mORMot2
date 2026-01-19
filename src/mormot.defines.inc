@@ -919,7 +919,7 @@
         {$define LIBQUICKJSSTATIC}
       {$endif CPUX86}
       {$ifdef CPUX64}
-        {.$define LIBDEFLATESTATIC}   // Win64 + FPC 3.2 = internal error 200603061
+        {.$define LIBDEFLATESTATIC} // seems unstable with some FPC compilers :(
         {$define LIBQUICKJSSTATIC}
       {$endif CPUX64}
     {$else}

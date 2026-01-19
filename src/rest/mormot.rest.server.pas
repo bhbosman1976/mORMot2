@@ -434,6 +434,9 @@ type
     // parameters which may appear
     property InputPairs: TRawUtf8DynArray
       read fInput;
+    /// low-level access to the internal flags, mainly boolean properties aliases
+    property Flags: TRestServerUriContextFlags
+      read fFlags;
 
     /// method overriden to support rsoAuthenticationUriDisable option
     // - i.e. as an alternative, a non-standard and slightly less safe way of
@@ -1007,10 +1010,12 @@ type
   // an external credential check (e.g. via SSPI or Active Directory)
   // - saoFullServerVersion will include the full detailed '1.2.3.4' version of
   // the server executable instead of safer default '1.2' TFileVersion.Main value
+  // - soaNoSoaContract won't include the "soa" value of TServiceContainer.AsSoa
   TRestServerAuthenticationOption = (
     saoUserByLogonOrID,
     saoHandleUnknownLogonAsStar,
-    saoFullServerVersion);
+    saoFullServerVersion,
+    soaNoSoaContract);
 
   /// defines the optional behavior of TRestServerAuthentication class
   TRestServerAuthenticationOptions =
@@ -2365,9 +2370,11 @@ type
     {$endif PUREMORMOT2}
 
     /// main access to the IRestOrmServer methods of this instance
-    // - the Orm: IRestOrm property will publish most needed CRUDbusiness logic,
+    // - the Orm: IRestOrm property will publish most needed CRUD business logic,
     // but this IRestOrmServer interface could be used to properly setup the
     // storage, e.g. via CreateMissingTables() or CreateSqlIndex() methods
+    // - you should NEVER use TRestOrmServer itself, but only IRestOrmServer
+    // interface via this property or IRestOrm via TRest.Orm
     property Server: IRestOrmServer
       read fServer;
     /// set this property to true to transmit the JSON data in a "not expanded" format
@@ -5232,7 +5239,7 @@ var
   body: TDocVariantData;
   vers: string;
 begin
-  body.InitFast(12, dvObject);
+  body.InitFast(13, dvObject);
   if result = '' then
     body.AddValue('result', Session.ID) // no private key
   else
@@ -5266,6 +5273,9 @@ begin
       vers := Executable.Version.Main;
     body.AddValue('version', StringToVariant(vers));
   end;
+  if Assigned(fServer.Services) and
+     not (soaNoSoaContract in fOptions) then
+    body.AddValue('soa', fServer.Services.AsSoa);
   include(Ctxt.fServiceExecutionOptions, optNoLogOutput); // hide sensitive info
   Ctxt.ReturnsJson(variant(body), HTTP_SUCCESS, false, twJsonEscape, false, header);
 end;
@@ -6407,7 +6417,7 @@ begin
   ServiceMethodRegister(
     'cacheflush', CacheFlush, false, [mGET, mPOST]); // for ORM and callbacks
   fPublishedMethodStatIndex := ServiceMethodRegister(
-    'stat', Stat, false, [mGET]);
+    'stat', Stat, false, [mGET, mPOST]);
 end;
 
 var
@@ -7166,7 +7176,6 @@ begin
       r.Setup(sm^.Methods, [n], rnMethod, nil, nil, j);
       r.Setup(sm^.Methods, [n, '/'], rnMethod, nil, nil, j);
       if (j <> fPublishedMethodAuthIndex) and
-         (j <> fPublishedMethodStatIndex) and
          (j <> fPublishedMethodBatchIndex) then
       begin
         // ModelRoot/MethodName/<path:fulluri>
@@ -8048,6 +8057,26 @@ var
   tix: cardinal;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
+  if PropNameEquals(Ctxt.fUriMethodPath, 'soa') then
+  begin
+    case Ctxt.Method of
+      mGET:
+        Ctxt.ReturnsJson(fServices.AsSoa);  // GET /stat/soa from ParseSoa()
+      mPOST:
+        if (Ctxt.Call^.InBody <> '') and
+           (Ctxt.Call^.InBody <> '[]') then // POST /stat/soa from SetUser()
+        begin
+          AssociatedServices.RegisterFromClientJson(Ctxt.Call^.InBody);
+          Ctxt.Call^.OutStatus := HTTP_SUCCESS;
+        end;
+    end;
+    exit;
+  end;
+  if Ctxt.Method <> mGET then
+  begin
+    Ctxt.Error('', HTTP_NOTALLOWED); // 405
+    exit;
+  end;
   W := TJsonWriter.CreateOwnedStream(temp);
   try
     Ctxt.RetrieveInputUtf8OrVoid('findservice', name);

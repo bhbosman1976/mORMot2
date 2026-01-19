@@ -527,6 +527,12 @@ type
   end;
 
 var
+  /// the current list of registered TAlgoCompress class instances
+  // - as used by TAlgoCompress.Algo(AlgoID)
+  // - made public mostly for testing purposes
+  SynCompressAlgos: array of TAlgoCompress;
+
+var
   /// our fast SynLZ compression as a TAlgoCompress class
   // - please use this global variable methods instead of the deprecated
   // SynLZCompress/SynLZDecompress wrapper functions
@@ -575,8 +581,18 @@ const
   ALGO_SAFE: array[boolean] of TAlgoCompressLoad = (
     aclNormal, aclSafeSlow);
 
-  COMPRESS_STORED = #0;
-  COMPRESS_SYNLZ = 1;
+  // the current reserved AlgoID raw values
+  COMPRESS_STORED      = #0;
+  COMPRESS_SYNLZ       = 1;
+  COMPRESS_DEFLATE     = 2;
+  COMPRESS_DEFLATEFAST = 3;
+  COMPRESS_LIZARD      = 4;
+  COMPRESS_LIZARDFAST  = 5;
+  COMPRESS_LIZARDHUFF  = 6;
+  COMPRESS_RLZ         = 7;
+  COMPRESS_RLE         = 8;
+  COMPRESS_GZ          = 9;
+  COMPRESS_GZFAST      = 10;
 
 
 /// fast concatenation of several AnsiStrings
@@ -5240,10 +5256,6 @@ end;
 
 { TAlgoCompress }
 
-var
-  // don't use TObjectList before mormot.core.json registered TRttiJson
-  SynCompressAlgos: array of TAlgoCompress;
-
 constructor TAlgoCompress.Create;
 var
   existing: TAlgoCompress;
@@ -6040,7 +6052,7 @@ end;
 
 constructor TAlgoSynLZ.Create;
 begin
-  fAlgoID := COMPRESS_SYNLZ; // =1
+  fAlgoID := COMPRESS_SYNLZ; // 1
   fAlgoFileExt := '.synlz';
   inherited Create;
 end;
@@ -6184,7 +6196,7 @@ end;
 
 constructor TAlgoRleLZ.Create;
 begin
-  fAlgoID := 7;
+  fAlgoID := COMPRESS_RLZ; // 7
   fAlgoFileExt := '.synrlz';
   inherited Create;
 end;
@@ -6220,7 +6232,7 @@ end;
 
 constructor TAlgoRle.Create;
 begin
-  fAlgoID := 8;
+  fAlgoID := COMPRESS_RLE; // 8
   fAlgoFileExt := '.synrle';
   inherited Create;
 end;
