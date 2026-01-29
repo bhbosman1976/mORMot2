@@ -66,6 +66,9 @@ var
   IP4local: RawUtf8;
 
 type
+  /// safe FPC alias in objpas mode without Windows units re-definition
+  PNetErrorInt = PInteger;
+
   /// the error codes returned by TNetSocket wrapper
   // - convenient cross-platform error handling is not possible, mostly because
   // Windows doesn't behave exactly like other targets: this enumeration
@@ -93,13 +96,13 @@ type
   public
     /// reintroduced constructor with TNetResult information
     constructor Create(msg: string; obj: TObject; const args: array of const;
-      error: TNetResult = nrOK; errnumber: system.PInteger = nil); reintroduce;
+      error: TNetResult = nrOK; errnumber: PNetErrorInt = nil); reintroduce;
     /// reintroduced constructor with NetLastError call
     constructor CreateLastError(const msg: string; const args: array of const;
       error: TNetResult = nrOk);
     /// raise ENetSock if res is not nrOK or nrRetry
     class procedure Check(res: TNetResult; const context: ShortString;
-      errnumber: system.PInteger = nil);
+      errnumber: PNetErrorInt = nil);
     /// call NetLastError and raise ENetSock if not nrOK nor nrRetry
     class procedure CheckLastError(const Context: ShortString;
       ForceRaise: boolean = false; AnotherNonFatal: integer = 0);
@@ -134,9 +137,14 @@ type
     nfIP6,
     nfUnix);
 
-  /// the IP port to connect/bind to
+  /// store the 4 bytes of a typical IP address as 32-bit unsigned integer
+  TNetIP4 = cardinal;
+  /// store the 16-bit IP port to connect/bind a socket
   TNetPort = cardinal;
-
+  /// store the 6 bytes of a typical ethernet MAC address binary
+  TNetMac = array[0..5] of byte;
+  /// pointer to an ethernet MAC address binary buffer
+  PNetMac = ^TNetMac;
 
 const
   NO_ERROR = 0;
@@ -184,7 +192,7 @@ type
     function SetFromIP4(const address: RawUtf8; noNewSocketIP4Lookup: boolean): boolean;
     /// initialize this address from a standard IPv4
     // - set a given 32-bit IPv4 address and its network port (0..65535)
-    function SetIP4Port(ipv4: cardinal; netport: TNetPort): TNetResult;
+    function SetIP4Port(ipv4: TNetIP4; netport: TNetPort): TNetResult;
     /// returns the network family of this address
     function Family: TNetFamily;
     /// compare two IPv4/IPv6  network addresses
@@ -199,7 +207,7 @@ type
     /// convert this address into its 32-bit IPv4 value, 0 on IPv6/nlUnix
     // - may return cLocalhost32 for 127.0.0.1
     // - returns 0 (i.e. 0.0.0.0) for AF_INET6 or AF_UNIX
-    function IP4: cardinal;
+    function IP4: TNetIP4;
       {$ifdef FPC}inline;{$endif}
     /// convert an IPv4 value into text, or '' for AF_INET6 or AF_UNIX
     function IP4Short: TShort16;
@@ -315,10 +323,10 @@ type
     function MakeBlocking: TNetResult;
     /// low-level sending of some data via this socket
     function Send(Buf: pointer; var len: integer;
-      rawError: system.PInteger = nil): TNetResult;
+      rawError: PNetErrorInt = nil): TNetResult;
     /// low-level receiving of some data from this socket
     function Recv(Buf: pointer; var len: integer;
-      rawError: system.PInteger = nil): TNetResult;
+      rawError: PNetErrorInt = nil): TNetResult;
     /// low-level UDP sending to an address of some data
     function SendTo(Buf: pointer; len: integer; const addr: TNetAddr): TNetResult;
     /// low-level UDP receiving from an address of some data
@@ -327,7 +335,7 @@ type
     // - using poll() on POSIX (as required), and select() on Windows
     // - ms < 0 means an infinite timeout (blocking until events happen)
     function WaitFor(ms: integer; scope: TNetEvents;
-      loerr: system.PInteger = nil): TNetEvents;
+      loerr: PNetErrorInt = nil): TNetEvents;
     /// retrieve how many bytes are actually pending in the receiving queue
     function RecvPending(out pending: integer): TNetResult;
     /// return how many pending bytes are in the receiving queue
@@ -348,7 +356,7 @@ type
     // - i.e. check if it is likely to be accept Send() and Recv() calls
     // - calls WaitFor(neRead) then Recv() to check e.g. WSACONNRESET on Windows
     // - set nowait=true to avoid WaitFor() and just call Recv(MSG_PEEK)
-    function Available(loerr: system.PInteger = nil; nowait: boolean = false): boolean;
+    function Available(loerr: PNetErrorInt = nil; nowait: boolean = false): boolean;
     /// call shutdown() on this socket - may be used to simulate a disconnection
     procedure RawShutdown;
     /// finalize a socket, calling Close after shutdown() if needed
@@ -394,7 +402,7 @@ function RawSocketErrNo: integer; {$ifdef OSWINDOWS} stdcall; {$endif}
 
 /// internal low-level function retrieving the latest socket error information
 function NetLastError(AnotherNonFatal: integer = NO_ERROR;
-  Error: system.PInteger = nil): TNetResult;
+  Error: PNetErrorInt = nil): TNetResult;
 
 /// internal low-level function retrieving the latest socket error message
 function NetLastErrorMsg(AnotherNonFatal: integer = NO_ERROR): ShortString;
@@ -455,7 +463,7 @@ var
   // - this level of DNS resolution has a simple in-memory cache of 32 seconds
   // - NewSocketAddressCache from mormot.net.client will implement a more
   // tunable cache, for both IPv4 and IPv6 resolutions
-  NewSocketIP4Lookup: function(const HostName: RawUtf8; out IP4: cardinal): boolean;
+  NewSocketIP4Lookup: function(const HostName: RawUtf8; out IP4: TNetIP4): boolean;
 
   /// the DNS resolver address(es) to be used by NewSocketIP4Lookup() callback
   // - default '' would call GetDnsAddresses to ask the server known by the OS
@@ -537,27 +545,27 @@ type
 
 /// detect IANA private IPv4 address space from its 32-bit raw value
 // - i.e. 10.x.x.x, 172.16-31.x.x and 192.168.x.x addresses
-function IsPublicIP(ip4: cardinal): boolean;
+function IsPublicIP(ip4: TNetIP4): boolean;
 
 /// detect APIPA private IPv4 address space from its 32-bit raw value
 // - Automatic Private IP Addressing (APIPA) is used by Windows clients to
 // setup some IP in case of local DHCP failure
 // - it covers the 169.254.0.1 - 169.254.254.255 range
 // - see tiaIPv4Dhcp, tiaIPv4DhcpPublic and tiaIPv4DhcpPrivate filters
-function IsApipaIP(ip4: cardinal): boolean;
+function IsApipaIP(ip4: TNetIP4): boolean;
 
 /// detect IANA private IPv4 masks as 32-bit raw values
 // - i.e. 10.x.x.x, 172.16-31.x.x and 192.168.x.x addresses into
 // 255.0.0.0, 255.255.0.0, 255.255.255.0 or 255.255.255.255
-function IP4Mask(ip4: cardinal): cardinal;
+function IP4Mask(ip4: TNetIP4): TNetIP4;
 
 /// compute a broadcast address from a IPv4 current address and its known mask
 // - e.g. ip4=172.16.144.160 and mask4=255.255.255.0 returns 172.16.144.255
-function IP4Broadcast(ip4, mask4: cardinal): cardinal;
+function IP4Broadcast(ip4, mask4: TNetIP4): TNetIP4;
 
 /// compute the prefix size of a IPv4 prefix from a 32-bit network mask
 // - e.g. returns 8 for 255.0.0.0
-function IP4Prefix(netmask4: cardinal): integer; overload;
+function IP4Prefix(netmask4: TNetIP4): integer; overload;
 
 /// compute the prefix size of a IPv4 prefix from a text network mask
 // - e.g. IP4Prefix('255.255.255.0') returns 24
@@ -565,15 +573,15 @@ function IP4Prefix(const netmask4: RawUtf8): integer; overload;
 
 /// reverse conversion of IP4Prefix() into a 32-bit network mask
 // - e.g. IP4Netmask(24) returns 255.255.255.0
-function IP4Netmask(prefix: integer): cardinal; overload;
+function IP4Netmask(prefix: integer): TNetIP4; overload;
 
 /// reverse conversion of IP4Prefix() into a 32-bit network mask
-function IP4Netmask(prefix: integer; out mask: cardinal): boolean; overload;
+function IP4Netmask(prefix: integer; out mask: TNetIP4): boolean; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// compute a subnet/CIDR value from a 32-bit IPv4 and its associated NetMask
 // - e.g. ip4=192.168.0.16 and mask4=255.255.255.0 returns '192.168.0.0/24'
-function IP4Subnet(ip4, netmask4: cardinal): TShort23; overload;
+function IP4Subnet(ip4, netmask4: TNetIP4): TShort23; overload;
 
 /// compute a subnet/CIDR value from an IPv4 and its associated NetMask
 // - e.g. ip4='192.168.0.16' and mask4='255.255.255.0' returns '192.168.0.0/24'
@@ -586,7 +594,7 @@ function IP4Match(const ip4, subnet: RawUtf8): boolean;
 /// filter an IPv4 address to a given TIPAddress kind
 // - return true if the supplied address does match the filter
 // - by design, both 0.0.0.0 and 127.0.0.1 always return false
-function IP4Filter(ip4: cardinal; filter: TIPAddress): boolean;
+function IP4Filter(ip4: TNetIP4; filter: TIPAddress): boolean;
 
 /// convert an IPv4 raw value into a ShortString text
 // - won't use the Operating System network layer API so works on XP too
@@ -622,8 +630,11 @@ procedure IP6Text(ip6addr: PByteArray; var result: RawUtf8);
 
 /// convert a MAC address value into its standard RawUtf8 text representation
 // - calls ToHumanHex(mac, 6), returning e.g. '12:50:b6:1e:c6:aa'
-function MacToText(mac: PByteArray): RawUtf8;
+function MacToText(mac: pointer): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// reverse function from MacToText() or MacToHex()
+function TextToMac(Text: PUtf8Char; Mac: PByte): boolean;
 
 /// convert a MAC address value from its standard hexadecimal text representation
 // - returns e.g. '12:50:b6:1e:c6:aa' from '1250b61ec6aa' or '1250B61EC6AA'
@@ -743,11 +754,18 @@ procedure MacIPAddressFlush;
 
 {$ifdef OSWINDOWS}
 /// remotely get the MAC address of a computer, from its IP Address
-// - only works under Windows, which features a SendARP() API in user space:
-// on POSIX, implementing ARP sadly requires root rights
-// - return the MAC address as a 12 hexa chars ('0050C204C80A' e.g.)
+// - calls SendARP() Windows API available in user space
+// - so will first check the system ARP cache, then send an ARP packet if needed
+// - return the address in its usual human-readable text, e.g. '12:50:b6:1e:c6:aa'
 function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
 {$endif OSWINDOWS}
+
+{$ifdef OSLINUX}
+/// remotely get the MAC address of a computer, from its IP Address, using ARP
+// - use Linux specific SOCK_RAW feature but requires root or CAP_NET_RAW
+// - return the address in its usual human-readable text, e.g. '12:50:b6:1e:c6:aa'
+function GetRemoteMacAddress(const IP: RawUtf8; TimeoutMS: integer = 500): RawUtf8;
+{$endif OSLINUX}
 
 /// get the local MAC address used to reach a computer, from its IP or Host name
 // - return the local interface as a TMacAddress, with all its available info
@@ -759,7 +777,8 @@ function GetLocalMacAddress(const Remote: RawUtf8; var Mac: TMacAddress): boolea
 
 /// get the local IP address used to reach a computer, from its IP Address
 // - will create a SOCK_DGRAM socket with the supplied IP over DNS, HTTP, HTTPS,
-// NTP and discard (9) ports, then check the local socket address created
+// NTP and discard (9) ports, then check the local socket address created - it
+// won't make any actual network connection, just ask the system routing table
 function GetLocalIpAddress(const Remote: RawUtf8 = '8.8.8.8'): RawUtf8;
 
 /// retrieve all DNS (Domain Name Servers) addresses known by the Operating System
@@ -790,7 +809,7 @@ function GetDomainNames(usePosixEnv: boolean = false): TRawUtf8DynArray;
 // - i.e. use a cache of /etc/hosts or c:\windows\system32\drivers\etc\hosts
 // - returns true and the IPv4 address of the stored host found
 // - if the file is modified on disk, the internal cache will be flushed
-function GetKnownHost(const HostName: RawUtf8; out ip4: cardinal): boolean;
+function GetKnownHost(const HostName: RawUtf8; out ip4: TNetIP4): boolean;
 
 /// append a custom host/ipv4 pair in addition to the OS hosts file
 // - to be appended to GetKnownHost() internal cache
@@ -1695,15 +1714,15 @@ type
   TIp4SubNet = object
   {$endif USERECORDWITHMETHODS}
     /// 32-bit masked IP, e.g. 1.2.3.0 for '1.2.3.4/24'
-    ip: cardinal;
+    ip: TNetIP4;
     /// 32-bit IP mask, e.g. 255.255.255.0 for '1.2.3.4/24'
-    mask: cardinal;
+    mask: TNetIP4;
     /// check and decode the supplied CIDR address text from its format '1.2.3.4/24'
     // - e.g. as 32-bit 1.2.3.0 into ip and 255.255.255.0 into mask
     // - plain IP address like '1.2.3.4' will be decoded with mask=255.255.255.255
     function From(const subnet: RawUtf8): boolean;
     /// check if an 32-bit IPv4 matches a decoded CIDR sub-network
-    function Match(ip4: cardinal): boolean; overload;
+    function Match(ip4: TNetIP4): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// check if a textual IPv4 matches a decoded CIDR sub-network
     function Match(const ip4: RawUtf8): boolean; overload;
@@ -1712,7 +1731,7 @@ type
   /// store one TIp4SubNets CIDR mask definition
   TIp4SubNetMask = record
     /// 32-bit IP mask, e.g. 255.255.255.0 for '1.2.3.4/24'
-    Mask: cardinal;
+    Mask: TNetIP4;
     /// how many 32-bit masked IP are actually stored in IP[]
     IPCount: integer;
     /// list of 32-bit masked IPs, e.g. 1.2.3.0 for '1.2.3.4/24'
@@ -1732,7 +1751,7 @@ type
     function Add(const subnet: RawUtf8): boolean; overload;
     /// decode and register the supplied CIDR address as TIp4SubNet ip/mask
     // - by definition, private IP like 192.168.x.x are not added
-    function Add(ip, mask: cardinal): boolean; overload;
+    function Add(ip, mask: TNetIP4): boolean; overload;
     /// decode and add all IP and CIDR listed in a text content
     // - i.e. netsets as IP or CIDR with # or ; comments e.g. as in
     // https://www.spamhaus.org/drop/drop.txt or
@@ -1746,7 +1765,7 @@ type
     function AfterAdd: integer;
     /// check if a 32-bit IPv4 matches a registered CIDR sub-network
     // - reach 16M/s per core with spamhaus or firehol databases
-    function Match(ip4: cardinal): boolean; overload;
+    function Match(ip4: TNetIP4): boolean; overload;
     /// check if a textual IPv4 matches a registered CIDR sub-network
     function Match(const ip4: RawUtf8): boolean; overload;
     // remove all registered CIDR sub-networks
@@ -1776,7 +1795,7 @@ const
 // - directly parse TIp4SubNets.SaveToBinary output for conveniency
 // - performance is in pair with TIp4SubNets.Match - so could be an option
 // if you do not need to Add() items at runtime, but only check a fixed list
-function IP4SubNetMatch(P: PCardinalArray; ip4: cardinal): boolean; overload;
+function IP4SubNetMatch(P: PCardinalArray; ip4: TNetIP4): boolean; overload;
 
 /// check if a textual IPv4 matches a registered CIDR sub-network binary buffer
 function IP4SubNetMatch(const bin: RawByteString; const ip4: RawUtf8): boolean; overload;
@@ -1878,7 +1897,7 @@ type
     fBytesIn: Int64;
     fBytesOut: Int64;
     procedure DoRaise(const msg: string; const args: array of const;
-      error: TNetResult = nrOK; errnumber: system.PInteger = nil;
+      error: TNetResult = nrOK; errnumber: PNetErrorInt = nil;
       exc: ENetSockClass = nil); overload;
     procedure DoRaise(const msg: string); overload;
     procedure SetKeepAlive(aKeepAlive: boolean); virtual;
@@ -2023,7 +2042,11 @@ type
     procedure SockSend(const Values: array of const); overload;
     /// simulate writeln() with direct use of Send(Sock, ..) - includes trailing #13#10
     // - slightly faster than SockSend([]) if all appended items are RawUtf8
+    // - use SockSendRaw([]) to append content with no trailing #13#10 like write()
     procedure SockSendLine(const Values: array of RawUtf8);
+    /// simulate write() with no trailing #13#10
+    // - use SockSend([]) for a trailing #13#10 like writeln()
+    procedure SockSendRaw(const Values: array of RawUtf8);
     /// simulate writeln() with a single line - includes trailing #13#10
     procedure SockSend(const Line: RawByteString); overload;
     /// append P^ data into SndBuf (used by SockSend(), e.g.) - no trailing #13#10
@@ -2067,7 +2090,7 @@ type
     // - warning: on Windows, may wait for the next system timer interrupt, so
     // actual wait may be a less than TimeOutMS if < 16 (select bug/feature)
     function SockReceivePending(TimeOutMS: integer;
-      loerr: system.PInteger = nil): TCrtSocketPending;
+      loerr: PNetErrorInt = nil): TCrtSocketPending;
     /// return how many pending bytes are in the receiving socket or INetTls queue
     // - returns 0 if no data is available, or if the connection is broken: call
     // SockReceivePending() to check for the actual state of the connection
@@ -2075,7 +2098,7 @@ type
     /// returns the socket input stream as a string
     // - returns up to 64KB from the OS or TLS buffers within TimeOut
     function SockReceiveString(NetResult: PNetResult = nil;
-      RawError: system.PInteger = nil): RawByteString;
+      RawError: PNetErrorInt = nil): RawByteString;
     /// fill the Buffer with Length bytes
     // - use TimeOut milliseconds wait for incoming data
     // - bypass the SockIn^.Buffer
@@ -2087,7 +2110,7 @@ type
     // this case, Close method won't be called
     function TrySockRecv(Buffer: pointer; var Length: integer;
       StopBeforeLength: boolean = false; NetResult: PNetResult = nil;
-      RawError: system.PInteger = nil): boolean;
+      RawError: PNetErrorInt = nil): boolean;
     /// faster readln(SockIn^,Line) or simulate it with direct use of Recv(Sock, ..)
     // - just wrap SockInReadLn() with a 16KB buffer (which is enough e.g. with HTTP)
     // - use TimeOut milliseconds wait for incoming data
@@ -2115,7 +2138,7 @@ type
     // (if not nil) would contain the actual socket error
     // - bypass the SockSend() buffers
     function TrySndLow(P: pointer; Len: integer; NetResult: PNetResult = nil;
-      RawError: system.PInteger = nil): boolean;
+      RawError: PNetErrorInt = nil): boolean;
     /// direct accept an new incoming connection on a bound socket
     // - instance should have been setup as a server via a previous Bind() call
     // - returns nil on error or a ResultClass instance on success
@@ -2211,6 +2234,7 @@ type
     property RawSocket: PtrInt
       read GetRawSocket;
     /// HTTP Proxy URI used for tunnelling, from Tunnel.Server/Port values
+    // - e.g. 'http://srvproxy.ad.mycompany.com:8080/'
     property ProxyUrl: RawUtf8
       read fProxyUrl;
     /// if higher than 0, read loop will wait for incoming data till
@@ -2262,6 +2286,11 @@ var
   /// maximum chunk size for each TCrtSocket.TrySndLow/TrySockRecv syscall
   // - 256KB seems fair enough, safer and not slower in practice
   CrtSocketSendRecvMaxBytes: PtrInt = 256 shl 10;
+
+var
+  /// global debug hook for all TCrtSocket instances - assign TSynLog.DoLog
+  // - see also the more focused OnHttpClientSocketLog in mormot.net.client
+  OnCrtSocketLog: TSynLogProc;
 
 
 { ********* NTP / SNTP Protocol Client }
@@ -2336,6 +2365,7 @@ begin
     WSAEINPROGRESS,
     WSATRY_AGAIN:
       result := nrRetry;
+    WSAEADDRNOTAVAIL,
     WSAEINVAL:
       result := nrInvalidParameter;
     WSAEMFILE:
@@ -2371,7 +2401,7 @@ begin
   {$endif OSWINDOWS}
 end;
 
-function NetLastError(AnotherNonFatal: integer; Error: system.PInteger): TNetResult;
+function NetLastError(AnotherNonFatal: integer; Error: PNetErrorInt): TNetResult;
 var
   err: integer;
 begin
@@ -2420,7 +2450,7 @@ end;
 { ENetSock }
 
 constructor ENetSock.Create(msg: string; obj: TObject;
-  const args: array of const; error: TNetResult; errnumber: system.PInteger);
+  const args: array of const; error: TNetResult; errnumber: PNetErrorInt);
 begin
   if obj <> nil then
     msg := format('%s.%s', [ClassNameShort(obj)^, msg]);
@@ -2451,7 +2481,7 @@ begin
 end;
 
 class procedure ENetSock.Check(res: TNetResult; const context: ShortString;
-  errnumber: system.PInteger);
+  errnumber: PNetErrorInt);
 begin
   if (res <> nrOK) and
      (res <> nrRetry) then
@@ -2493,11 +2523,11 @@ type
     Count, Capacity: integer;
     IP: TCardinalDynArray;
     function TixDeprecated: boolean;
-    procedure Add(const hostname: RawUtf8; ip4: cardinal);
+    procedure Add(const hostname: RawUtf8; ip4: TNetIP4);
     procedure AddFrom(const other: TNetHostCache);
-    function Find(const hostname: RawUtf8; out ip4: cardinal): boolean;
-    procedure SafeAdd(const hostname: RawUtf8; ip4, deprec: cardinal);
-    function SafeFind(const hostname: RawUtf8; out ip4: cardinal): boolean;
+    function Find(const hostname: RawUtf8; out ip4: TNetIP4): boolean;
+    procedure SafeAdd(const hostname: RawUtf8; ip4: TNetIP4; deprec: cardinal);
+    function SafeFind(const hostname: RawUtf8; out ip4: TNetIP4): boolean;
     procedure SafeFlush(const hostname: RawUtf8);
   end;
 
@@ -2513,7 +2543,7 @@ begin
     Tix := tix32;
 end;
 
-procedure TNetHostCache.Add(const hostname: RawUtf8; ip4: cardinal);
+procedure TNetHostCache.Add(const hostname: RawUtf8; ip4: TNetIP4);
 begin
   if hostname = '' then
     exit;
@@ -2536,7 +2566,7 @@ begin
     Add(other.Host[i], other.IP[i]);
 end;
 
-function TNetHostCache.Find(const hostname: RawUtf8; out ip4: cardinal): boolean;
+function TNetHostCache.Find(const hostname: RawUtf8; out ip4: TNetIP4): boolean;
 var
   i: PtrInt;
 begin
@@ -2551,7 +2581,7 @@ begin
   result := true;
 end;
 
-procedure TNetHostCache.SafeAdd(const hostname: RawUtf8; ip4, deprec: cardinal);
+procedure TNetHostCache.SafeAdd(const hostname: RawUtf8; ip4: TNetIP4; deprec: cardinal);
 begin
   Safe.Lock;
   if deprec <> 0 then
@@ -2564,7 +2594,7 @@ begin
   Safe.UnLock;
 end;
 
-function TNetHostCache.SafeFind(const hostname: RawUtf8; out ip4: cardinal): boolean;
+function TNetHostCache.SafeFind(const hostname: RawUtf8; out ip4: TNetIP4): boolean;
 begin
   result := false;
   if Count = 0 then
@@ -2719,7 +2749,7 @@ begin
   IP(result, localasvoid);
 end;
 
-function TNetAddr.IP4: cardinal;
+function TNetAddr.IP4: TNetIP4;
 var
   ad4: sockaddr absolute Addr;
 begin
@@ -2808,7 +2838,7 @@ begin
     result := nrNotFound;
 end;
 
-function TNetAddr.SetIP4Port(ipv4: cardinal; netport: TNetPort): TNetResult;
+function TNetAddr.SetIP4Port(ipv4: TNetIP4; netport: TNetPort): TNetResult;
 var
   ad4: sockaddr absolute Addr;
 begin
@@ -2910,7 +2940,8 @@ end;
 function GetSocketAddressFromCache(const address, port: RawUtf8; layer: TNetLayer;
   out addr: TNetAddr; var fromcache, tobecached: boolean): TNetResult;
 var
-  p, ip4: cardinal;
+  p: TNetPort;
+  ip4: TNetIP4;
 begin
   fromcache := false;
   tobecached := false;
@@ -3056,7 +3087,7 @@ begin
   sock := addr.NewSocket(layer);
   if sock = nil then
   begin
-    result := NetLastError(WSAEADDRNOTAVAIL);
+    result := NetLastError;
     if fromcache then
     begin
       // force call the DNS resolver again, perhaps load-balacing is needed
@@ -3088,12 +3119,12 @@ begin
       if (bind(sock.Socket, @addr, addr.Size) <> NO_ERROR) or
          ((layer <> nlUdp) and
           (listen(sock.Socket, DefaultListenBacklog) <> NO_ERROR)) then
-        result := NetLastError(WSAEADDRNOTAVAIL);
+        result := NetLastError;
     end
     else
       // open blocking Client connection (use system-defined timeout)
       if connect(sock.Socket, @addr, addr.Size) <> NO_ERROR then
-        result := NetLastError(WSAEADDRNOTAVAIL);
+        result := NetLastError;
     if (result = nrOK) or
        (retry <= 0) then
       break;
@@ -3325,7 +3356,7 @@ begin
 end;
 
 function TNetSocketWrap.Send(Buf: pointer; var len: integer;
-  rawError: system.PInteger): TNetResult;
+  rawError: PNetErrorInt): TNetResult;
 begin
   if @self = nil then
     result := nrNoSocket
@@ -3342,7 +3373,7 @@ begin
 end;
 
 function TNetSocketWrap.Recv(Buf: pointer; var len: integer;
-  rawError: system.PInteger): TNetResult;
+  rawError: PNetErrorInt): TNetResult;
 begin
   if @self = nil then
     result := nrNoSocket
@@ -3487,7 +3518,7 @@ begin
   result := nrClosed;
 end;
 
-function TNetSocketWrap.Available(loerr: system.PInteger; nowait: boolean): boolean;
+function TNetSocketWrap.Available(loerr: PNetErrorInt; nowait: boolean): boolean;
 var
   events: TNetEvents;
   dummy: integer;
@@ -3565,7 +3596,7 @@ end;
 const // should be local for better code generation
   HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
 
-function IsPublicIP(ip4: cardinal): boolean;
+function IsPublicIP(ip4: TNetIP4): boolean;
 begin
   result := false;
   case ToByte(ip4) of // ignore IANA private IPv4 address spaces
@@ -3581,13 +3612,13 @@ begin
   result := true;
 end;
 
-function IsApipaIP(ip4: cardinal): boolean;
+function IsApipaIP(ip4: TNetIP4): boolean;
 begin
   result := (ip4 and $ffff = ord(169) + ord(254) shl 8) and
             (ToByte(ip4 shr 16) < 255);
 end;
 
-function IP4Mask(ip4: cardinal): cardinal;
+function IP4Mask(ip4: TNetIP4): TNetIP4;
 begin
   result := $ffffffff;
   case ToByte(ip4) of // detect IANA private IPv4 address spaces
@@ -3602,13 +3633,13 @@ begin
   end;
 end;
 
-function IP4Broadcast(ip4, mask4: cardinal): cardinal;
+function IP4Broadcast(ip4, mask4: TNetIP4): TNetIP4;
 begin
   // e.g. ip4=172.16.144.160 mask4=255.255.255.0
   result := (ip4 and mask4) {=172.16.144.0} or (not mask4); {=172.16.144.255}
 end;
 
-function IP4Netmask(prefix: integer): cardinal;
+function IP4Netmask(prefix: integer): TNetIP4;
 begin
   if cardinal(prefix - 1) < 32 then // needed for 32-bit ARM
     result := bswap32($ffffffff shl (32 - prefix))
@@ -3616,13 +3647,13 @@ begin
     result := 0;
 end;
 
-function IP4Netmask(prefix: integer; out mask: cardinal): boolean;
+function IP4Netmask(prefix: integer; out mask: TNetIP4): boolean;
 begin
   mask := IP4Netmask(prefix);
   result := (mask <> 0);
 end;
 
-function TIp4SubNet.Match(ip4: cardinal): boolean; // defined here for inlining
+function TIp4SubNet.Match(ip4: TNetIP4): boolean; // defined here for inlining
 begin
   // e.g. ip4=172.16.144.160 subip=172.16.144.0 submask=255.255.255.0
   result := (ip4 and mask) = ip;
@@ -3636,7 +3667,7 @@ begin
             sub.Match(ip4);
 end;
 
-function IP4Prefix(netmask4: cardinal): integer;
+function IP4Prefix(netmask4: TNetIP4): integer;
 begin
   result := GetBitsCountPtrInt(netmask4); // may use SSE4.2 or optimized asm
   if IP4Netmask(result) <> netmask4 then
@@ -3645,7 +3676,7 @@ end;
 
 function IP4Prefix(const netmask4: RawUtf8): integer;
 var
-  mask: cardinal;
+  mask: TNetIP4;
 begin
   if NetIsIP4(pointer(netmask4), @mask) then
     result := IP4Prefix(mask)
@@ -3653,7 +3684,7 @@ begin
     result := 0;
 end;
 
-function IP4Subnet(ip4, netmask4: cardinal): TShort23;
+function IP4Subnet(ip4, netmask4: TNetIP4): TShort23;
 var
   w: integer;
 begin
@@ -3669,7 +3700,7 @@ end;
 
 function IP4Subnet(const ip4, netmask4: RawUtf8): RawUtf8;
 var
-  ip, mask: cardinal;
+  ip, mask: TNetIP4;
 begin
   if NetIsIP4(pointer(ip4), @ip) and
      NetIsIP4(pointer(netmask4), @mask) then
@@ -3678,7 +3709,7 @@ begin
     result := '';
 end;
 
-function IP4Filter(ip4: cardinal; filter: TIPAddress): boolean;
+function IP4Filter(ip4: TNetIP4; filter: TIPAddress): boolean;
 begin
   result := false; // e.g. tiaIPv6 or 0.0.0.0 or 127.0.0.1
   if (ip4 <> $0100007f) and
@@ -3865,9 +3896,36 @@ begin
   FastSetString(result, @s[1], ord(s[0]));
 end;
 
-function MacToText(mac: PByteArray): RawUtf8;
+function MacToText(mac: pointer): RawUtf8;
 begin
-  ToHumanHex(result, pointer(mac), 6);
+  ToHumanHex(result, mac, 6);
+end;
+
+function TextToMac(Text: PUtf8Char; Mac: PByte): boolean;
+var
+  tmp: array[0..11] of AnsiChar; // local copy of raw hexadecimal chars
+  L: PtrInt;
+begin
+  result := false;
+  L := 0;
+  repeat
+    case Text^ of
+      #0:
+        exit; // premature end of input text
+      ' ',
+      ':':
+        ; // just ignore human readable text markers
+    else
+      begin
+        tmp[L] := Text^; // append hexa chars (tested below in ParseHex)
+        inc(L);
+        if L = SizeOf(tmp) then
+          break;
+      end;
+    end;
+    inc(Text)
+  until false;
+  result := (ParseHex(@tmp, Mac, 6) - PAnsiChar(@tmp)) = SizeOf(tmp);
 end;
 
 function MacTextFromHex(const Hex: RawUtf8): RawUtf8;
@@ -3947,7 +4005,7 @@ var
   // GetMacAddresses / GetMacAddressesText cache - refreshed every 65 seconds
   MacAddresses: array[{UpAndDown=}boolean] of record
     Safe: TLightLock;
-    Tix: integer;
+    Tix: integer; // = GetTickCount64 shr 16 + 1
     Addresses: TMacAddressDynArray;
     Text: array[{WithoutName=}boolean] of RawUtf8;
   end;
@@ -4030,23 +4088,20 @@ function GetMacAddresses(UpAndDown: boolean): TMacAddressDynArray;
 var
   now: integer;
 begin
+  now := mormot.core.os.GetTickCount64 shr 16 + 1; // refresh every 65536 ms
   with MacAddresses[UpAndDown] do
   begin
-    now := mormot.core.os.GetTickCount64 shr 16 + 1; // refresh every 65536 ms
-    if Tix <> now then
-    begin
-      Safe.Lock;
-      try
-        if Tix <> now then
-        begin
-          Addresses := RetrieveMacAddresses(UpAndDown);
-          Tix := now
-        end;
-      finally
-        Safe.UnLock;
+    Safe.Lock;
+    try
+      if Tix <> now then
+      begin
+        Tix := now;
+        Addresses := RetrieveMacAddresses(UpAndDown);
       end;
+      result := Addresses;
+    finally
+      Safe.UnLock;
     end;
-    result := Addresses;
   end;
 end;
 
@@ -4118,6 +4173,7 @@ const
   PORTS: array[0..4] of RawUtf8 = ( // connect() may fail on firewall/cap policy
     '53', '80', '443', '123', '9'); // DNS, HTTP, HTTPS, NTP, discard
 begin
+  // note: UDP connect() makes no network request but browse the kernel routage
   result := '';
   for i := 0 to high(PORTS) do
     if addr.SetFrom(Remote, PORTS[i], nlUdp) = nrOk then
@@ -4159,9 +4215,9 @@ begin
     try
       if tix32 <> Tix then
       begin
-        Value := _GetDnsAddresses(usePosixEnv, false);
+        Value := _GetDnsAddresses(usePosixEnv, false); // from OS
         for i := 0 to length(Custom) - 1 do
-          NetAddRawUtf8(Value, Custom[i]);
+          NetAddRawUtf8(Value, Custom[i]);          // from RegisterDnsAddress()
         Tix := tix32;
       end;
       result := Value;
@@ -4204,7 +4260,7 @@ var
 procedure KnownHostCacheReload;
 var
   p: PUtf8Char;
-  ip4: cardinal;
+  ip4: TNetIP4;
   h: RawUtf8;
 begin
   KnownHostCache.Count := 0;
@@ -4232,7 +4288,7 @@ begin
   end;
 end;
 
-function GetKnownHost(const HostName: RawUtf8; out ip4: cardinal): boolean;
+function GetKnownHost(const HostName: RawUtf8; out ip4: TNetIP4): boolean;
 var
   tixfile: TUnixTime;
 begin
@@ -4262,7 +4318,7 @@ end;
 
 procedure RegisterKnownHost(const HostName, Ip4: RawUtf8);
 var
-  ip32: cardinal;
+  ip32: TNetIP4;
 begin
   if (HostName <> '') and
      NetIsIP4(pointer(ip4), @ip32) then
@@ -5301,7 +5357,7 @@ end;
 function TIp4SubNet.From(const subnet: RawUtf8): boolean;
 var
   ip4, sub4: RawUtf8;
-  ip32, prefix: cardinal; // local temporary ip32 is needed on Delphi XE4 :(
+  ip32, prefix: TNetIP4; // local temporary ip32 is needed on Delphi XE4 :(
 begin
   if SplitFromRight(subnet, '/', ip4, sub4) then // regular '1.2.3.4/sub' mask
   begin
@@ -5321,7 +5377,7 @@ end;
 
 function TIp4SubNet.Match(const ip4: RawUtf8): boolean;
 var
-  ip32: cardinal;
+  ip32: TNetIP4;
 begin
   result := NetIsIP4(pointer(ip4), @ip32) and
             Match(ip32{%H-});
@@ -5330,7 +5386,7 @@ end;
 
 { TIp4SubNets }
 
-function FindIp4SubNetsMask(m: PIp4SubNetMask; mask4: cardinal): PIp4SubNetMask;
+function FindIp4SubNetsMask(m: PIp4SubNetMask; mask4: TNetIP4): PIp4SubNetMask;
 var
   n: integer;
 begin
@@ -5347,13 +5403,13 @@ begin
   result := nil;
 end;
 
-function TIp4SubNets.Add(ip, mask: cardinal): boolean;
+function TIp4SubNets.Add(ip, mask: TNetIP4): boolean;
 var
   p: PIp4SubNetMask;
   n: PtrInt;
 begin
   result := false;
-  if (ip = cardinal(-1)) or  // 255.255.255.255
+  if (ip = TNetIP4(-1)) or  // 255.255.255.255
      not IsPublicIP(ip) then // e.g. 192.168.1.1
     exit;
   p := FindIp4SubNetsMask(pointer(fSubNet), mask);
@@ -5375,7 +5431,7 @@ begin
             Add(sub.ip, sub.mask);
 end;
 
-function TIp4SubNets.Match(ip4: cardinal): boolean;
+function TIp4SubNets.Match(ip4: TNetIP4): boolean;
 var
   p: PIp4SubNetMask;
   n: integer;
@@ -5398,7 +5454,7 @@ end;
 
 function TIp4SubNets.Match(const ip4: RawUtf8): boolean;
 var
-  ip32: cardinal;
+  ip32: TNetIP4;
 begin
   result := NetIsIP4(pointer(ip4), @ip32) and
             Match(ip32{%H-});
@@ -5474,7 +5530,7 @@ end;
 function TIp4SubNets.AddFromText(const text: RawUtf8): integer;
 var
   p: PUtf8Char;
-  ip, mask: cardinal;
+  ip, mask: TNetIP4;
 begin
   result := 0;
   p := pointer(text);
@@ -5487,7 +5543,7 @@ begin
       while p^ in ['0' .. '9', '.', ' '] do
         inc(p);
       if p^ <> '/' then
-        mask := cardinal(-1) // single IP has 255.255.255.255 mask
+        mask := TNetIP4(-1) // single IP has 255.255.255.255 mask
       else
         mask := IP4Netmask(GetCardinal(p + 1)); // CIDR
       if (mask <> 0) and
@@ -5530,7 +5586,7 @@ begin
   result := -1;
 end;
 
-function IP4SubNetMatch(P: PCardinalArray; ip4: cardinal): boolean;
+function IP4SubNetMatch(P: PCardinalArray; ip4: TNetIP4): boolean;
 var
   n: integer;
 begin
@@ -5551,7 +5607,7 @@ end;
 
 function IP4SubNetMatch(const bin: RawByteString; const ip4: RawUtf8): boolean;
 var
-  ip32: cardinal;
+  ip32: TNetIP4;
 begin
   result := (bin <> '') and
             (PCardinal(bin)^ = IP4SUBNET_MAGIC) and
@@ -5619,7 +5675,7 @@ begin
   end
   else
   begin
-    p1 := pointer(PosChar(pointer(p), '@'));
+    p1 := pointer(PosChar(pointer(p), '@')); // use fast SSE2 asm on x86_64
     if p1 <> nil then
     begin
       // parse 'https://user:password@server:port/address'
@@ -5792,6 +5848,9 @@ end;
 constructor TCrtSocket.Create(aTimeOut: integer);
 begin
   fTimeOut := aTimeOut;
+  if Assigned(OnCrtSocketLog) and
+     not Assigned(OnLog) then
+    OnLog := OnCrtSocketLog; // global hook for all classes
 end;
 
 constructor TCrtSocket.Open(const aServer, aPort: RawUtf8;
@@ -5813,7 +5872,7 @@ begin
 end;
 
 procedure TCrtSocket.DoRaise(const msg: string; const args: array of const;
-  error: TNetResult; errnumber: system.PInteger; exc: ENetSockClass);
+  error: TNetResult; errnumber: PNetErrorInt; exc: ENetSockClass);
 begin
   if exc = nil then
     exc := ENetSock;
@@ -6695,6 +6754,23 @@ begin
   PWord(p)^ := EOLW;
 end;
 
+procedure TCrtSocket.SockSendRaw(const Values: array of RawUtf8);
+var
+  i, len: PtrInt;
+  p: PUtf8Char;
+begin
+  len := 0;
+  for i := 0 to high(Values) do
+    inc(len, length(Values[i]));
+  p := EnsureSockSend(len); // reserve all needed memory at once
+  for i := 0 to high(Values) do
+  begin
+    len := length(Values[i]);
+    MoveFast(pointer(Values[i])^, p^, len);
+    inc(p, len);
+  end;
+end;
+
 procedure TCrtSocket.SockSend(const Line: RawByteString);
 var
   len: PtrInt;
@@ -6830,7 +6906,7 @@ begin
 end;
 
 function TCrtSocket.SockReceivePending(TimeOutMS: integer;
-  loerr: system.PInteger): TCrtSocketPending;
+  loerr: PNetErrorInt): TCrtSocketPending;
 var
   events: TNetEvents;
 begin
@@ -6874,7 +6950,7 @@ begin
 end;
 
 function TCrtSocket.SockReceiveString(
-  NetResult: PNetResult; RawError: system.PInteger): RawByteString;
+  NetResult: PNetResult; RawError: PNetErrorInt): RawByteString;
 var
   read: integer;
   tmp: TBuffer64K; // big enough for INetTls or the socket API
@@ -6888,7 +6964,7 @@ begin
 end;
 
 function TCrtSocket.TrySockRecv(Buffer: pointer; var Length: integer;
-  StopBeforeLength: boolean; NetResult: PNetResult; RawError: system.PInteger): boolean;
+  StopBeforeLength: boolean; NetResult: PNetResult; RawError: PNetErrorInt): boolean;
 var
   expected, read, pending: integer;
   events: TNetEvents;
@@ -7006,7 +7082,7 @@ begin
 end;
 
 function TCrtSocket.TrySndLow(P: pointer; Len: integer; NetResult: PNetResult;
-  RawError: system.PInteger): boolean;
+  RawError: PNetErrorInt): boolean;
 var
   sent: integer;
   events: TNetEvents;
@@ -7343,6 +7419,14 @@ initialization
   DefaultListenBacklog := SOMAXCONN;
   GetSystemMacAddress := @_GetSystemMacAddress;
   InitializeUnit; // in mormot.net.sock.windows/posix.inc
+  (*{$ifdef OSLINUX}
+  writeln(GetRemoteMacAddress('192.168.0.1'));
+  writeln(GetRemoteMacAddress('192.168.0.254'));
+  writeln(GetRemoteMacAddress('192.168.0.2'));
+  writeln(GetRemoteMacAddress('192.168.0.121'));
+  writeln(GetRemoteMacAddress('10.0.2.15'));
+  writeln(GetRemoteMacAddress('10.0.2.2'));
+  {$endif OSLINUX}*)
 
 finalization
   FinalizeUnit;  // in mormot.net.sock.windows/posix.inc

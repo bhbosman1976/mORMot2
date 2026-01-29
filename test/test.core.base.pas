@@ -2970,6 +2970,12 @@ begin
   CheckEqual(MacTextFromHex(UpperCase(s)), x);
   CheckEqual(HumanHexCompare(x, x), 0);
   CheckEqual(HumanHexCompare(x, MacTextFromHex(s)), 0);
+  x := MacToText(@Guid);
+  CheckEqual(x, 'd3:46:a6:c9:61:9c');
+  FillZero(g);
+  CheckEqual(MacToText(@g), '00:00:00:00:00:00');
+  Check(TextToMac(pointer(x), @g));
+  CheckEqual(MacToText(@g), x);
   for i := 1 to 100 do
   begin
     x2 := x;
@@ -5562,6 +5568,12 @@ begin
   rb1 := ARawFastSetString;
   Append(rb1, 'test');
   CheckEqual(rb1, '123456test', 'ARawFastSetString2');
+  CheckEqual(PCardinal(BOM_UTF8_CHARS)^, BOM_UTF8, 'BOM_UTF8_CHARS');
+  U := '1234' + BOM_UTF8_CHARS + '5678';
+  CheckEqual(PCardinalArray(U)[1] and $ffffff, BOM_UTF8, 'BOM_UTF8');
+  CheckHash(U, $2F8C2556, 'BOM concat');
+  CheckHash('1234' + BOM_UTF8_CHARS + '5678', $2F8C2556, 'xpacket ui.pdf');
+  // raw filenames functions
   Check(SafeFileName(''));
   Check(SafePathName(''));
   Check(SafeFileName('toto'));

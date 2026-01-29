@@ -886,6 +886,9 @@ const
   BOM_UTF16LE = #$feff;
   /// UTF-16BE BOM WideChar marker, seen only in legacy/niche systems
   BOM_UTF16BE = #$fffe;
+  /// the UTF-8 BOM is hard to put as a string constant on Delphi 2009+
+  BOM_UTF8_CHARS: RawByteString =
+    AnsiChar($ef) + AnsiChar($bb) + AnsiChar($bf);
 
 /// check the file BOM at the beginning of a file buffer
 // - BOM is common only with Microsoft products
@@ -3781,7 +3784,7 @@ begin
     exit;
   end;
   result := lngUndefined;
-  i := ByteScanIndex(@LANG_PRI, length(LANG_PRI), lcid and 255);
+  i := ByteScanIndex(@LANG_PRI, length(LANG_PRI), lcid and 255); // may use SSE2
   if i <= 0 then
     exit;
   result := TLanguage(i);
@@ -5816,7 +5819,7 @@ begin
     exit;
   s := pointer(bin);
   z := StrLen(s);
-  c := ByteScanIndex(pointer(s), len, ord(ZEROED_CW));
+  c := ByteScanIndex(pointer(s), len, ord(ZEROED_CW)); // may use SSE2
   if (z = len) and
      (c < 0) then
   begin
@@ -5863,7 +5866,7 @@ begin
   if len = 0 then
     exit;
   s := pointer(u);
-  c := ByteScanIndex(pointer(s), len, ord(ZEROED_CW));
+  c := ByteScanIndex(pointer(s), len, ord(ZEROED_CW)); // may use SSE2
   if c < 0 then
   begin
     result := u;
@@ -8483,7 +8486,7 @@ var
   p: PAnsiChar;
 begin
   len := length(text);
-  first := ByteScanIndex(pointer(text), len, ord(exclude));
+  first := ByteScanIndex(pointer(text), len, ord(exclude)); // may use SSE2
   if first < 0 then
   begin
     result := text; // no exclude char found
@@ -8629,7 +8632,7 @@ begin
     if (Lookup = nil) and
        (length(OldPattern) = 1) then
       first := ByteScanIndex(pointer(S), {%H-}PStrLen(PtrUInt(S) - _STRLEN)^,
-        byte(OldPattern[1])) + 1
+        byte(OldPattern[1])) + 1  // may use SSE2
     else
       first := PosExI(OldPattern, S, 1, Lookup); // handle Lookup=nil
     if first = 0 then
@@ -8671,7 +8674,7 @@ begin
      (Source <> '') then
   begin
     n := length(Source);
-    i := ByteScanIndex(pointer(Source), n, ord(OldChar));
+    i := ByteScanIndex(pointer(Source), n, ord(OldChar)); // may use SSE2
     if i >= 0 then
     begin
       FastSetString(result, pointer(Source), n);
@@ -8771,7 +8774,7 @@ var
   c: AnsiChar;
 begin
   nquote := 0;
-  quote1 := ByteScanIndex(pointer(P), PLen, byte(Quote)); // asm if available
+  quote1 := ByteScanIndex(pointer(P), PLen, byte(Quote)); // may use SSE2
   if quote1 >= 0 then
     for i := quote1 to PLen - 1 do
       if P[i] = Quote then
@@ -10375,7 +10378,7 @@ begin
     exit;
   fSafe.WriteLock;
   try
-    fFiles := nil; // force list refresh
+    fFiles := nil; // force list refresh at next Find() calll
   finally
     fSafe.WriteUnLock;
   end;

@@ -70,8 +70,8 @@ type
     fSock: TNetSocket;
     fSockAddr: TNetAddr;
     fFrame: PUdpFrame;
-    fReceived, fTimeout: integer;
-    fBound, fAutoRebind: boolean;
+    fReceived, fTimeout, fRebindRetry, fRebindCount: integer;
+    fInitialBound, fAutoRebind: boolean;
     fBindAddress, fBindPort: RawUtf8;
     function DoBind: TNetResult; virtual;
     function GetIPWithPort: RawUtf8;
@@ -88,6 +88,9 @@ type
       TimeoutMS: integer); reintroduce;
     /// finalize the processing thread
     destructor Destroy; override;
+    /// low-level access to the bound UDP socket (for debugging purposes)
+    property Sock: TNetSocket
+      read fSock;
   published
     property IPWithPort: RawUtf8
       read GetIPWithPort;
@@ -95,6 +98,10 @@ type
       read fReceived;
     property AutoRebind: boolean
       read fAutoRebind write fAutoRebind;
+    property RebindRetry: integer
+      read fRebindRetry;
+    property RebindCount: integer
+      read fRebindCount;
   end;
 
 const
@@ -2033,7 +2040,7 @@ const
   PEER_CACHE_PATTERN = '*.cache';
 
   PEER_CACHE_MESSAGELEN = SizeOf(THttpPeerCacheMessageEncoded);
-  PEER_CACHE_AESLEN = PEER_CACHE_MESSAGELEN - SizeOf(cardinal);
+  PEER_CACHE_AESLEN = PEER_CACHE_MESSAGELEN - SizeOf(cardinal); // length - crc
   /// base-64 HttpDirectUri() bearer size in chars, from PEER_CACHE_MESSAGELEN
   PEER_CACHE_BEARERLEN = 326;
 
@@ -2584,12 +2591,13 @@ end;
 
 function TUdpServerThread.DoBind: TNetResult;
 begin
-  fBound := false;
+  fInitialBound := false;
   fLogClass.Add.Log(sllDebug, 'DoBind %:%', [fBindAddress, fBindPort], self);
   result := NewSocket(fBindAddress, fBindPort, nlUdp, {bind=}true,
     fTimeout, fTimeout, fTimeout, 10, fSock, @fSockAddr);
-  fLogClass.Add.Log(sllDebug, 'DoBind=%', [ToText(result)^], self);
-  fBound := true; // notify DoExecute() ASAP that fSock was set (or not)
+  if result <> nrOK then
+    fLogClass.Add.Log(sllWarning, 'DoBind=%', [NetLastErrorMsg], self);
+  fInitialBound := true; // notify DoExecute() ASAP that fSock was set (or not)
 end;
 
 constructor TUdpServerThread.Create(LogClass: TSynLogClass;
@@ -2609,17 +2617,16 @@ begin
     [fBindAddress, fBindPort, ident], self);
   inherited Create({suspended=}false, nil, nil, LogClass, ident);
   res := DoBind;
-  if res <> nrOk then
-  begin
-    // Windows seems to require this to avoid breaking the process on error
-    {$ifdef OSWINDOWS}
-    Resume{%H-}; // force Execute/DoExecute launch
-    SleepHiRes(10);
-    {$endif OSWINDOWS}
-    // on binding error, raise exception before the thread is actually created
-    raise EUdpServer.Create('Create binding error on %s:%s', self,
-      [BindAddress, BindPort], res);
-  end;
+  if res = nrOk then
+    exit;
+  // Windows seems to require this to avoid breaking the process on error
+  {$ifdef OSWINDOWS}
+  Resume{%H-}; // force Execute/DoExecute launch
+  SleepHiRes(10);
+  {$endif OSWINDOWS}
+  // on binding error, raise exception before the thread is actually created
+  raise EUdpServer.Create('Create binding error on %s:%s', self,
+    [BindAddress, BindPort], res);
 end;
 
 destructor TUdpServerThread.Destroy;
@@ -2670,15 +2677,15 @@ procedure TUdpServerThread.DoExecute;
 var
   len: integer;
   tix64: Int64;
-  tix, lasttix: cardinal;
+  tix, lasttix, delay: cardinal;
   res: TNetResult;
   ev: TNetEvents;
   remote: TNetAddr;
 begin
   lasttix := 0;
   // main server process loop
-  if not fBound then
-    SleepHiRes(100, fBound, {fBound value done=}true);
+  if not fInitialBound then
+    SleepHiRes(100, fInitialBound, {Bound value done=}true);
   if fSock = nil then // paranoid check
     FormatUtf8('%.DoExecute: % Bind failed', [self, fProcessName], fExecuteMessage)
   else
@@ -2713,7 +2720,7 @@ begin
             if CompareBuf(UDP_SHUTDOWN, fFrame, len) <> 0 then // from Destroy
             begin
               inc(fReceived);
-              OnFrameReceived(len, remote);
+              OnFrameReceived(len, remote); // new request
             end;
           end
           else
@@ -2722,14 +2729,15 @@ begin
         end
         else if res <> nrRetry then
         begin
-          fLogClass.Add.Log(sllDebug, 'DoExecute: abort after RecvPending=% %',
-            [_NR[res], NetLastErrorMsg], self);
+          fLogClass.Add.Log(sllDebug, 'DoExecute: RecvPending=%',
+            [NetLastErrorMsg], self);
           break;
         end;
       end
       else if neError in ev then
       begin
-        fLogClass.Add.Log(sllWarning, 'DoExecute: abort after WaitFor', self);
+        fLogClass.Add.Log(sllWarning, 'DoExecute: WaitFor=%',
+          [NetLastErrorMsg], self);
         break;
       end;
       if Terminated then
@@ -2748,17 +2756,26 @@ begin
        not fAutoRebind then
       break;
     // implement fAutoRebind=true after main fSock error
-    // (e.g. transient "ip link set eth0 down/up" or "iptables DROP")
+    // (e.g. transient wifi down/up or "iptables DROP")
+    delay := 1000; // exponential retry period backoff from 1 to 10 seconds
     repeat
-      fLogClass.Add.Log(sllDebug, 'DoExecute: % AutoRebind attempt',
-        [fProcessName], self);
+      inc(fRebindRetry);
+      fLogClass.Add.Log(sllDebug, 'DoExecute: % AutoRebind attempt retry=% rebind=%',
+        [fProcessName, fRebindRetry, fRebindCount], self);
       fSock.Close;
       fSock := nil;
-      if SleepOrTerminated(2000) or // wait a little and retry
-         (DoBind = nrOk) then
+      if SleepOrTerminated(delay) then // wait a little and retry
+        break;
+      res := DoBind;
+      if res = nrOk then
+      begin
+        inc(fRebindCount);
         break; // re-bound = go back to the main WaitFor/RecFrom loop
+      end;
       fLogClass.Add.Log(sllWarning, 'DoExecute: DoBind=% -> sleep and retry',
-        [NetLastErrorMsg], self);
+        [_NR[res]], self);
+      if delay < 10000 then
+        inc(delay, delay shr 2); // up to 10 seconds retry period
     until false;
   until Terminated;
 end;
@@ -5341,7 +5358,7 @@ end;
 function THttpServerSocket.GetRequest(withBody: boolean;
   headerMaxTix: Int64): THttpServerSocketGetRequestResult;
 var
-  P: PUtf8Char;
+  P, B: PUtf8Char;
   status, tix32: cardinal;
   noheaderfilter, http10: boolean;
 begin
@@ -5367,6 +5384,15 @@ begin
     if P = nil then
       exit; // connection is likely to be broken or closed
     GetNextItem(P, ' ', Http.CommandMethod); // 'GET'
+    if (PCardinal(P)^ = ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
+       (PCardinal(P + 4)^ and $ffffff = ord(':') + ord('/') shl 8 + ord('/') shl 16) then
+    begin
+      // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
+      B := P;
+      P := PosChar(P + 7, '/'); // use fast SSE2 asm on x86_64
+      if P = nil then
+        P := B; // paranoid
+    end;
     GetNextItem(P, ' ', Http.CommandUri);    // '/path'
     result := grRejected;
     if (P = nil) or

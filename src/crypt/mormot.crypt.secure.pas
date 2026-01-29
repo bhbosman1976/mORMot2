@@ -9167,7 +9167,7 @@ begin
   // same logic than TJwtAbstract.Verify, but (slower and) with no cache
   // -> TJwtAbstract is to be preferred if the ICryptCert is reused
   result := cvWrongUsage;
-  P := PosCharU(Jwt, '.');
+  P := PosCharU(Jwt, '.'); // use fast SSE2 asm on x86_64
   if P = nil then
     exit;
   S := PosChar(P + 1, '.');
@@ -10440,7 +10440,7 @@ var
   derlen: cardinal;
   der: PByteArray;
   eccbytes, len: PtrUInt;
-  buf: array [0..131] of AnsiChar;
+  buf: array[0..131] of AnsiChar;
 begin
   if algo in CAA_RAWSIGNATURE then
   begin

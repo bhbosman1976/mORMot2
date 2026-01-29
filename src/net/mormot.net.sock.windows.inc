@@ -84,8 +84,8 @@ type
   PInAddr = ^in_addr;
   in_addr = packed record
     case integer of
-      0: (S_bytes: packed array [0..3] of byte);
-      1: (S_addr: cardinal);
+      0: (S_bytes: packed array[0..3] of byte);
+      1: (S_addr: TNetIP4);
   end;
 
   PSockAddrIn = ^sockaddr_in;
@@ -103,9 +103,9 @@ type
   in6_addr = packed record
     case integer of
       0: (S6_addr:   THash128);
-      1: (u6_addr8:  packed array [0..15] of byte);
-      2: (u6_addr16: packed array [0..7]  of word);
-      3: (u6_addr32: packed array [0..3]  of integer);
+      1: (u6_addr8:  packed array[0..15] of byte);
+      2: (u6_addr16: packed array[0..7]  of word);
+      3: (u6_addr32: packed array[0..3]  of integer);
   end;
 
   PSockAddrIn6 = ^sockaddr_in6;
@@ -570,7 +570,7 @@ end; // some obscure Windows docs seem to state that zeroing is expected
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
-  p: cardinal;
+  p: TNetPort;
 begin
   Clear;
   result := nrNotImplemented;
@@ -681,7 +681,7 @@ begin
 end;
 
 function TNetSocketWrap.WaitFor(ms: integer; scope: TNetEvents;
-  loerr: system.PInteger): TNetEvents;
+  loerr: PNetErrorInt): TNetEvents;
 var
   sock: TSocket;
   rd, wr, er: record
@@ -906,7 +906,7 @@ type
     DnsSuffix: PWCHAR;
     Description: PWCHAR;
     FriendlyName: PWCHAR;
-    PhysicalAddress: array [0 .. MAX_ADAPTER_ADDRESS_LEN - 1] of byte;
+    PhysicalAddress: array[0 .. MAX_ADAPTER_ADDRESS_LEN - 1] of byte;
     PhysicalAddressLength: DWord;
     Flags: DWord;
     Mtu: DWord;
@@ -914,7 +914,7 @@ type
     OperStatus: DWord;
     // below fields are only available on Windows XP with SP1 and later
     Ipv6IfIndex: DWord;
-    ZoneIndices: array [0..15] of DWord;
+    ZoneIndices: array[0..15] of DWord;
     FirstPrefix: PIP_ADAPTER_PREFIX;
     // below fields are only available on Windows Vista and later
     TransmitLinkSpeed: Int64;
@@ -932,8 +932,8 @@ type
     // DHCP v6 Info following (not used by our code)
   end;
 
-  IP_ADDRESS_STRING = array [0..15] of AnsiChar;
-  IP_ADDR_IP4 = cardinal;
+  IP_ADDRESS_STRING = array[0..15] of AnsiChar;
+  IP_ADDR_IP4 = TNetIP4;
 
   IP_ADDR_STRING = packed record
     IpAddress: IP_ADDRESS_STRING;
@@ -1170,7 +1170,7 @@ function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
 var
   dwRemoteIP: DWord;
   PhyAddrLen: Longword;
-  pMacAddr: array [0..7] of byte;
+  pMacAddr: array[0..7] of byte;
 begin
   result := '';
   if NetIsIP4(pointer(IP), @dwRemoteIP) and

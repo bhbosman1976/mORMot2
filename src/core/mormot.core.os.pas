@@ -1213,7 +1213,7 @@ type
     fCaseSensitiveNames: boolean;
     fSwitch: array[{long=}boolean] of RawUtf8;
     fLineFeed, fExeDescription, fUnknown: RawUtf8;
-    procedure Describe(const v: array of RawUtf8;
+    procedure SetDescription(const v: array of RawUtf8;
       k: TExecutableCommandLineKind; d, def: RawUtf8; argindex: integer);
     function Find(const v: array of RawUtf8;
       k: TExecutableCommandLineKind = clkUndefined; const d: RawUtf8 = '';
@@ -6376,7 +6376,7 @@ type
     ALREADY_EXISTS, MORE_DATA, ACCOUNT_EXPIRED, OLD_WIN_VERSION, NO_SYSTEM_RESOURCES,
     RPC_S_SERVER_UNAVAILABLE, PASSWORD_MUST_CHANGE, ACCOUNT_LOCKED_OUT,
     // main Windows Socket API (WSA*) errors
-    EFAULT, EINVAL, EMFILE, EWOULDBLOCK, ENOTSOCK, ENETDOWN,
+    EFAULT, EINVAL, EMFILE, EWOULDBLOCK, ENOTSOCK, EADDRNOTAVAIL, ENETDOWN,
     ENETUNREACH, ENETRESET, ECONNABORTED, ECONNRESET, ENOBUFS,
     ETIMEDOUT, ECONNREFUSED, TRY_AGAIN,
     // most common WinHttp API (ERROR_WINHTTP_*) errors in range 12000...12152
@@ -6403,8 +6403,8 @@ const
     // sparse system errors
     183, 234, 701, 1150, 1450, 1722, 1907, 1909,
     // main Windows Socket API (WSA*) errors
-    10014, 10022, 10024, 10035, 10038, 10050, 10051, 10052, 10053, 10054, 10055,
-    10060, 10061, 11002,
+    10014, 10022, 10024, 10035, 10038, 10049, 10050, 10051, 10052, 10053,
+    10054, 10055, 10060, 10061, 11002,
     // most common WinHttp API (ERROR_WINHTTP_*) errors in range 12000...12152
     12002, 12017, 12029, 12044, 12152,
     // some SEC_I_* status as returned by SSPI
@@ -8864,7 +8864,7 @@ begin
       vlen := i - v; // vlen may be 0 if DetailedOrVoid was ''
       if UserAgent[i + 1] in [#0, '3'] then // end with OS_INITIAL or '32' suffix
         o := ByteScanIndex(pointer(@OS_INITIAL),
-          ord(high(TOperatingSystem)) + 1, ord(UserAgent[i]));
+          ord(high(TOperatingSystem)) + 1, ord(UserAgent[i])); // may use SSE2
       break;
     end;
   if o < 0 then
@@ -8998,7 +8998,7 @@ begin
   Join([fSwitch[length(v) > 1], v], result);
 end;
 
-procedure TExecutableCommandLine.Describe(const v: array of RawUtf8;
+procedure TExecutableCommandLine.SetDescription(const v: array of RawUtf8;
   k: TExecutableCommandLineKind; d, def: RawUtf8; argindex: integer);
 var
   i, j: PtrInt;
@@ -9132,7 +9132,7 @@ begin
   if self <> nil then
   begin
     if k <> clkUndefined then
-      Describe(v, k, d, def, -1);
+      SetDescription(v, k, d, def, -1);
     if (high(v) >= 0) and
        (fNames[k] <> nil) then
       for i := 0 to high(v) do
@@ -9168,7 +9168,7 @@ begin
     if optional then
       fRetrieved[clkArg][index] := true;
   end;
-  Describe([], clkArg, description, '', index + 1);
+  SetDescription([], clkArg, description, '', index + 1);
 end;
 
 function TExecutableCommandLine.ArgU(index: integer; const description: RawUtf8;
@@ -9234,8 +9234,8 @@ begin
   if i = 0 then
     exit;
   delete(result[0], i, 1);
-  result[1] := result[0]; // &# char first
-  result[0] := copy(name, i + 1, 1);
+  result[1] := result[0];            // [1] = full text (& placeholder removed)
+  result[0] := copy(name, i + 1, 1); // [0] = single char shortcut alone
 end;
 
 function TExecutableCommandLine.Option(const name, description: RawUtf8): boolean;
@@ -9263,7 +9263,7 @@ begin
   result := false;
   if self = nil then
     exit;
-  Describe(name, clkParam, description, '', -1);
+  SetDescription(name, clkParam, description, '', -1);
   first := 0;
   repeat
     i := Find(name, clkParam, '', '', first);
@@ -9308,9 +9308,10 @@ end;
 function TExecutableCommandLine.Get(const name: array of RawUtf8;
   out value: string; const description: RawUtf8; const default: string): boolean;
 var
-  tmp: RawUtf8;
+  def, tmp: RawUtf8; // RTL conversion is fast enough in this unit
 begin
-  result := Get(name, tmp, description);
+  def := RawUtf8(tmp);
+  result := Get(name, tmp, description, def);
   if result then
     value := string(tmp)
   else
@@ -10176,6 +10177,17 @@ asm
      {$endif CPUARMYIELD}
 end;
 {$endif FPC_CPUARM}
+
+{$ifdef CPUAARCH64DELPHI}
+const
+  SpinFactor = 20; // no inline asm on Delphi ARM, so no "yield"
+
+procedure DoPause(n: PtrUInt);
+begin
+   while n <> 0 do
+     dec(n);
+end;
+{$endif CPUAARCH64DELPHI}
 
 function DoSpin(spin: PtrUInt): PtrUInt;
 begin

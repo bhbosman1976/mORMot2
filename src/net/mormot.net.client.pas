@@ -942,6 +942,10 @@ var
   /// disable proxy for any IPv4 '1.2.3.4' address in GetSystemProxyUri() function
   DefaultHttpClientSocketProxyNotForIp4: boolean;
 
+  /// global debug hook for all THttpClientSocket instances - assign TSynLog.DoLog
+  // - see also the more global OnCrtSocketLog hook in mormot.net.sock
+  OnHttpClientSocketLog: TSynLogProc;
+
 
 /// ask the Operating System to return the Tunnel/Proxy settings for a given URI
 // - as used internally by OpenHttp/OpenHttpGet and TSimpleHttpClient to call
@@ -2265,6 +2269,7 @@ begin
   FormatUtf8('Mozilla/5.0 (' + OS_TEXT + ' ' + CPU_ARCH_TEXT + '; mORMot) %/' +
     SYNOPSE_FRAMEWORK_BRANCH + ' %%',
     [name, Executable.ProgramName, vers], result);
+  // 'Mozilla/5.0 (Linux x64; mORMot) HCS/4 Tests/1' for THttpClientSocket 2.4
 end;
 
 
@@ -3018,6 +3023,9 @@ constructor THttpClientSocket.Create(aTimeOut: integer);
 begin
   if aTimeOut = 0 then
     aTimeOut := HTTP_DEFAULT_RECEIVETIMEOUT;
+  if Assigned(OnHttpClientSocketLog) and
+     not Assigned(OnLog) then
+    OnLog := OnHttpClientSocketLog;
   inherited Create(aTimeOut);
   if fExtendedOptions.UserAgent = '' then
     fExtendedOptions.UserAgent := DefaultUserAgent(self);
@@ -3367,24 +3375,36 @@ end;
 procedure THttpClientSocket.RequestSendHeader(const url, method: RawUtf8);
 var
   secret: SpiUtf8;
+  noport: boolean;
 begin
   if not SockIsDefined then
     exit;
   if SockIn = nil then
     CreateSockIn; // use SockIn by default if not already initialized: 2x faster
+  // append command line
+  noport := (fPort = '') or // = '' for fProxyHttp on port 80
+            (fPort = DEFAULT_PORT[ServerTls]);
   fSndBufLen := 0;
+  SockSendRaw([method, ' ']);
+  if fProxyHttp in fFlags then
+  begin
+    // absolute-URI 'GET http://www.example.org/pub/TheProject.html HTTP/1.1'
+    // see https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
+    SockSendRaw(['http://', fServer]);
+    if not noport then
+      SockSendRaw([':', fPort]);
+  end;
   if (url = '') or
      (url[1] <> '/') then
-    SockSendLine([method, ' /', url, ' HTTP/1.1']) // should always start with /
-  else
-    SockSendLine([method, ' ', url, ' HTTP/1.1']);
+    EnsureSockSend(1)^ := '/'; // should always start with /
+  SockSendLine([url, ' HTTP/1.1']);
+  // append main headers
   {$ifdef OSPOSIX}
   if SocketLayer = nlUnix then
     SockSend('Host: unix') // not part of the HTTP standard anyway
   else
   {$endif OSPOSIX}
-  if (fPort = '') or // = '' for fProxyHttp on port 80
-     (fPort = DEFAULT_PORT[ServerTls]) then
+  if noport then
     SockSendLine(['Host: ', fServer])
   else
     SockSendLine(['Host: ', fServer, ':', fPort]);

@@ -1310,7 +1310,7 @@ type
   /// used to map a TPropInfo.GetProc/SetProc pointer and retrieve its kind
   // - published here for proper Delphi inlining
   PropWrap = packed record
-    FillBytes: array [0 .. SizeOf(pointer) - 2] of byte;
+    FillBytes: array[0 .. SizeOf(pointer) - 2] of byte;
     /// =$ff for a ptField address, or =$fe for a ptVirtual method
     Kind: byte;
   end;
@@ -1619,19 +1619,6 @@ procedure ClearObject(Value: TObject; FreeAndNilNestedObjects: boolean = false);
 // - just a wrapper around Value.CleanupInstance
 procedure FinalizeObject(Value: TObject);
   {$ifdef HASINLINE} inline; {$endif}
-
-/// fill a simple value from a command line switch using RTTI
-// - works with strings, numbers, flots and even enum/set text identifiers
-function SetValueFromExecutableCommandLine(var Value; ValueInfo: PRttiInfo;
-  const SwitchName, Description: RawUtf8; CommandLine: TExecutableCommandLine = nil): boolean;
-
-/// fill a class instance properties from command line switches using RTTI
-// - SwitchPrefix + property name will be searched in CommandLine.Names[]
-// - is typically used to fill a settings class instance
-// - won't include any nested class or dynamic array properties
-function SetObjectFromExecutableCommandLine(Value: TObject;
-  const SwitchPrefix, DescriptionSuffix: RawUtf8;
-  CommandLine: TExecutableCommandLine = nil): boolean;
 
 
 { *************** Enumerations RTTI }
@@ -3139,6 +3126,12 @@ type
       read fGlobalClass write SetGlobalClass;
   end;
 
+var
+  /// direct lookup to the TRttiCustom of TRttiParserType values
+  PT_RTTI: array[TRttiParserType] of TRttiCustom;
+
+  /// direct lookup to the TRttiCustom of TRttiParserComplexType values
+  PTC_RTTI: array[TRttiParserComplexType] of TRttiCustom;
 
 /// low-level internal function use when inlining TRttiCustomProps.Find()
 // - caller should ensure that namelen <> 0
@@ -3154,16 +3147,35 @@ function FindPrivateSlot(c: TClass; slot: PPointer): pointer;
 function GetInstanceByPath(var Instance: TObject; const Path: RawUtf8;
   out Prop: PRttiCustomProp; PathDelim: AnsiChar = '.'): boolean;
 
+/// fill a simple value from a command line switch using RTTI
+// - works with strings, numbers, flots and even enum/set text identifiers
+function SetValueFromExecutableCommandLine(var Value; ValueInfo: PRttiInfo;
+  const SwitchName, Description: RawUtf8; CommandLine: TExecutableCommandLine = nil): boolean;
+
+type
+  /// optional callback used by SetObjectFromExecutableCommandLine()
+  // - allow to refine the information about a given property
+  // - return true to add the property, or false to skip setting this property
+  TOnObjectDefine = function(Sender: TExecutableCommandLine; Value: TObject;
+    Rtti: TRttiCustom; Prop: PRttiCustomProp;
+    var Description, Default: RawUtf8): boolean of object;
+var
+  /// optional callback used by SetObjectFromExecutableCommandLine()
+  // - this callback is global for all calls of the function
+  OnSetObjectFromExecutableCommandLine: TOnObjectDefine;
+
+/// fill a class instance properties from command line switches using RTTI
+// - SwitchPrefix + property name will be searched in CommandLine.Names[]
+// - is typically used to fill a settings class instance
+// - won't include any nested class or dynamic array properties
+// - see also OnSetObjectFromExecutableCommandLine global callback
+function SetObjectFromExecutableCommandLine(Value: TObject;
+  const SwitchPrefix, DescriptionSuffix: RawUtf8;
+  CommandLine: TExecutableCommandLine = nil): boolean;
+
 var
   /// low-level access to the list of registered PRttiInfo/TRttiCustom/TRttiJson
   Rtti: TRttiCustomList;
-
-  /// direct lookup to the TRttiCustom of TRttiParserType values
-  PT_RTTI: array[TRttiParserType] of TRttiCustom;
-
-  /// direct lookup to the TRttiCustom of TRttiParserComplexType values
-  PTC_RTTI: array[TRttiParserComplexType] of TRttiCustom;
-
 
 
 { ************************ TRttiMap Field Mapping (e.g. DTO/Domain Objects) }
@@ -6075,7 +6087,7 @@ function SetObjectFromExecutableCommandLine(Value: TObject;
 var
   rc: TRttiCustom;
   p: PRttiCustomProp;
-  v, desc, def, typ: RawUtf8;
+  v, desc, def, typ, vdef: RawUtf8;
   dolower: boolean;
   i: integer;
   v64: QWord;
@@ -6159,9 +6171,12 @@ begin
         if def <> '' then
           desc := FormatUtf8('% (default: %)', [desc, def]);
       end;
-      if CommandLine.Get([SwitchPrefix + p^.Name], v, desc) and
-         p^.Prop^.SetValueText(Value, v) then // supports also enums and sets
-        result := true;
+      vdef := '';
+      if (not Assigned(OnSetObjectFromExecutableCommandLine)) or
+         OnSetObjectFromExecutableCommandLine(CommandLine, Value, rc, p, desc, vdef) then
+        if CommandLine.Get([SwitchPrefix + p^.Name], v, desc, vdef) and
+           p^.Prop^.SetValueText(Value, v) then // supports also enums and sets
+          result := true;
     end;
     inc(p);
   end;
@@ -9304,27 +9319,27 @@ end;
 procedure TRttiCustom.NoRttiArrayFinalize(Data: PAnsiChar);
 var
   n: integer;
-  mem: PDynArrayRec;
+  da: PDynArrayRec;
 begin
   if Kind = rkArray then
   begin
     // static array has fixed number of items
     n := fCache.ItemCount;
-    mem := nil;
+    da := nil;
   end
   else
   begin
     // dereference rkDynArray pointer and retrieve length
-    mem := PPointer(Data)^;
-    if mem = nil then
+    da := PPointer(Data)^;
+    if da = nil then
       exit;
     PPointer(Data)^ := nil;
-    Data := pointer(mem);
-    dec(mem);
-    if mem.refCnt > 1 then
-      ERttiException.RaiseUtf8('%.ArrayFinalize: % has refcnt=%',
-        [self, ArrayRtti.Name, mem.refCnt]);
-    n := mem.length;
+    Data := pointer(da);
+    dec(da);
+    if (da^.refCnt <= 0) or
+       not DACntDecFree(da^.refCnt) then
+      exit;
+    n := da^.length;
   end;
   // release memory (T*ObjArray should never occur here)
   repeat
@@ -9332,8 +9347,8 @@ begin
     inc(Data, fArrayRtti.Size);
     dec(n);
   until n = 0;
-  if mem <> nil then
-    FreeMem(mem);
+  if da <> nil then
+    FreeMem(da);
 end;
 
 function TRttiCustom.ValueIsVoid(Data: PAnsiChar): boolean;
