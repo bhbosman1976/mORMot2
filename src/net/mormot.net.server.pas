@@ -2789,20 +2789,20 @@ begin
   if Text = '' then
     exit;
   case PCardinal(Text)^ of // case-sensitive test in occurrence order
-    ord('G') + ord('E') shl 8 + ord('T') shl 16:
+    GET_24:
       Method := urmGet;
-    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
+    POST_32:
       Method := urmPost;
-    ord('P') + ord('U') shl 8 + ord('T') shl 16:
+    PUT_24:
       Method := urmPut;
+    HEAD_32:
+      Method := urmHead;
+    DELE_32:
+      Method := urmDelete;
+    OPTI_32:
+      Method := urmOptions;
     ord('P') + ord('A') shl 8 + ord('T') shl 16 + ord('C') shl 24:
       Method := urmPatch;
-    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
-      Method := urmHead;
-    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
-      Method := urmDelete;
-    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24:
-      Method := urmOptions;
   else
     exit;
   end;
@@ -3313,12 +3313,12 @@ begin
 end;
 
 const
-  _CMD_200: array[boolean, boolean] of string[31] = (
+  _CMD_200: array[boolean, boolean] of TShort31 = (
    ('HTTP/1.1 200 OK'#13#10,
     'HTTP/1.0 200 OK'#13#10),
    ('HTTP/1.1 206 Partial Content'#13#10,
     'HTTP/1.0 206 Partial Content'#13#10));
-  _CMD_XXX: array[boolean] of string[15] = (
+  _CMD_XXX: array[boolean] of TShort15 = (
     'HTTP/1.1 ',
     'HTTP/1.0 ');
 
@@ -5383,9 +5383,9 @@ begin
     P := pointer(Http.CommandResp);
     if P = nil then
       exit; // connection is likely to be broken or closed
-    GetNextItem(P, ' ', Http.CommandMethod); // 'GET'
-    if (PCardinal(P)^ = ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
-       (PCardinal(P + 4)^ and $ffffff = ord(':') + ord('/') shl 8 + ord('/') shl 16) then
+    GetNextItem(P, ' ', Http.CommandMethod);           // 'GET'
+    if (PCardinal(P)^ = HTTP__32) and                  // 'http'
+       (PCardinal(P + 4)^ and $ffffff = HTTP__24) then // '://'
     begin
       // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
       B := P;
@@ -5396,8 +5396,7 @@ begin
     GetNextItem(P, ' ', Http.CommandUri);    // '/path'
     result := grRejected;
     if (P = nil) or
-       (PCardinal(P)^ <>
-         ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) then
+       (PCardinal(P)^ <> HTTP_32) then
       exit;
     http10 := P[7] = '0';
     fKeepAliveClient := ((fServer = nil) or
@@ -6355,7 +6354,7 @@ begin
 end;
 
 const
-  _LATE: array[boolean] of string[7] = ('', 'late ');
+  _LATE: array[boolean] of TShort7 = ('', 'late ');
 
 procedure THttpPeerCacheThread.OnFrameReceived(len: integer;
   var remote: TNetAddr);

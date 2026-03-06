@@ -1489,14 +1489,14 @@ end;
 
 procedure ComputeChallenge(const Base64: RawByteString; out Digest: TSha1Digest);
 const
-  // see https://tools.ietf.org/html/rfc6455
-  SALT: string[36] = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+  // see https://datatracker.ietf.org/doc/html/rfc6455#section-1.3
+  SALT: PAnsiChar = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 var
   sha1: TSha1;
 begin
   sha1.Init;
   sha1.Update(pointer(Base64), length(Base64));
-  sha1.Update(@SALT[1], 36);
+  sha1.Update(SALT, 36);
   sha1.Final(Digest);
 end;
 
@@ -2832,7 +2832,7 @@ begin
   key := Http.HeaderGetValue('SEC-WEBSOCKET-KEY');
   if Base64ToBinLengthSafe(pointer(key), length(key)) <> 16 then
     exit; // WS nonce must be a Base64-encoded value of 16 bytes
-  uri := TrimU(Http.CommandUri);
+  TrimU(Http.CommandUri, uri);
   if (uri <> '') and
      (uri[1] = '/') then
     Delete(uri, 1, 1);

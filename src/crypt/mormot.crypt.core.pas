@@ -1702,6 +1702,7 @@ type
     function FillRandomHex(Len: integer): RawUtf8;
     /// compute a pseudorandom UUid value according to the RFC 4122
     // - this method is stronger than RandomGuid() from mormot.core.os
+    // - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
     procedure FillGuid(out Guid: TGuid);
     /// xor a binary buffer with some pseudorandom data
     // - call FillRandom then xor the supplied buffer content
@@ -2512,6 +2513,29 @@ function Md5Buf(const Buffer; Len: cardinal): TMd5Digest;
 // - apache-compatible: 'agent007:download area:8364d0044ef57b3defcfa141e8f77b65'
 function HTDigest(const user, realm, pass: RawByteString): RawUtf8;
 
+const
+  /// RFC 4122 standard UUID v5 namespace for domain names e.g. 'example.com'
+  UUID_DNS:  TGuid = '{6ba7b810-9dad-11d1-80b4-00c04fd430c8}';
+  /// RFC 4122 standard UUID v5 namespace for URL, e.g. 'https://example.com/page'
+  UUID_URL:  TGuid = '{6ba7b811-9dad-11d1-80b4-00c04fd430c8}';
+  /// RFC 4122 standard UUID v5 namespace for ISO Object Identifiers
+  UUID_OID:  TGuid = '{6ba7b812-9dad-11d1-80b4-00c04fd430c8}';
+  /// RFC 4122 standard UUID v5 namespace for X.500 Distinguished Names (DN)
+  UUID_X500: TGuid = '{6ba7b814-9dad-11d1-80b4-00c04fd430c8}';
+
+/// compute a GUID from an identifier, following RFC 4122 standard UUID v5
+// - use standard UUID_DNS/UUID_URL/UUID_OID/UUID_X500 or your own namespace
+// - the name is case-sensitive during this generation
+// - e.g. 'www.opentofu.org' DNS into {df1e675d-b743-5f6c-9952-6311d0f141df}
+procedure IdentifierGuid(const name: RawUtf8; out guid: TGuid;
+  const namespace: TGuid);
+
+/// compute a GUID from an identifier, as does DotNet using SHA-1 hashing
+// - the name is case-insensitive during this generation
+// - compatible with Windows ETW name-based Provider ID / Control GUID
+// - e.g. 'MyCompany.MyComponent' into {ce5fa4ea-ab00-5402-8b76-9f76ac858fb5}
+procedure DotNetIdentifierGuid(const name: RawUtf8; out guid: TGuid);
+
 
 { ****************** HMAC Authentication over SHA-256 }
 
@@ -2634,18 +2658,14 @@ const
   SHA256DIGESTSTRLEN = SizeOf(TSha256Digest) * 2;
   MD5DIGESTSTRLEN = SizeOf(TMd5Digest) * 2;
 
-type
-  /// 32-characters ASCII string, e.g. as returned by AesBlockToShortString()
-  Short32 = string[32];
-
 /// compute the hexadecial representation of an AES 16-byte block
 // - returns a stack-allocated short string
-function AesBlockToShortString(const block: TAesBlock): short32; overload;
+function AesBlockToShortString(const block: TAesBlock): TShort32; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecial representation of an AES 16-byte block
 // - fill a stack-allocated short string
-procedure AesBlockToShortString(const block: TAesBlock; out result: short32); overload;
+procedure AesBlockToShortString(const block: TAesBlock; out result: TShort32); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the hexadecial representation of an AES 16-byte block
@@ -9920,6 +9940,51 @@ begin
   Append(result, Md5(tmp));
 end;
 
+procedure IdentifierGuid(const name: RawUtf8; out guid: TGuid;
+  const namespace: TGuid);
+var
+  sha1: TSha1;
+  dig: TSha1Digest;
+  be: TGuid absolute dig; // hash over big endian values
+begin
+  be := namespace;
+  SwapGuid(be);
+  sha1.Init;
+  sha1.Update(@be, SizeOf(be));
+  sha1.Update(name);
+  sha1.Final(dig, {noinit=}true);
+  SwapGuid(PGuid(@dig)^);
+  dig[7] := (dig[7] and $0f) or $50; // mark as version 5 = name-based GUID
+  dig[8] := (dig[8] and $3f) or $80; // set variant as per RFC 4122
+  guid := PGuid(@dig)^;
+end;
+
+const
+  DOTNET_NAMESPACE: TGuid = '{b22d2c48-90c3-c847-87f8-1a15bfc130fb}';
+
+procedure DotNetIdentifierGuid(const name: RawUtf8; out guid: TGuid);
+var
+  sha1: TSha1;
+  dig: TSha1Digest;
+  up: RawUtf8;
+  n: PtrInt;
+  tmp: TSynTempBuffer;
+begin
+  FillZero(guid);
+  UpperCaseCopy(name, up);           // normalize identifier to uppercase
+  n := Utf8DecodeToUnicode(up, tmp); // UTF-16 little endian
+  if n = 0 then
+    exit;
+  RawUnicodeSwapEndian(tmp.buf, n);  // UTF-16 big endian conversion
+  sha1.Init;
+  sha1.Update(@DOTNET_NAMESPACE, SizeOf(DOTNET_NAMESPACE));
+  sha1.Update(tmp.buf, n * 2);
+  sha1.Final(dig, {noinit=}true);
+  tmp.Done; // unlikely
+  dig[7] := (dig[7] and $0f) or $50; // mark as version 5 = name-based GUID
+  guid := PGuid(@dig)^;
+end;
+
 
 { TSha1 }
 
@@ -10244,13 +10309,13 @@ end;
 
 { ****************** Digest/Hash to Hexadecimal Text Conversion }
 
-procedure AesBlockToShortString(const block: TAesBlock; out result: short32);
+procedure AesBlockToShortString(const block: TAesBlock; out result: TShort32);
 begin
   result[0] := #32;
   mormot.core.text.BinToHex(@block, @result[1], 16);
 end;
 
-function AesBlockToShortString(const block: TAesBlock): short32;
+function AesBlockToShortString(const block: TAesBlock): TShort32;
 begin
   AesBlockToShortString(block, result);
 end;

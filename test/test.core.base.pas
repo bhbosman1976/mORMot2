@@ -351,7 +351,8 @@ end;
 
 procedure TTestCoreBase._CamelCase;
 var
-  v: RawUtf8;
+  v, v2, all: RawUtf8;
+  k: TSetCase;
 begin
   CheckEqual(UnCamelCase(''), '');
   v := UnCamelCase('On');
@@ -417,12 +418,43 @@ begin
   CheckEqual(SnakeCase('Abc_Def'), 'abc_def');
   CheckEqual(SnakeCase('AbcDef_'), 'abc_def_');
   CheckEqual(SnakeCase('Abc__Def'), 'abc_def');
+  CheckEqual(SnakeCase('Abc__Def', '-'), 'abc-def');
   CheckEqual(SnakeCase('AbcDef__'), 'abc_def_');
   CheckEqual(SnakeCase('Abc__Def__'), 'abc_def_');
+  CheckEqual(SnakeCase('Abc12Def'), 'abc_12_def');
+  CheckEqual(SnakeCase('X64Def', '-'), 'x64-def');
+  CheckEqual(SnakeCase('XY64Def', '-'), 'xy-64-def');
+  CheckEqual(SnakeCase('column1', '-'), 'column-1');
+  CheckEqual(SnakeCase('column100', '-'), 'column-100');
+  CheckEqual(SnakeCase('Column 1', '-'), 'column-1');
   CheckEqual(SnakeCase('variable name'), 'variable_name');
   CheckEqual(SnakeCase('Variable Name'), 'variable_name');
   CheckEqual(SnakeCase('VARIABLE NAME'), 'variable_name');
   CheckEqual(SnakeCase('VariableName'), 'variable_name');
+  v := 'Something';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Something');
+  v := 'something';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Something');
+  v := 'Some title';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Some Title');
+  v := 'some title';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Some Title');
+  for k := low(k) to high(k) do
+  begin
+    v := GetEnumNameTrimed(TypeInfo(TSetCase), ord(k));
+    v2 := SetCase(v, k);
+    CheckUtf8((v = v2) = (k in [scNoTrim, scTrimLeft, scPascalCase, scTitleCase]), v);
+    v := SetCase(v, k);
+    CheckEqual(v, v2, 'SetCase(self)');
+    Append(all, v, ',');
+  end;
+  CheckEqual(all, 'NoTrim,TrimLeft,AnyRemoved,Un camel case,Un Camel Title,' +
+    'lowercase,lower-case,lowerCaseFirst,UPPERCASE,snake_case,SCREAMING_SNAKE_CASE,' +
+    'kebab-case,dot.case,TitleCase,camelCase,PascalCase,');
 end;
 
 function GetBitsCount64(const Bits; Count: PtrInt): PtrInt;
@@ -433,7 +465,7 @@ begin
   begin
     dec(Count);
     if Count in TBits64(Bits) then // bt dword[rdi],edx is slow in such a loop
-      inc(result);                 // ... but correct :)
+      inc(result);                 // ... but simple and correct :)
   end;
 end;
 
@@ -3075,6 +3107,28 @@ begin
     Check(LoadJsonInPlace(h2, pointer(s), PT_INFO[pt]) <> nil);
     CheckUtf8(CompareMem(@h, @h2, PT_SIZE[pt]), '%', [PT_INFO[pt].RawName]);
   end;
+  // validate IdentifierGuid()/DotNetIdentifierGuid()
+  IdentifierGuid('www.opentofu.org', g, UUID_DNS);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'df1e675d-b743-5f6c-9952-6311d0f141df');
+  Check(not IsRandomGuid(@g), 'from identifier');
+  IdentifierGuid('https://www.opentofu.org/', g, UUID_URL);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'ace93eea-1a2c-5eed-b41b-718be15d2e50');
+  IdentifierGuid('1.3.6.1.4', g, UUID_OID);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'af9d40a5-7a36-5c07-b23a-851cd99fbfa5');
+  IdentifierGuid('CN=Example,C=GB', g, UUID_X500);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, '84e09961-4aa4-57f8-95b7-03edb1073253');
+  DotNetIdentifierGuid('MyCompany.MyComponent', g);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'ce5fa4ea-ab00-5402-8b76-9f76ac858fb5');
+  Check(not IsRandomGuid(@g), 'from identifier');
+  DotNetIdentifierGuid('YourProviderNameYourProviderName', g);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, '6f8eac67-f87f-598a-71a0-67e48d8c468d');
+  Check(not IsRandomGuid(@g), 'from identifier');
 end;
 
 procedure TTestCoreBase._ParseCommandArgs;
@@ -4569,9 +4623,20 @@ begin
   for i := 1 to 10 do
     AppendShortCardinal(i, a);
   check(a = '012345678910');
-  for i := 11 to 150 do
+  for i := 11 to 120 do
     AppendShortCardinal(i, a);
-  CheckHash(a, $6C291F09, 'AppendShortCardinal');
+  CheckEqual(length(a), 253);
+  CheckEqual(Hash32(@a[1], ord(a[0])), $1CDCEE09, 'AppendShortCardinal');
+  a := '';
+  AppendShortByte(0, @a);
+  check(a = '0');
+  for i := 1 to 10 do
+    AppendShortByte(i, @a);
+  check(a = '012345678910');
+  for i := 11 to 120 do
+    AppendShortByte(i, @a);
+  CheckEqual(length(a), 253);
+  CheckEqual(Hash32(@a[1], ord(a[0])), $1CDCEE09, 'AppendShortByte');
   Check(TwoDigits(0) = '0');
   Check(TwoDigits(1) = '1');
   Check(TwoDigits(10) = '10');
@@ -4697,15 +4762,20 @@ begin
   Check(not SameValue(386.0, 700, 2));
   Check(IntToThousandString(0) = '0');
   Check(IntToThousandString(1) = '1');
+  Check(IntToThousandString(9) = '9');
   Check(IntToThousandString(10) = '10');
   Check(IntToThousandString(100) = '100');
+  Check(IntToThousandString(999) = '999');
   Check(IntToThousandString(1000) = '1,000');
   Check(IntToThousandString(10000) = '10,000');
   Check(IntToThousandString(100000) = '100,000');
   Check(IntToThousandString(1000000) = '1,000,000');
+  Check(IntToThousandString(10000000) = '10,000,000');
   Check(IntToThousandString(-1) = '-1');
+  Check(IntToThousandString(-9) = '-9');
   Check(IntToThousandString(-10) = '-10');
   Check(IntToThousandString(-100) = '-100');
+  Check(IntToThousandString(-999) = '-999');
   Check(IntToThousandString(-1000) = '-1,000');
   Check(IntToThousandString(-10000) = '-10,000');
   Check(IntToThousandString(-100000) = '-100,000');
@@ -5458,10 +5528,13 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
 
   procedure CheckTrimCopy(const S: RawUtf8; start, count: PtrInt);
   var
-    t: RawUtf8;
+    t, c, u: RawUtf8;
   begin
     trimcopy(S, start, count, t);
-    checkEqual(t, TrimU(copy(S, start, count)));
+    c := copy(S, start, count);
+    CheckEqual(t, TrimU(c));
+    TrimU(c, u);
+    CheckEqual(t, u);
   end;
 
 var
@@ -7562,6 +7635,8 @@ begin
   CheckEqual(tmp, '0001-00-01');
   tmp := UnixTimePeriodToString(SecsPerDay * 365 * 2);
   CheckEqual(tmp, '0002-00-00');
+  CheckEqual(DateTimeToIso8601Text(Iso8601ToDateTime('1492-10-12T16:00:00')),
+    '1492-10-12T16:00:00');
 end;
 
 function LocalTimeToUniversal(LT: TDateTime; TZOffset: Integer): TDateTime;
@@ -7606,9 +7681,31 @@ begin
   CheckEqual(bias, 0);
   Check(ParseTimeZone('+0100', bias));
   CheckEqual(bias, 60);
+  Check(ParseTimeZone('+02', bias));
+  CheckEqual(bias, 120);
   Check(ParseTimeZone('+1005', bias));
   CheckEqual(bias, 605);
   Check(ParseTimeZone('-1005', bias));
+  CheckEqual(bias, -605);
+  Check(ParseTimeZone('Z', bias));
+  CheckEqual(bias, 0);
+  Check(ParseTimeZone('+10', bias));
+  CheckEqual(bias, 600);
+  Check(ParseTimeZone('GMT', bias));
+  CheckEqual(bias, 0);
+  Check(not ParseTimeZone('-1', bias));
+  Check(not ParseTimeZone('-100', bias));
+  Check(ParseTimeZone('-10', bias));
+  CheckEqual(bias, -600);
+  Check(ParseTimeZone('-00:00', bias));
+  CheckEqual(bias, TimeZoneLocalBias);
+  Check(ParseTimeZone('+00:00', bias));
+  CheckEqual(bias, 0);
+  Check(ParseTimeZone('+01:00', bias));
+  CheckEqual(bias, 60);
+  Check(ParseTimeZone('+10:05', bias));
+  CheckEqual(bias, 605);
+  Check(ParseTimeZone('-10:05', bias));
   CheckEqual(bias, -605);
   Check(not ParseTimeZone('+1O05', bias));
   CheckEqual(bias, -605);
@@ -9180,6 +9277,19 @@ begin
   Check(not IsInvalidHttpHeader('a'#13#10));
   Check(not IsInvalidHttpHeader('a'#13#10'b'#13#10));
   Check(not IsInvalidHttpHeader('a'#13#10'b'));
+  Check(not IsInvalidHttpHeader('aa'#13#10'bb'#13#10));
+  Check(not IsInvalidHttpHeader('aaa'#13#10'bbb'));
+  Check(not IsInvalidHttpHeader('aaa'#13#10'bbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaa'#13#10'bbbb'));
+  Check(not IsInvalidHttpHeader('aaaa'#13#10'bbbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa'#13#10'bbbbb'));
+  Check(not IsInvalidHttpHeader('aaaaa'#13#10'bbbbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa '#13#10'bbbbb '));
+  Check(not IsInvalidHttpHeader('aaaaa '#13#10'bbbbb '#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa  '#13#10'bbbbb  '));
+  Check(not IsInvalidHttpHeader('aaaaa  '#13#10'bbbbb  '#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa  1'#13#10'bbbbb  1'));
+  Check(not IsInvalidHttpHeader('aaaaa  1'#13#10'bbbbb  1'#13#10));
   Check(IsInvalidHttpHeader(#13#10'a'#13#10));
   Check(IsInvalidHttpHeader(#10'a'#13#10));
   Check(IsInvalidHttpHeader(#13#10#13#10'a'#13#10));
@@ -9192,6 +9302,15 @@ begin
   Check(IsInvalidHttpHeader('a'#13#10'b'#13#13));
   Check(IsInvalidHttpHeader('a'#13#10'b'#13));
   Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  s := 'Content-Type: text/html;charset=utf-8'#13#10'ETag: "E039C149"';
+  Check(not IsInvalidHttpHeader(s), 'httphead0');
+  Check(not IsInvalidHttpHeader(s), 'httphead1');
+  Append(s, [#13#10]);
+  Check(not IsInvalidHttpHeader(s), 'httphead2');
+  AppendLine(s, ['name: ', 10]);
+  Check(not IsInvalidHttpHeader(s), 'httphead3');
+  AppendLine(s, ['ident: ', 7]);
+  CheckHash(s, $56DED9BD, 'httphead4');
   s := 'toto'#13#10;
   Check(not IsInvalidHttpHeader(s));
   CheckEqual(PurgeHeaders(''), '');
@@ -9486,13 +9605,15 @@ procedure TTestCoreBase.Debugging;
   end;
 
 var
-  tmp: array[0..512] of AnsiChar;
+  tmp: TBuffer2K;
+  dst, up: PUtf8Char;
   msg, n, v: RawUtf8;
   os, os2: TOperatingSystem;
   ld: TLinuxDistribution;
   islinux: boolean;
   osv: TOperatingSystemVersion;
   len: integer;
+  //sock: TNetSocket;
 begin
   // validate UserAgentParse()
   Check(not UserAgentParse('toto (mozilla)', n, v, os));
@@ -9553,20 +9674,65 @@ begin
     for os2 := low(os) to high(os) do
       Check((OS_INITIAL[os2] = OS_INITIAL[os]) = (os2 = os), 'OS_INITIAL');
   end;
-  // validate SyslogMessage()
+  // validate Syslog messages formatting
+  msg := ' test  ';
+  dst := @tmp;
   FillcharFast(tmp, SizeOf(tmp), 1);
-  len := SyslogMessage(sfAuth, ssCrit, 'test', '', '', tmp, SizeOf(tmp), false);
-  // Check(len=65); // <-- different for every PC, due to PC name differences
-  tmp[len] := #0;
-  Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<34>1 ')));
-  Check(PosEx(' - - - test', tmp) = len - 10);
+  len := SyslogBsdPrepare(sllInfo, pointer(msg), length(msg), tmp);
+  // e.g. '<14>Feb 11 13:45:19 dev-ab mormot2tests[23014]: test'
+  Check(len > 10);
+  Check(IdemPChar(dst, PAnsiChar('<14>')));
+  Check(tmp[len] = #0, 'ending #0');
+  Check(tmp[len + 1] = #1, 'buffer');
+  {if NewUnixSocket('/dev/log', sock) = nrOk then
+  begin
+    writeln(sock.Send(@tmp, len));
+    sock.Close;
+  end;}
+  FillcharFast(tmp, SizeOf(tmp), 1);
+  len := SyslogMessage(sfAuth, ssCrit, pointer(msg), length(msg),
+    '', '', tmp, SizeOf(tmp), false);
+  // e.g. <34>1 2026-02-11T15:01:23.552Z dev-ab mormot2tests - - - test
+  Check(len > 50); // len different for every PC, due to PC name differences
+  Check(IdemPChar(dst, PAnsiChar('<34>1 ')));
+  up := ' - - - TEST';
+  CheckEqual(StrPosI(up, dst) - dst, len - 11);
   msg := RawUtf8OfChar('+', 300);
-  len := SyslogMessage(sfLocal4, ssNotice, msg, 'proc', 'msg', tmp, 300, false);
-  Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<165>1 ')));
-  Check(PosEx(' proc msg - ++++', tmp) > 1);
+  len := SyslogMessage(sfLocal4, ssNotice, pointer(msg), length(msg),
+    'proc', 'msg', tmp, 300, false);
+  Check(IdemPChar(dst, PAnsiChar('<165>1 ')));
+  up := ' PROC MSG - ++++';
+  Check(StrPosI(up, dst) <> nil, 'proc msg');
   Check(len < 300, 'truncated to avoid buffer overflow');
-  Check(tmp[len - 1] = '+');
-  Check(tmp[len] = #1);
+  Check(tmp[len - 1] = '+', 'last+');
+  Check(tmp[len] = #0, 'ending #0');
+  Check(tmp[len + 1] = #1, 'buffer');
+  FillcharFast(tmp, len, 1);
+  len := SyslogPrepare(sllInfo, pointer(msg), length(msg), tmp, dst, {tls=}false);
+  Check(len > 50);
+  Check(len < 400);
+  Check(IdemPChar(dst, PAnsiChar('<14>1 ')));
+  Check(dst[len - 1] = '+', 'last+');
+  Check(dst[len] = #0, 'ending #0');
+  Check(dst[len + 1] = #1, 'buffer');
+  // '361 <14>1 2026-02-11T12:03:02.386Z dev-ab mormot2tests 20096 - - +++++...'
+  FillcharFast(dst^, len, 1);
+  len := SyslogPrepare(sllInfo, pointer(msg), length(msg), tmp, dst, {tls=}true);
+  Check(StrPosI(pointer(msg), dst) <> nil, 'msg in syslog');
+  FormatUtf8(' % ', [GetCurrentProcessId], v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'pid in syslog');
+  UpperCaseCopy(Executable.Host, v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'host in syslog');
+  UpperCaseCopy(Executable.ProgramName, v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'appname in syslog');
+  Check(len > 50);
+  Check(len < 400);
+  Check(dst[3] = ' ');
+  Check(IdemPChar(@dst[4], PAnsiChar('<14>1 ')));
+  CheckEqual(GetInteger(dst), len - 4);
+  Check(dst[len - 1] = '+', 'last+');
+  Check(dst[len] = #0, 'ending #0');
+  Check(dst[len + 1] = #1, 'buffer');
   // validate TSynLogFile
   Test('D:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.4 (2011-04-07 11:09:06)'#13#10 +
     'Host=MyPC User=MySelf CPU=2*0-15-1027 OS=2.3=5.1.2600 Wow64=0 Freq=3579545 ' +
@@ -10256,7 +10422,7 @@ end;
 
 procedure TTestCoreBase._TSynQueue;
 var
-  o, i, j, k, n: integer;
+  o, i, j, k, n: integer; // not PtrInt
   f: TSynQueue;
   u, v: RawUtf8;
   savedint: TIntegerDynArray;
@@ -10266,34 +10432,43 @@ begin
   try
     for o := 1 to 1000 do
     begin
-      check(f.Count = 0);
+      checkEqual(f.Count, 0);
       check(not f.Pending);
       for i := 1 to o do
         f.Push(i);
       check(f.Pending);
-      check(f.Count = o);
+      checkEqual(f.Count, o);
       check(f.Capacity >= o);
       f.Save(savedint);
       check(Length(savedint) = o);
+      check(f.Contains(@o), 'cont0'); // O(n) since queue is a FIFO
       for i := 1 to o do
       begin
         j := -1;
-        check(f.Peek(j));
-        check(j = i);
+        check(f.Peek(j), 'peek');
+        checkEqual(j, i);
+        check(f.Contains(@i), 'cont1'); // O(1) since find immediately
+        checkEqual(f.PeekCompare(nil), 1);
+        checkEqual(f.PeekCompare(@j), 0);
         j := -1;
-        check(f.Pop(j));
-        check(j = i);
+        checkEqual(f.PeekCompare(@j), 1);
+        check(not f.PopEquals(@j, j), 'popeq');
+        check(f.Pop(j), 'pop');
+        checkEqual(j, i);
+        if i < 10 then // is O(n) after Pop()
+          check(not f.Contains(@i), 'cont2');
       end;
       check(not f.Pending);
-      check(f.Count = 0);
+      checkEqual(f.Count, 0);
+      checkEqual(f.PeekCompare(@j), -1);
       check(f.Capacity > 0);
       f.Clear; // ensure f.Pop(j) will use leading storage
       check(not f.Pending);
-      check(f.Count = 0);
-      check(f.Capacity = 0);
-      check(Length(savedint) = o);
+      checkEqual(f.Count, 0);
+      checkEqual(f.Capacity, 0);
+      checkEqual(Length(savedint), o);
       for i := 1 to o do
-        check(savedint[i - 1] = i);
+        checkEqual(savedint[i - 1], i);
       n := 0;
       for i := 1 to o do
         if i and 7 = 0 then
@@ -10308,10 +10483,11 @@ begin
           f.Push(i);
           inc(n);
         end;
-      check(f.Count = n);
+      checkEqual(f.Count, n);
       check(f.Pending);
+      check(f.Contains(@o) = (o and 7 <> 0), 'cont3');
       f.Save(savedint);
-      check(Length(savedint) = n);
+      checkEqual(Length(savedint), n);
       for i := 1 to n do
         check(savedint[i - 1] and 7 <> 0);
       for i := 1 to n do
@@ -10320,10 +10496,10 @@ begin
         check(f.Peek(j));
         k := -1;
         check(f.Pop(k));
-        check(j = k);
+        checkEqual(j, k);
         check(j and 7 <> 0);
       end;
-      check(f.Count = 0);
+      checkEqual(f.Count, 0);
       check(f.Capacity > 0);
     end;
   finally
@@ -10363,7 +10539,10 @@ begin
       begin
         u := '';
         check(f.Peek(u));
+        check(f.Contains(@u), 'cont4'); // O(1) since find immediately
+        checkEqual(f.PeekCompare(@u), 0);
         v := '';
+        checkEqual(f.PeekCompare(@v), 1);
         check(f.Pop(v));
         check(u = v);
         check(GetInteger(pointer(u)) and 7 <> 0);

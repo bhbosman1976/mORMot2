@@ -1513,7 +1513,7 @@ const
 
 procedure TTestCoreProcess.EncodeDecodeJSON;
 var
-  J, J2, U, U2: RawUtf8;
+  J, J2, K, U, U2: RawUtf8;
   info: TGetJsonField;
   P: PUtf8Char;
   vv: variant;
@@ -1530,7 +1530,6 @@ var
   Disco, Disco2: TTestCustomDiscogs;
   Cache: TEntry;
   peop: TOrmPeople;
-  K: RawUtf8;
   strict, Valid: boolean;
   RB: RawBlob;
   Enemy: TEnemy;
@@ -1896,7 +1895,7 @@ var
     ab0, ab1: TSubAB;
     cd0, cd1, cd2: TSubCD;
     agg, agg2: TAggregate;
-    X, U, J: RawUtf8;
+    X, U, J, J2: RawUtf8;
     AA, AB: TRawUtf8DynArrayDynArray;
     i, a, v: PtrInt;
     mix1: TTestCustomJsonMixed;
@@ -1999,7 +1998,11 @@ var
         check(IsValidJson(AA[i, a]));
         check(IsValidJson('    ' + AA[i, a]));
         check(IsValidJson(AA[i, a] + '  '));
+        Prepend(RawByteString(AA[i, a]), 'a'); // ["a0","a1",..]
+        check(not IsValidJson(AA[i, a]));
       end;
+      if AA[i] <> nil then
+        Make(['192.168.0.', i, '/24'], AA[i, Random32(length(AA[i]))]);
     end;
     binary := DynArraySave(AA, TypeInfo(TRawUtf8DynArrayDynArray));
     Check(DynArrayLoad(AB, pointer(binary), TypeInfo(TRawUtf8DynArrayDynArray),
@@ -2016,9 +2019,20 @@ var
     CheckEqual(GetCodePage(J), CP_UTF8);
     {$endif HASCODEPAGE}
     check(IsValidJson(J));
+    J2 := StringReplaceAll(J, '"', '');
     Finalize(AB);
-    Check(DynArrayLoadJsonInPlace(
-      AB, pointer(J), TypeInfo(TRawUtf8DynArrayDynArray)) <> nil);
+    Check(DynArrayLoadJsonInPlace(AB, pointer(J),
+      TypeInfo(TRawUtf8DynArrayDynArray)) <> nil, '["a0","a1",..]');
+    Check(length(AA) = length(AB));
+    for i := 0 to high(AA) do
+    begin
+      Check(length(AA[i]) = length(AB[i]));
+      for a := 0 to high(AA[i]) do
+        Check(AA[i, a] = AB[i, a]);
+    end;
+    Finalize(AB);
+    Check(DynArrayLoadJsonInPlace(AB, pointer(J2),
+      TypeInfo(TRawUtf8DynArrayDynArray)) <> nil, 'extended [a0,a1,..] format');
     Check(length(AA) = length(AB));
     for i := 0 to high(AA) do
     begin
@@ -2044,16 +2058,41 @@ var
     agg.cdArr[0] := cd0;
     agg.cdArr[1] := cd1;
     agg.cdArr[2] := cd2;
-    U :=
-      '{"abArr":[{"a":"AB0","b":0},{"a":"AB1","b":1}],"cdArr":[{"c":0,"d":"CD0"},' + '{"c":1,"d":"CD1"},{"c":2,"d":"CD2"}]}';
+    U :=  '{"abArr":[{"a":"AB0","b":0},{"a":"AB1","b":1}],' +
+           '"cdArr":[{"c":0,"d":"CD0"},{"c":1,"d":"CD1"},{"c":2,"d":"CD2"}]}';
     CheckHash(U, $E3AC9C44);
     check(IsValidJson(U));
+    check(IsValidJson(U, {strict=}true), 'strict1');
     J := RecordSaveJson(agg, TypeInfo(TAggregate));
     CheckEqual(J, U);
-    RecordLoadJsonInPlace(agg2, UniqueRawUtf8(U), TypeInfo(TAggregate));
+    Finalize(agg2);
+    Check(RecordLoadJsonInPlace(agg2, UniqueRawUtf8(U), TypeInfo(TAggregate)) <> nil);
     J := RecordSaveJson(agg2, TypeInfo(TAggregate));
     CheckHash(J, $E3AC9C44);
     check(IsValidJson(J));
+    Finalize(agg2);
+    U := '{abArr: [{a:AB0,b:0},{a:AB1,b:1}],' +
+          'cdArr: [{c:0,d:CD0},{c:1,d:CD1},{c:2,d:CD2}]}';
+    check(IsValidJson(U), 'relaxed JSON');
+    check(not IsValidJson(U, {strict=}true), 'strict2');
+    Check(RecordLoadJson(agg2, U, TypeInfo(TAggregate)));
+    CheckEqual(RecordSaveJson(agg2, TypeInfo(TAggregate)), J);
+    Finalize(agg2);
+    U := '{abArr: [{a:AB0,b:0,},{a:AB1,b:1,},],' +
+          'cdArr: [{c:0,d:CD0,},{c:1,d:CD1,},{c:2,d:CD2,},],}';
+    check(IsValidJson(U), 'json5 comma valid');
+    check(not IsValidJson(U, {strict=}true), 'strict3');
+    Check(not RecordLoadJson(agg2, U, TypeInfo(TAggregate)), 'no json5 comma');
+    U := RemoveCommentsFromJson(U);
+    Check(RecordLoadJson(agg2, U, TypeInfo(TAggregate)), 'json5 removecomments');
+    CheckEqual(RecordSaveJson(agg2, TypeInfo(TAggregate)), J);
+    Finalize(agg2); 
+    U := '{abArr = [ { a = AB0, b = 0 }, { a = AB1, b = 1 }],' +
+      'cdArr = [ { c = 0, d = CD0 },  { c = 1, d = CD1 }, { c = 2, d = CD2 }]}';
+    check(IsValidJson(U), '= relaxed JSON');
+    check(not IsValidJson(U, {strict=}true), 'strict4');
+    Check(RecordLoadJson(agg2, U, TypeInfo(TAggregate)), 'relaxed =');
+    CheckEqual(RecordSaveJson(agg2, TypeInfo(TAggregate)), J);
     Finalize(agg);
     CheckEqual(length(agg.abArr), 0);
     Check(not DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
@@ -2110,6 +2149,7 @@ var
     U := RecordSaveJson(JAS, TypeInfo(TTestCustomJsonArraySimple));
     CheckEqual(U, '{"A":0,"B":0,"C":[],"D":"","E":[],"H":""}');
     check(IsValidJson(U));
+    check(IsValidJson(U, {strict=}true), 'strictA');
     U := '{"a":1,"b":2,"c":["C9A646D3-9C61-4CB7-BFCD-EE2522C8F633",' +
       '"3F2504E0-4F89-11D3-9A0C-0305E82C3301"],"d":"4","e":[{"f":"f","g":["g1","g2"]}],"h":"h"}';
     J := U;
@@ -2597,8 +2637,35 @@ var
     check(CompareBuf(v, info.Value, info.ValueLen) = 0);
   end;
 
+  procedure TestJsonArrayAsCsv(const json, expected: RawUtf8);
+  var
+    tmp: RawUtf8;
+    len: PtrInt;
+  begin
+    FastSetString(tmp, pointer(json), length(json));
+    len := JsonArrayAsCsv(pointer(tmp));
+    if len = 0 then
+    begin
+      Check(expected = '');
+      exit;
+    end;
+    Check(len < length(tmp));
+    FakeLength(tmp, len);
+    CheckEqual(tmp, expected);
+  end;
+
 begin
   TestSimpleEnum;
+  TestJsonArrayAsCsv('', '');
+  TestJsonArrayAsCsv('123', '');
+  TestJsonArrayAsCsv('[1]', '1');
+  TestJsonArrayAsCsv('[ "1" ]', '1');
+  TestJsonArrayAsCsv('[ "1 " ]  ', '1 ');
+  TestJsonArrayAsCsv('[1 , 2  ]', '1,2');
+  TestJsonArrayAsCsv('["1 "," 2  "]', '1 , 2  ');
+  TestJsonArrayAsCsv('["1 "," 2  "', '');
+  TestJsonArrayAsCsv('["1 ":" 2  "]', '');
+  TestJsonArrayAsCsv('["ip:1.2.3.4", "1.2.3.5"]', 'ip:1.2.3.4,1.2.3.5');
   FillcharFast(F, SizeOf(F), 0); // initialize all fields before DA.Add(F)
   TestGetJsonField('', '', false, true, #0, #0);
   TestGetJsonField('true,false', 'true', false, false, ',', 'f');
@@ -2790,7 +2857,7 @@ begin
   J := JsonEncode('{name:"John",field:{ "$regex": "acme.*corp", $options: "i" }}',
     [], []);
   CheckEqual(J, '{"name":"John","field":{"$regex":"acme.*corp","$options":"i"}}');
-  // below only works if unit mormot.db.nosql.bson is included in uses
+  // below line only works if unit mormot.db.nosql.bson is included in uses
   CheckEqual(JsonEncode('{name:?,field:/%/i}', ['acme.*corp'], ['John']), J);
   peop := TOrmPeople.Create;
   try
@@ -2957,11 +3024,47 @@ begin
     '"sendFileLocationRoot": "snake-ukrpatent-local"'#10'}*/'#10'} //eol'#10'}';
   check(IsValidJson(J, {strict=}false));
   check(not IsValidJson(J, {strict=}true));
-  RemoveCommentsFromJson(UniqueRawUTF8(J));
+  RemoveCommentsFromJson(UniqueRawUtf8(J));
   check(IsValidJson(J, {strict=}false));
   check(IsValidJson(J, {strict=}true));
-  J := JSONReformat(J,jsonCompact);
+  J := JsonReformat(J, jsonCompact);
   CheckEqual(J,'{"httpServer":{"host":"*","port":"8881","serverType":"Socket"}}');
+  J := JsonReformat(J, jsonUnquotedPropNameCompact);
+  CheckEqual(J,'{httpServer:{host:"*",port:"8881",serverType:"Socket"}}');
+  CheckEqual(JsonReformat(
+    '{httpServer:{host:"*",port:"8881",serverType:"Socket"}}',
+    jsonUnquotedPropNameCompact), J);
+  CheckEqual(JsonReformat(
+    '{ httpServer = { host = "*", port = "8881", serverType = "Socket" } }',
+    jsonUnquotedPropNameCompact), J, 'json =');
+  CheckEqual(JsonReformat(
+    '{httpServer:{host:"*",port:"8881",serverType:"Socket",},}',
+    jsonUnquotedPropNameCompact), J, 'json5 object1 reformat');
+  CheckEqual(JsonReformat(
+   '{one:{a:1,b:2,},two:2,}', jsonUnquotedPropNameCompact),
+   '{one:{a:1,b:2},two:2}', 'json5 object2 reformat');
+  CheckEqual(JsonReformat(
+    '{httpServer:[ one, two ]}', jsonUnquotedPropNameCompact),
+    '{httpServer:[one,two]}', 'unquote value array');
+  CheckEqual(JsonReformat(
+   '{httpServer:["one", "two" ] }', jsonUnquotedPropNameCompact),
+   '{httpServer:["one","two"]}', 'array reformat');
+  CheckEqual(JsonReformat(
+   '{httpServer:["one", "two" ], }', jsonUnquotedPropNameCompact),
+   '{httpServer:["one","two"]}', 'json5 object3 reformat');
+  CheckEqual(JsonReformat(
+   '{httpServer:["one", "two", ] }', jsonUnquotedPropNameCompact),
+   '{httpServer:["one","two"]}', 'json5 array reformat');
+  CheckEqual(JsonReformat(
+   '{a = [ "one", "two", ], b = 2, }', jsonUnquotedPropNameCompact),
+   '{a:["one","two"],b:2}', 'json5 array+object reformat');
+  CheckEqual(JsonReformat(
+   '{a = [ ''one'', ''two'', ], b = 2, }', jsonUnquotedPropNameCompact),
+   '{a:["one","two"],b:2}', 'json5 array+object+singlequote reformat');
+  J := JsonReformat(J, json5);
+  CheckEqual(J,'{'#$0D#$0A#$09'httpServer: {'#$0D#$0A#$09#$09'host: "*",' +
+    #$0D#$0A#$09#$09'port: "8881",'#$0D#$0A#$09#$09'serverType: "Socket",' +
+    #$0D#$0A#$09'},'#$0D#$0A'}');
   J := '{"RowID":  210 ,"Name":"Alice","Role":"User","Last Login":null, ' +
     '// comment'#13#10'"First Login" : /* to be ignored */  null  ,  "Department"' +
     ' :    "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]';
@@ -3166,9 +3269,22 @@ begin
     J := ObjectToJson(Coll, [woHumanReadable]);
     check(IsValidJson(U));
     CheckHash(J, $7694E4C1);
-    Check(JsonReformat(J, jsonCompact) = U);
-    Check(JsonReformat('{ "empty": {} }') =
-      '{'#$D#$A#9'"empty": {'#$D#$A#9#9'}'#$D#$A'}');
+    CheckEqual(JsonReformat(J, jsonCompact), U);
+    CheckEqual(JsonReformat(J, json5), '{'#$0D#$0A#$09'One: {' +
+      #$0D#$0A#$09#$09'Color: 1,'#$0D#$0A#$09#$09'Length: 0,' +
+      #$0D#$0A#$09#$09'Name: "test\"\\2",'#$0D#$0A#$09'},'#$0D#$0A#$09 +
+      'Coll: '#$0D#$0A#$09'['#$0D#$0A#$09#$09'{'#$0D#$0A#$09#$09#$09 +
+      'Color: 10,'#$0D#$0A#$09#$09#$09'Length: 0,'#$0D#$0A#$09#$09#$09 +
+      'Name: "",'#$0D#$0A#$09#$09'},'#$0D#$0A#$09#$09'{'#$0D#$0A#$09#$09#$09 +
+      'Color: 0,'#$0D#$0A#$09#$09#$09'Length: 0,'#$0D#$0A#$09#$09#$09 +
+      'Name: "name",'#$0D#$0A#$09#$09'},'#$0D#$0A#$09'],'#$0D#$0A#$09 +
+      'Str: null,'#$0D#$0A'}');
+    CheckEqual(JsonReformat('{ "empty": {} }'),
+      '{'#$D#$A#9'"empty": {}'#$D#$A'}');
+    CheckEqual(JsonReformat('{ "empty": {} }', json5),
+      '{'#$D#$A#9'empty: {},'#$D#$A'}');
+    CheckEqual(JsonReformat('{ "empty": [] }', json5),
+      '{'#$D#$A#9'empty: [],'#$D#$A'}');
     U := ObjectToJson(Coll, [woStoreClassName]);
     check(IsValidJson(U));
     CheckEqual(U,
@@ -3193,6 +3309,9 @@ begin
       Check(Comp.ClassType = TComplexNumber);
       CheckSame(Comp.Real, 10.3);
       CheckSame(Comp.Imaginary, 7.92);
+      U := ObjectToJson(Comp, [woStoreClassName]);
+      check(IsValidJson(U));
+      CheckEqual(U, '{"ClassName":"TComplexNumber","Real":10.3,"Imaginary":7.92}');
       U := ObjectToJson(Comp, [woStoreClassName]);
       check(IsValidJson(U));
       CheckEqual(U, '{"ClassName":"TComplexNumber","Real":10.3,"Imaginary":7.92}');
@@ -5161,7 +5280,7 @@ begin
   FillCharFast(b2, SizeOf(b2), 0);
   // mORMot 1 serialization with Delphi extended RTTI
   u2 := '{"Precision":1,"SignSpecialPlaces":0,"Fraction":' +
-    '"5000000000000000000000000000000000000000000000000000000000000000"}';
+        '"5000000000000000000000000000000000000000000000000000000000000000"}';
   Check(RecordLoadJson(b2, u2, TypeInfo(TBcd)));
   BcdToUtf8(b2, u2);
   CheckEqual(u2, '5');
@@ -5428,6 +5547,10 @@ var
   end;
 
 begin
+  if CheckFailed(BsonVariantType <> nil, 'no BsonVariantType') then
+    exit;
+  if CheckFailed(BsonVariantVType <> 0, 'no BsonVariantVType') then
+    exit;
   CheckEqual(SizeOf(TDecimal128), 16);
   CheckEqual(ord(betEof), $00);
   CheckEqual(ord(betInt64), $12);
@@ -5730,13 +5853,34 @@ begin
   o := _Json('{"hello": null}');
   Check(TVarData(o).VType = DocVariantVType);
   check(string(o) = '{"hello":null}');
-  o := _Json('{"hello": world}');
-  Check(TVarData(o).VType = varEmpty, 'invalid JSON content');
+  o := _Json('{ hello : true }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"hello":true}', 'boolean not relaxed');
+  o := _Json('{ hello : ''true'' }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"hello":"true"}', 'boolean not relaxed');
+  o := _Json('{"hello": world }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"hello":"world"}', 'relaxed json object');
+  o := _Json('{ hello = [ one country , one nation ] }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"hello":["one country","one nation"]}', 'relaxed json array');
+  o := _Json('{ hello = [ one = 1 , two = 10 ] }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"hello":["one = 1","two = 10"]}', 'relaxed json = array');
+  o := _Json('{ static = [ 192168, 192169 ] }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"static":[192168,192169]}', 'numbers');
+  o := _Json('{ static = [ 192.168.0.1, 192.168.0.20 ] }');
+  u := VariantSaveJson(o);
+  CheckEqual(u, '{"static":["192.168.0.1","192.168.0.20"]}', 'relaxed ip');
   CheckRegEx(_Json(
     '{name:"John",field:{ "$regex": "acme.*corp", $options: "i" }}'));
+  CheckRegEx(_Json(
+    '{name:"John",field:{ "$regex": "acme.*corp", "$options": "i" }}'));
   CheckRegEx(_Json(REGEX2));
   CheckRegEx(_JsonFast(
-    '{"name":"John",field:{ "$regex": "acme.*corp", $options: "i" }}'));
+    '{name = "John", field = { "$regex": "acme.*corp", $options: "i" }}'));
   CheckRegEx(_JsonFast(REGEX2));
   temp := Bson(REGEX2);
   b := pointer(temp);
@@ -6205,12 +6349,15 @@ begin
                 '{"source":"source1","target":"target1"},' +
                 '{"source":"source2","target":"target2"}', 'Reduce');
   a.Clear;
-  j := '{"id": 1, "name": Tom}'; // invalid JSON
-  Check(not IsValidJson(j, {strict=}false));
+  j := '{"id": 10, "name": Tom}'; // invalid JSON - but extended unquoted value
+  Check(IsValidJson(j, {strict=}false));
   Check(not IsValidJson(j, {strict=}true));
-  Check(not d.InitJson(j));
-  CheckEqual(d.Count, 0);
-  j := '{ id : 1 , name : ''To''''m'' , another : true }'; // valid extended JSON
+  Check(d.InitJson(j));
+  CheckEqual(d.Count, 2);
+  CheckEqual(d.I['ID'], 10);
+  CheckEqual(d.U['NAME'], 'Tom');
+  d.Clear;
+  j := '{ id : 1 , name : ''To''''m'' , another : true }'; // extended 'value'
   Check(IsValidJson(j, {strict=}false));
   Check(not IsValidJson(j, {strict=}true));
   Check(d.InitJson(j));
@@ -6877,8 +7024,10 @@ var
   ps: TEnumPetStore1;
   pss, pss2: TEnumPetStore1Set;
   psa: array of TEnumPetStore1;
-  astext: boolean;
   P: PUtf8Char;
+  astext: boolean;
+  k: TRttiKind;
+  t: TRttiParserType;
   eoo: AnsiChar;
   e: TEmoji;
   ep: TSetMyEnumPart;
@@ -6889,7 +7038,19 @@ var
   d: TTest;
   {$endif HASEXTRECORDRTTI}
 begin
+  // some paranoid checks
+  for k := low(k) to high(k) do
+  begin
+    Check(Assigned(RTTI_FINALIZE[k]) = (k in rkManagedTypes + [rkClass]));
+    Check(Assigned(RTTI_MANAGEDCOPY[k]) = (k in rkManagedTypes));
+  end;
+  CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
+  CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
+  Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
+  for t := succ(low(t)) to high(t) do
+    Check(Assigned(PT_INFO[t]) <> (t in (ptComplexTypes - [ptOrm, ptTimeLog])));
   {$ifdef HASEXTRECORDRTTI}
+  // quickly validate Delphi 2010+ exxtended RTTI
   r := Rtti.RegisterType(TypeInfo(TPeople));
   check(r <> nil);
   checkEqual(r.Props.Count, 4);
@@ -6902,9 +7063,6 @@ begin
   Check(RecordLoadJson(d, u, TypeInfo(TTest)));
   check(d.d <> 0);
   {$endif HASEXTRECORDRTTI}
-  CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
-  CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
-  Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
   // CSV (or JSON array) to set
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ''), 0, 'TSetMyEnum0');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'none'), 0, 'TSetMyEnum?');

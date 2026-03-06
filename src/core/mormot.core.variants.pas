@@ -4368,7 +4368,7 @@ begin
 end;
 
 const
-  _VARDATATEXT: array[0.. varWord64 + 5] of string[10] = (
+  _VARDATATEXT: array[0.. varWord64 + 5] of TShort15 = (
     'Empty', 'Null', 'SmallInt', 'Integer', 'Single', 'Double', 'Currency',
     'Date', 'OleStr', 'Dispatch', 'Error', 'Boolean', 'Variant', 'Unknown',
     'Decimal', '15', 'ShortInt', 'Byte', 'Word', 'LongWord', 'Int64', 'QWord',
@@ -6939,7 +6939,7 @@ begin
                 info.Json := @NULCHAR
               else
                 break; // invalid input
-            if NameLen <> 0 then // we just ignore void "":xxx field names
+            if NameLen <> 0 then // TDocVariant doesn't support void "" names
             begin
               if intnames <> nil then
                 intnames.Unique(VName[n], Name, NameLen)
@@ -10277,17 +10277,17 @@ begin
     Json := GotoNextNotSpace(Json);
   if (Json = nil) or
      ((PInteger(Json)^ = NULL_LOW) and
-      (jcEndOfJsonValueField in JSON_CHARS[Json[4]])) then
+      (jcEndOfJsonValueField in JSON_CHARS[Json[4]])) then    // #0#10#13 ,}]
     TSynVarData(Value).VType := varNull
   else if (PInteger(Json)^ = FALSE_LOW) and
           (Json[4] = 'e') and
-          (jcEndOfJsonValueField in JSON_CHARS[Json[5]]) then
+          (jcEndOfJsonValueField in JSON_CHARS[Json[5]]) then // #0#10#13 ,}]
   begin
     TSynVarData(Value).VType := varBoolean;
     Value.VInteger := ord(false);
   end
   else if (PInteger(Json)^ = TRUE_LOW) and
-          (jcEndOfJsonValueField in JSON_CHARS[Json[4]]) then
+          (jcEndOfJsonValueField in JSON_CHARS[Json[4]]) then // #0#10#13 ,}]
   begin
     TSynVarData(Value).VType := varBoolean;
     Value.VInteger := ord(true);
@@ -10314,7 +10314,7 @@ begin
   tab := @JSON_CHARS;
   repeat
     inc(result);
-  until not (jcDigitFloatChar in tab[result^]);
+  until not (jcDigitFloatChar in tab[result^]); // -+.eE0..9
   PEndNum := result;
   while not (jcEndOfJsonFieldNotName in tab[result^]) do
     inc(result); // #0, ',', ']', '}'
@@ -10375,8 +10375,8 @@ begin
           // it may be a double value, but we didn't allow them -> store as text
           J := Info.Value;
           repeat
-            inc(J); // #0, ',', ']', '}'
-          until not (jcDigitFloatChar in JSON_CHARS[J^]);
+            inc(J);
+          until not (jcDigitFloatChar in JSON_CHARS[J^]); // -+.eE0..9
           Info.ValueLen := J - Info.Value;
           J := GotoNextNotSpace(J);
           Info.EndOfObject := J^;
@@ -10422,7 +10422,7 @@ astext:     V.VType := varString;
       end;
     jtNullFirstChar:
       if (PInteger(J)^ = NULL_LOW) and
-         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then
+         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then // #0#10#13 ,}]
       begin
         Info.Value := J;
         V.VType := varNull;
@@ -10431,7 +10431,7 @@ astext:     V.VType := varString;
       end;
     jtFalseFirstChar:
       if (PInteger(J + 1)^ = FALSE_LOW2) and
-         (jcEndOfJsonValueField in JSON_CHARS[J[5]]) then
+         (jcEndOfJsonValueField in JSON_CHARS[J[5]]) then // #0#10#13 ,}]
       begin
         Info.Value := J;
         V.VType := varBoolean;
@@ -10441,7 +10441,7 @@ astext:     V.VType := varString;
       end;
     jtTrueFirstChar:
       if (PInteger(J)^ = TRUE_LOW) and
-         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then
+         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then // #0#10#13 ,}]
       begin
         Info.Value := J;
         V.VType := varBoolean;
@@ -10988,7 +10988,7 @@ begin
     exit;
   Expression := GotoNextNotSpace(Expression);
   KB := Expression;
-  while jcJsonIdentifier in JSON_CHARS[Expression^] do
+  while jcJsonIdentifier in JSON_CHARS[Expression^] do // _-.[]$0..9a..zA..Z
     inc(Expression);
   if Expression^ = #0 then
     exit;

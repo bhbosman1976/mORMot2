@@ -10,10 +10,6 @@
 
 {$Z4} // enumerates should be DWORD / 32-bit - see jediapilib.inc
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
-  overload; forward;
-procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload; forward;
 function PosExtString(Str: PChar): PChar; forward;
 
 procedure _DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
@@ -75,6 +71,22 @@ begin
     Temp[0] := #0; // GetFullPathNameW() failure or W32_MAX overflow
 end;
 
+procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
+var
+  i: PtrInt;
+  R: PByteArray;
+begin
+  if Len > 0 then
+    if IsAnsiCompatibleW(P, Len) then
+    begin
+      R := FastSetString(res, Len);
+      for i := 0 to Len - 1 do
+        R[i] := PWordArray(P)[i]; // fast direct ASCII 7-bit conversion
+    end
+    else
+      DoWin32PWideCharToUtf8(P, Len, res); // use RTL or mormot.core.unicode
+end;
+
 {$ifdef UNICODE}
 
 function IsExtendedPathName(const Name: TFileName): boolean;
@@ -113,6 +125,11 @@ begin
       dec(l);
       dst[l] := cardinal(s[l]); // fast direct 7-bit conversion
     until l = 0;
+end;
+
+procedure _toutf8(const Str: TFileName; var Utf8: RawUtf8);
+begin
+  Win32PWideCharToUtf8(pointer(Str), length(Str), Utf8);
 end;
 
 {$else}
@@ -187,27 +204,20 @@ begin
   SetString(d, s, l);
 end;
 
+procedure _toutf8(const Str: TFileName; var Utf8: RawUtf8);
+begin
+  if {$ifdef FPC} (DefaultRTLFileSystemCodePage = CP_UTF8) or {$endif}
+     IsAnsiCompatible(Str) then
+    Utf8 := Str // assign
+  else
+    Utf8 := UTF8Encode(Str); // use RTL
+end;
+
 {$endif UNICODE}
 
 procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
 begin
   Win32PWideCharToString(P, StrLenW(P), string(fn));
-end;
-
-procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
-var
-  i: PtrInt;
-  R: PByteArray;
-begin
-  if Len > 0 then
-    if IsAnsiCompatibleW(P, Len) then
-    begin
-      R := FastSetString(res, Len);
-      for i := 0 to Len - 1 do
-        R[i] := PWordArray(P)[i]; // fast direct ASCII 7-bit conversion
-    end
-    else
-      DoWin32PWideCharToUtf8(P, Len, res); // use RTL or mormot.core.unicode
 end;
 
 procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8);
@@ -474,7 +484,7 @@ begin
   if PInt64(@FT)^ = 0 then
     result := 0
   else // inlined UnixTimeToDateTime()
-    result := FileTimeToUnixMSTime(FT) / MilliSecsPerDay + UnixDateDelta;
+    result := FileTimeToUnixMSTime(FT) * MilliSecsPerDate + UnixDateDelta;
 end;
 
 procedure DateTimeToFileTime(dt: TDateTime; out FT: TFileTime);
@@ -696,6 +706,14 @@ procedure WinCheck(const Context: ShortString; Code: integer;
 begin
   if Code <> NO_ERROR then
     RaiseLastError(Context, RaisedException, Code);
+end;
+
+procedure WinDebugOutput(p: PUtf8Char; len: PtrInt);
+var
+  u: TSynTempBuffer;
+begin
+  OutputDebugStringW(Unicode_FromUtf8(p, len, u));
+  u.Done;
 end;
 
 function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
@@ -1131,6 +1149,15 @@ begin
             DeleteFileW(W32(aFileName, tmp));
 end;
 
+function RenameFile(const aOld, aNew: TFileName): boolean;
+var
+  o, n: TW32Temp;
+begin
+  result := (aOld <> '') and
+            (aNew <> '') and
+            MoveFileW(W32(aOld, o), W32(aNew, n));
+end;
+
 function RemoveDir(const aDirName: TFileName): boolean;
 var
   tmp: TW32Temp;
@@ -1244,17 +1271,6 @@ end;
 procedure FileSetSticky(const FileName: TFileName);
 begin
   FileSetAttr(FileName, FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_SYSTEM);
-end;
-
-function RenameFile(const OldName, NewName: TFileName): boolean;
-var
-  o, n: TW32Temp;
-begin
-  if (OldName = '') or
-     (NewName = '') then
-    result := false
-  else
-    result := MoveFileW(W32(OldName, o), W32(NewName, n));
 end;
 
 function FileSetTime(const FileName: TFileName;
@@ -3529,20 +3545,20 @@ begin
 end;
 
 constructor TServiceController.CreateOpenService(
-  const TargetComputer, DataBaseName, Name: RawUtf8; DesiredAccess: cardinal);
+  const TargetComputer, DataBaseName, ServiceName: RawUtf8; DesiredAccess: cardinal);
 begin
   inherited Create;
-  fName := RawUtf8(Name);
+  fName := ServiceName;
   fSCHandle := OpenServiceManager(TargetComputer, DataBaseName, GENERIC_READ);
   if fSCHandle = 0 then
   begin
     TService.DoLog(sllLastError, 'OpenSCManager(''%'',''%'') for [%]',
-      [TargetComputer, DataBaseName, fName], self);
+      [TargetComputer, DataBaseName, ServiceName], self);
     exit;
   end;
-  fHandle := OpenServiceInstance(fSCHandle, Name, DesiredAccess);
+  fHandle := OpenServiceInstance(fSCHandle, ServiceName, DesiredAccess);
   if fHandle = 0 then
-    TService.DoLog(sllLastError, 'OpenService(%)', [Name], self);
+    TService.DoLog(sllLastError, 'OpenService(%)', [ServiceName], self);
 end;
 
 function TServiceController.Delete: boolean;
@@ -3790,7 +3806,7 @@ begin
 end;
 
 const
-  _CMD: array[0.. 5] of string[11] = (
+  _CMD: array[0.. 5] of TShort15 = (
     'UNKNOWN', 'STOP', 'PAUSE', 'CONTINUE', 'INTERROGATE', 'SHUTDOWN');
 
 procedure TService.DoCtrlHandle(Code: cardinal);
@@ -5087,7 +5103,7 @@ begin
   if prodver <> '' then
     BiosInfoText := BiosInfoText + ' ' + prodver;
   if {%H-}cpu = '' then
-    cpu := RawUtf8(GetEnvironmentVariable('PROCESSOR_IDENTIFIER'));
+    _toutf8(GetEnvironmentVariable('PROCESSOR_IDENTIFIER'), cpu);
   if Assigned(GetLogicalProcessorInformation) then
   begin
     SetLength(proc, 1024);

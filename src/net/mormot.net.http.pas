@@ -152,8 +152,9 @@ function AuthorizationBearer(const AuthToken: RawUtf8): RawUtf8;
 /// will remove most usual HTTP headers which are to be recomputed on sending
 // - trim=true would remove any space or CR/LF at the end of the result
 // - as used e.g. during TPublicRelay process from mormot.net.relay
+// - upIgnore is in IdemPCharSet() format, e.g. 'CONTENT-|CONNECTION:|'
 function PurgeHeaders(const headers: RawUtf8; trim: boolean = false;
-  upIgnore: PPAnsiChar = nil): RawUtf8;
+  upIgnore: PUtf8Char = nil): RawUtf8;
 
 /// search, copy and remove a given HTTP header as text or Int64
 // - FindNameValue() makes search + copy, but this function also REMOVES the header
@@ -259,6 +260,10 @@ function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 /// extract a 64-bit value from a 'Range: xxx-xxx ' input
 // - returned P^ points to the first non digit char - not as GetNextItemQWord()
 function GetNextRange(var P: PUtf8Char): Qword;
+
+/// append an IPv4 as '"1.2.3.4"' JSON string
+procedure AddJsonWriterIP4(W: TTextWriter; ip4: pointer);
+  {$ifdef HASINLINE} inline; {$endif}
 
 const
   /// pseudo-header containing the current Synopse mORMot framework version
@@ -2464,7 +2469,7 @@ const
   /// low level magic marker in THttpMetrics .mhm binary files
   // - may not be at the beginning of the file, if compression was enabled: use
   // rather THttpMetrics.LoadHeader if you want to identify .mhm files
-  HTTPMETRICS_MAGIC: string[23] = 'mORMotAnalyzerV1'#26;
+  HTTPMETRICS_MAGIC: TShort23 = 'mORMotAnalyzerV1'#26;
 
 var // filled from RTTI enum trimmed text during unit initialization
   HTTP_SCOPE:  array[THttpAnalyzerScope]  of RawUtf8;
@@ -2651,20 +2656,11 @@ begin
 end;
 
 const
-  TOBEPURGED: array[0..10] of PAnsiChar = (
-    'CONTENT-',
-    'CONNECTION:',
-    'KEEP-ALIVE:',
-    'TRANSFER-',
-    'X-POWERED',
-    'USER-AGENT',
-    'REMOTEIP:',
-    'HOST:',
-    'ACCEPT:',
-    'DATE:',
-    nil);
+  TOBEPURGED: PUtf8Char =
+    'CONTENT-|CONNECTION:|KEEP-ALIVE:|TRANSFER-|X-POWERED|USER-AGENT|' +
+    'REMOTEIP:|HOST:|ACCEPT:|DATE:|';
 
-function PurgeHeaders(const headers: RawUtf8; trim: boolean; upIgnore: PPAnsiChar): RawUtf8;
+function PurgeHeaders(const headers: RawUtf8; trim: boolean; upIgnore: PUtf8Char): RawUtf8;
 var
   pos, len: array[byte] of word; // delete up to 255 entries
   n, purged, i, l, tot: PtrInt;
@@ -2680,13 +2676,13 @@ begin
   begin
     last := nil;
     if upIgnore = nil then
-      upIgnore := @TOBEPURGED;
+      upIgnore := TOBEPURGED;
     if PStrLen(h - _STRLEN)^ <= high(pos[0]) then // void pos[]/len[] overflow
       while (P <> nil) and
             (P^ <> #0) do
       begin
         next := GotoNextLine(P);
-        if IdemPPChar(P, upIgnore) < 0 then // append this entry
+        if IdemPCharSep(P, upIgnore) < 0 then // append this entry
         begin
           l := next - P;
           if next = nil then
@@ -2876,7 +2872,6 @@ end;
 function DeleteHeader(const Headers, Name: RawUtf8): RawUtf8;
 var
   up: TByteToAnsiChar;
-  u: array[0..1] of PAnsiChar; // IdemPPChar() format
 begin
   if (Headers = '') or
      (length(Name) < 2) then
@@ -2884,10 +2879,9 @@ begin
     result := Headers;
     exit;
   end;
-  PWord(UpperCopy255Buf(@up, pointer(Name), length(Name)))^ := ord(':');
-  u[0] := @up;
-  u[1] := nil;
-  result := PurgeHeaders(Headers, false, @u);
+  PCardinal(UpperCopy255Buf(@up, pointer(Name), length(Name)))^ :=
+    ord(':') + ord('|') shl 8; // 'UPPER:|' IdemPCharSep() format
+  result := PurgeHeaders(Headers, false, @up);
 end;
 
 function MimeHeaderEncode(const header: RawUtf8): RawUtf8;
@@ -2904,45 +2898,38 @@ var
   c: cardinal;
 begin
   c := PCardinal(method)^;
-  result := (((c xor cardinal(ord('H') + ord('E') shl 8 + ord('A') shl 16 +
-                     ord('D') shl 24)) and $dfdfdfdf) = 0) or
-            (((c xor cardinal(ord('O') + ord('P') shl 8 + ord('T') shl 16 +
-                     ord('I') shl 24)) and $dfdfdfdf) = 0);
+  result := (((c xor cardinal(HEAD_32)) and $dfdfdfdf) = 0) or
+            (((c xor cardinal(OPTI_32)) and $dfdfdfdf) = 0);
 end;
 
 function IsGet(const method: RawUtf8): boolean;
 begin
-  result := PCardinal(method)^ = ord('G') + ord('E') shl 8 + ord('T') shl 16;
+  result := PCardinal(method)^ = GET_24;
 end;
 
 function IsPost(const method: RawUtf8): boolean;
 begin
-  result := PCardinal(method)^ =
-    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24;
+  result := PCardinal(method)^ = POST_32;
 end;
 
 function IsPut(const method: RawUtf8): boolean;
 begin
-  result := PCardinal(method)^ =
-    ord('P') + ord('U') shl 8 + ord('T') shl 16;
+  result := PCardinal(method)^ = PUT_24;
 end;
 
 function IsDelete(const method: RawUtf8): boolean;
 begin
-  result := PCardinal(method)^ =
-    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24;
+  result := PCardinal(method)^ = DELE_32;
 end;
 
 function IsOptions(const method: RawUtf8): boolean;
 begin
-  result := PCardinal(method)^ =
-    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
+  result := PCardinal(method)^ = OPTI_32;
 end;
 
 function IsHead(const method: RawUtf8): boolean;
 begin
-  result := PCardinal(method)^ =
-              ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
+  result := PCardinal(method)^ = HEAD_32;
 end;
 
 function IsUrlFavIcon(P: PUtf8Char): boolean;
@@ -2960,8 +2947,7 @@ end;
 function IsHttp(const text: RawUtf8): boolean;
 begin
   result := (length(text) > 5) and
-            (PCardinal(text)^ and $dfdfdfdf =
-               ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) and
+            (PCardinal(text)^ and $dfdfdfdf = HTTP_32) and
             ((text[5] = ':') or
              ((text[5] in ['s', 'S']) and
               (text[6] = ':')));
@@ -2970,8 +2956,7 @@ end;
 function IsNone(const text: RawUtf8): boolean;
 begin
   result := (length(text) = 4) and
-            (PCardinal(text)^ and $dfdfdfdf =
-              ord('N') + ord('O') shl 8 + ord('N') shl 16 + ord('E') shl 24);
+            (PCardinal(text)^ and $dfdfdfdf = NONE_32);
 end;
 
 function IsHttpUserAgentBot(const UserAgent: RawUtf8): boolean;
@@ -3146,6 +3131,18 @@ begin
         result := result * 10 + Qword(c);
       inc(P);
     until false;
+end;
+
+procedure AddJsonWriterIP4(W: TTextWriter; ip4: pointer);
+var
+  P: PUtf8Char;
+begin
+  if W.BEnd - W.B <= 16 then // note: PtrInt(BEnd - B) could be < 0
+    W.FlushToStream;
+  P := W.B + 1;
+  P^ := '"';
+  W.B := pointer(IP4TextAppend(ip4, pointer(P + 1)));
+  W.B^ := '"';
 end;
 
 
@@ -3639,10 +3636,8 @@ end;
 function THttpRequestContext.ParseHttp(P: PUtf8Char): boolean;
 begin
   result := false;
-  if (PCardinal(P)^ <>
-       ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) or
-     (PCardinal(P + 4)^ and $ffffff <>
-       ord('/') + ord('1') shl 8 + ord('.') shl 16) then
+  if (PCardinal(P)^ <> HTTP_32) or
+     (PCardinal(P + 4)^ and $ffffff <> ord('/') + ord('1') shl 8 + ord('.') shl 16) then
     exit;
   if P[7] <> '1' then
     include(ResponseFlags, rfHttp10);
@@ -3655,8 +3650,6 @@ end;
 
 var
   _GETVAR, _POSTVAR, _HEADVAR: RawUtf8;
-const // inlined IsHead() function
-  _HEAD32 = ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
 
 function THttpRequestContext.ParseCommand: boolean;
 var
@@ -3672,17 +3665,17 @@ begin
     exit;
   // parse CommandMethod
   case PCardinal(P)^ of
-    ord('G') + ord('E') shl 8 + ord('T') shl 16 + ord(' ') shl 24:
+    GET_24 + ord(' ') shl 24:
       begin
         CommandMethod := _GETVAR; // optimistic
         inc(P, 4);
       end;
-    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
+    POST_32:
       begin
         CommandMethod := _POSTVAR;
         inc(P, 5);
       end;
-    _HEAD32:
+    HEAD_32:
       begin
         CommandMethod := _HEADVAR;
         inc(P, 5);
@@ -3706,8 +3699,8 @@ begin
   end;
   // parse CommandUri and HTTP/1.x
   B := P;
-  if (PCardinal(P)^ = ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
-     (PCardinal(P + 4)^ and $ffffff = ord(':') + ord('/') shl 8 + ord('/') shl 16) then
+  if (PCardinal(P)^ = HTTP__32) and
+     (PCardinal(P + 4)^ and $ffffff = HTTP__24) then
   begin
     // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
     P := PosChar(P + 7, '/'); // use fast SSE2 asm on x86_64
@@ -3987,7 +3980,7 @@ begin
   if ContentEncoding <> nil then
     AppendLine(Headers, ['Content-Encoding: ', ContentEncoding^.Name]);
   // compute response body
-  if (PCardinal(CommandMethod)^ = _HEAD32) or
+  if (PCardinal(CommandMethod)^ = HEAD_32) or
      (ContentLength = 0) then
     exit;
   if aOutStream <> nil then
@@ -4084,7 +4077,7 @@ begin
   end;
   // try to send both headers and body in a single socket syscall
   Process.Reset;
-  if PCardinal(CommandMethod)^ = _HEAD32 then
+  if PCardinal(CommandMethod)^ = HEAD_32 then
     // return only the headers
     State := hrsResponseDone
   else
@@ -4227,7 +4220,7 @@ begin
   if (CompressGz >= 0) and
      (CompressGz in CompressAcceptHeader) and
      (CompressList <> nil) and
-     (PCardinal(CommandMethod)^ <> _HEAD32) and
+     (PCardinal(CommandMethod)^ <> HEAD_32) and
      not (rfWantRange in ResponseFlags) then
   begin
     gz := FileName + '.gz';
@@ -4252,7 +4245,7 @@ begin
       exit;
     end;
   include(ResponseFlags, rfAcceptRange);
-  if PCardinal(CommandMethod)^ = _HEAD32 then // make FileOpen() only for GET
+  if PCardinal(CommandMethod)^ = HEAD_32 then // make FileOpen() only for GET
   begin
     result := HTTP_SUCCESS;
     ContentStream := TStreamWithPositionAndSize.Create; // <> nil
@@ -5452,7 +5445,7 @@ begin
            (ffHadDefineHost in fFlags) and
            (PCardinal(Host)^ <> HOST_127) then
         begin
-          n := PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1);
+          n := PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1); // = high()
           inc(p); // ignore both WriterHost[0/1]
           repeat
             inc(p);
@@ -5645,8 +5638,8 @@ var
   poslen: PWordArray; // pos1,len1, pos2,len2, ... 16-bit pairs
   wr: TTextDateWriter;
 const
-  _SCHEME: array[boolean] of string[7]  = ('http', 'https');
-  _HTTP:   array[boolean] of string[15] = ('HTTP/1.1', 'HTTP/1.0');
+  _SCHEME: array[boolean] of TShort7  = ('http', 'https');
+  _HTTP:   array[boolean] of TShort15 = ('HTTP/1.1', 'HTTP/1.0');
 begin
   // optionally merge calls
   if Assigned(fOnContinue) then
@@ -5900,7 +5893,7 @@ end;
 
 function THttpAnalyzerToSave.DateTime: TDateTime;
 begin
-  result := (Int64(Date) + UNIXTIME_MINIMAL) / SecsPerDay + UnixDateDelta;
+  result := (Int64(Date) + UNIXTIME_MINIMAL) * SecsPerDate + UnixDateDelta;
 end;
 
 
@@ -6190,17 +6183,17 @@ function ToScope(Text: PCardinal; out Scope: THttpAnalyzerScope): boolean;
 begin
   result := false;
   case Text^ of // case-sensitive test in occurrence order
-    ord('G') + ord('E') shl 8 + ord('T') shl 16:
+    GET_24:
       Scope := hasGet;
-    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
+    POST_32:
       Scope := hasPost;
-    ord('P') + ord('U') shl 8 + ord('T') shl 16:
+    PUT_24:
       Scope := hasPut;
-    _HEAD32:
+    HEAD_32:
       Scope := hasHead;
-    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
+    DELE_32:
       Scope := hasDelete;
-    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24:
+    OPTI_32:
       Scope := hasOptions;
   else
     exit;
@@ -7358,30 +7351,22 @@ end;
 
 function FromText(const Text: RawUtf8; out Scope: THttpAnalyzerScope): boolean;
 var
-  s: THttpAnalyzerScope;
+  i: PtrInt;
 begin
-  for s := low(s) to high(s) do
-    if IdemPropNameU(Text, HTTP_SCOPE[s]) then
-    begin
-      Scope := s;
-      result := true;
-      exit;
-    end;
-  result := false;
+  i := FindPropName(@HTTP_SCOPE, Text, length(HTTP_SCOPE));
+  result := i >= 0;
+  if result then
+    byte(Scope) := i;
 end;
 
 function FromText(const Text: RawUtf8; out Period: THttpAnalyzerPeriod): boolean;
 var
-  p: THttpAnalyzerPeriod;
+  i: PtrInt;
 begin
-  for p := low(p) to high(p) do
-    if IdemPropNameU(Text, HTTP_PERIOD[p]) then
-    begin
-      Period := p;
-      result := true;
-      exit;
-    end;
-  result := false;
+  i := FindPropName(@HTTP_PERIOD, Text, length(HTTP_PERIOD));
+  result := i >= 0;
+  if result then
+    byte(Period) := i;
 end;
 
 const

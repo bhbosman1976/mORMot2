@@ -286,14 +286,14 @@ const
 
   /// JSON compatible representation of a boolean value, i.e. 'false' and 'true'
   // - can be used e.g. in logs, or anything accepting a ShortString
-  BOOL_STR: array[boolean] of string[7] = (
+  BOOL_STR: array[boolean] of TShort7 = (
     'false', 'true');
 
   /// the JavaScript-like values of non-number IEEE constants
   // - as recognized by ShortToFloatNan, and used by TTextWriter.Add()
   // when serializing such single/double/extended floating-point values
   // - GetExtended() should also detect those values
-  JSON_NAN: array[TFloatNan] of string[11] = (
+  JSON_NAN: array[TFloatNan] of TShort15 = (
     '0', '"NaN"', '"Infinity"', '"-Infinity"');
 
 var
@@ -322,6 +322,7 @@ var
 const // some time conversion constants with Milli/Micro/NanoSec resolution
   SecsPerHour  = SecsPerMin * MinsPerHour; // missing in oldest Delphi
   SecsPerDay   = SecsPerMin * MinsPerDay;
+  SecsPerDate  = 1 / SecsPerDay;
   SecsPerWeek  = 7 * SecsPerDay;
   SecsPerMonth = 2629746; // rough approximation of SecsPerDay * 365.2425 / 12
   SecsPerYear  = 12 * SecsPerMonth;
@@ -330,6 +331,7 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
   MilliSecsPerMin      = MilliSecsPerSec  * SecsPerMin;
   MilliSecsPerHour     = MilliSecsPerMin  * MinsPerHour;
   MilliSecsPerDay      = MilliSecsPerHour * HoursPerDay;
+  MilliSecsPerDate     = 1 / MilliSecsPerDay;
   MicroSecsPerMilliSec = 1000;
   MicroSecsPerSec      = MicroSecsPerMilliSec * MilliSecsPerSec;
   NanoSecsPerMicroSec  = 1000;
@@ -348,6 +350,12 @@ function UriTruncLen(const Address: RawUtf8): PtrInt;
 /// returns length(Address) if there is no ?#anchor in the URI
 function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
+
+// define some raw text functions, to avoid linking mormot.core.text
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
+procedure _fmt(const Fmt: string; const Args: array of const; var result: RawUtf8); overload;
+procedure _toutf8(const Str: TFileName; var Utf8: RawUtf8); {$ifdef OSPOSIX} inline; {$endif}
+procedure _addutf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
 
 
 { ****************** Gather Operating System Information }
@@ -1984,7 +1992,7 @@ function RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture: cardinal;
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentThreadId: DWord; stdcall;
 
-/// retrieves the current process ID
+/// retrieves the current process ID in a cross-platform way
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentProcessId: DWord; stdcall;
 
@@ -2059,11 +2067,6 @@ function FileOpen(const aFileName: TFileName; aMode: integer): THandle;
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 procedure FileClose(F: THandle); stdcall;
 
-/// redefined here to avoid warning to include "Windows" in uses clause
-// and support FileName longer than MAX_PATH
-// - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
-function RenameFile(const OldName, NewName: TFileName): boolean;
-
 /// redirection to Windows SetFileTime() of a file name from Int64(TFileTime)
 // - if any Int64 is 0, the proper value will be guess from the non-0 values
 function FileSetTime(const FileName: TFileName;
@@ -2102,7 +2105,7 @@ function SetFileOpenLimit(max: integer; hard: boolean = false): integer;
 function IsValidPid(pid: cardinal): boolean;
 
 type
-  /// Low-level access to the ICU library installed on this system
+  /// Low-level access to the ICU library installed on this POSIX system
   // - "International Components for Unicode" (ICU) is an open-source set of
   // libraries for Unicode support, internationalization and globalization
   // - ICU seems more complete and standard than FPC RTL iconv/cwstrings
@@ -2195,6 +2198,8 @@ var
   // - e.g. on Linux, may equal $030d02 for 3.13.2, or $020620 for 2.6.32
   KernelRevision: cardinal;
 
+/// call the syslog() libc API to generate a log message from UTF-8 text buffer
+function SysLogSend(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
 
 {$ifdef OSLINUX} { some Linux-specific APIs (e.g. systemd or eventfd) }
 
@@ -2227,7 +2232,7 @@ type
     listen_fds: function(unset_environment: integer): integer; cdecl;
     /// returns 1 if the file descriptor is an AF_UNIX socket of the specified type and path
     is_socket_unix: function(fd, typr, listening: integer;
-      var path: TFileName; pathLength: PtrUInt): integer; cdecl;
+      path: PAnsiChar; pathLength: PtrUInt): integer; cdecl;
     /// systemd: submit simple, plain text log entries to the system journal
     // - priority value can be obtained using integer(LOG_TO_SYSLOG[logLevel])
     journal_print: function(priority: integer; args: array of const): integer; cdecl;
@@ -2235,10 +2240,12 @@ type
     // - each structure should reference one field of the entry to submit
     // - the second argument specifies the number of structures in the array
     journal_sendv: function(var iov: TIoVec; n: integer): integer; cdecl;
-    /// sends notification to systemd
-    // - see https://www.freedesktop.org/software/systemd/man/notify.html
-    // status notification sample: sd.notify(0, 'READY=1');
-    // watchdog notification: sd.notify(0, 'WATCHDOG=1');
+    /// sends notification to systemd service manager about state changes
+    // - unset_environment should be kept to 0, unless further notify() calls
+    // would silently do nothing
+    // - see https://man.archlinux.org/man/sd_notify.3.en for some values, e.g.
+    // $ status notification sample: sd.notify(0, 'READY=1');
+    // $ watchdog notification: sd.notify(0, 'WATCHDOG=1');
     notify: function(unset_environment: integer; state: PUtf8Char): integer; cdecl;
     /// check whether the service manager expects watchdog keep-alive
     // notifications from a service
@@ -2251,6 +2258,8 @@ type
     /// returns TRUE if a systemd library is available
     // - will thread-safely load and initialize it if necessary
     function IsAvailable: boolean; inline;
+    /// encapsulate journal_sendv() with PRIORITY= and MESSAGE= members
+    function Send(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
     /// release the systemd library
     procedure Done;
   end;
@@ -2499,6 +2508,9 @@ var TryEnterCriticalSection: function(var cs: TRTLCriticalSection): integer;
 
 {$endif NODIRECTTHREADMANAGER}
 
+/// retrieves the current process ID in a cross-platform way
+function GetCurrentProcessId: TThreadIDInt;
+
 {$endif OSPOSIX}
 
 /// returns TRUE if the supplied mutex has been initialized
@@ -2565,7 +2577,7 @@ procedure SetLastError(error: integer);
 function GetErrorText(error: integer = 0): RawUtf8;
 
 /// returns a given error code as plain text ShortString
-function GetErrorShort(error: integer = 0): ShortString;
+function GetErrorShort(error: integer = 0): TShort63;
 
 /// returns a given error code as plain text ShortString
 procedure GetErrorShortVar(error: integer; var dest: ShortString);
@@ -2600,6 +2612,9 @@ function WinLastError(const Context: ShortString; Code: integer = 0): string;
 procedure WinCheck(const Context: ShortString; Code: integer;
   RaisedException: ExceptClass = nil);
   {$ifdef HASINLINE} inline; {$endif}
+
+/// wrap OutputDebugStringW() API with proper Unicode support
+procedure WinDebugOutput(p: PUtf8Char; len: PtrInt);
 
 /// raise an Exception from the last library error using WinApiErrorString()
 procedure RaiseLastModuleError(const Context: ShortString; Lib: HMODULE;
@@ -2940,6 +2955,10 @@ function DeleteFile(const aFileName: TFileName): boolean;
 
 /// redefined here to avoid warning to include "Windows" in uses clause
 // and support FileName longer than MAX_PATH
+function RenameFile(const aOld, aNew: TFileName): boolean;
+
+/// redefined here to avoid warning to include "Windows" in uses clause
+// and support FileName longer than MAX_PATH
 function RemoveDir(const aDirName: TFileName): boolean;
 
 /// check if a file (or folder) exists and can be written
@@ -3274,6 +3293,10 @@ function EnsureDirectoryExistsNoExpand(const Directory: TFileName): TFileName;
 /// just a wrapper around EnsureDirectoryExists(NormalizeFileName(Directory))
 function NormalizeDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
+
+/// wrap folder := parent+sub and EnsureDirectoryExists() with FileIsWritable()
+// - used e.g. on POSIX for GetSystemPath() folder names validation
+function WritableFolder(const parent, sub: TFileName; var folder: TFileName): boolean;
 
 /// compute the size of all directory's files, optionally with nested folders
 // - basic implementation using FindFirst/FindNext so won't be the fastest
@@ -3627,7 +3650,7 @@ function RetrieveLoadAvg: TShort23;
 /// a shorter version of GetSystemInfoText, used e.g. by TSynLogFamily.LevelSysInfo
 // - 'ncores avg1 avg5 avg15 [updays] used/totalram [used/totalswap] osint32' on POSIX,
 // or 'ncores user kern [updays] used/totalram [used/totalswap] osint32' on Windows
-procedure RetrieveSysInfoText(out text: ShortString);
+procedure RetrieveSysInfoText(var text: ShortString);
 
 /// retrieve low-level information about current memory usage
 // - as used e.g. by TSynMonitorMemory or GetMemoryInfoText
@@ -4896,9 +4919,11 @@ procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
 {$endif PUREMORMOT2}
 
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
+// - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
 procedure RandomGuid(out result: TGuid); overload;
 
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
+// - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
 function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -4972,6 +4997,14 @@ procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
 // - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
 function ObjArrayAdd(var aObjArray; aItem: TObject;
   var aSafe: TLightLock; aCount: PInteger = nil): PtrInt; overload;
+
+/// wrapper to implement a thread-safe T*ObjArray dynamic array acquisition
+// - make ObjArrayClear(aDestArray), then move aObjArray to aDestArray, truncated
+// to aCount^ items if defined, and return the length of the resulting array
+// - at output, aDestArray = nil and aCount^ = 0 and all data moved to aDestArray
+// - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
+function ObjArrayMove(var aObjArray, aDestArray; var aSafe: TLightLock;
+  aCount: PInteger = nil): PtrInt;
 
 /// wrapper to implement a thread-safe pointer dynamic array storage
 // - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
@@ -5367,7 +5400,7 @@ type
     // SERVICE_INTERROGATE, SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_CONFIG,
     // SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STOP, SERVICE_USER_DEFINED_CONTROL
     constructor CreateOpenService(
-      const TargetComputer, DataBaseName, Name: RawUtf8;
+      const TargetComputer, DataBaseName, ServiceName: RawUtf8;
       DesiredAccess: cardinal = SERVICE_ALL_ACCESS);
     /// release memory and handles
     destructor Destroy; override;
@@ -5919,18 +5952,18 @@ implementation
 
 { ****************** Some Cross-System Type and Constant Definitions }
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
 begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+  _toutf8(Format(Fmt, Args), result); // good enough (seldom called)
 end;
 
 procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload;
+  var result: RawUtf8);
 begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+  _toutf8(Format(Fmt, Args), result); // good enough (seldom called)
 end;
 
-procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
+procedure _addutf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
 var
   n: PtrInt;
 begin
@@ -6009,7 +6042,7 @@ end;
 
 function TextToUuid(const text: RawUtf8; out uuid: TGuid): boolean;
 var
-  tmp: string[36];
+  tmp: TShortGuid;
 begin
   result := false;
   if length(text) <> 36 then
@@ -6119,7 +6152,7 @@ begin
   if osv.os <> osWindows then
     exit;
   txt4 := osv.winbuild;
-  case  osv.win of
+  case osv.win of
     wTen, wTen_64, wEleven, wEleven_64: // desktop versions
       txt4 := FindOsBuild(txt4, high(DESKTOP_INT), @DESKTOP_INT, @DESKTOP_TXT);
     wServer2016, wServer2016_64, wServer2019_64, wServer2022_64, wServer2025_64:
@@ -6141,7 +6174,7 @@ begin
   AppendOsBuild(osv, @result, sep);
 end;
 
-procedure AppendOsv(const osv: TOperatingSystemVersion; var dest: Shortstring);
+procedure AppendOsv(const osv: TOperatingSystemVersion; var dest: TShort47);
 begin
   case osv.os of
     osWindows:
@@ -6215,11 +6248,11 @@ begin
       AppendShort(' Linux ', result) // e.g. 'Ubuntu Linux 5.4.0'
     else
       AppendShortChar(' ', @result);
-    AppendShortCardinal(osv.utsrelease[2], result);
+    AppendShortByte(osv.utsrelease[2], @result);
     AppendShortChar('.', @result);
-    AppendShortCardinal(osv.utsrelease[1], result);
+    AppendShortByte(osv.utsrelease[1], @result);
     AppendShortChar('.', @result);
-    AppendShortCardinal(osv.utsrelease[0], result);
+    AppendShortByte(osv.utsrelease[0], @result);
   end;
 end;
 
@@ -6262,7 +6295,7 @@ end;
 // - all errors are cross-platform, e.g. when used in centralized servers
 
 const
-  NULL_STR: string[1] = '';
+  NULL_STR: TShort1 = '';
 
 function _GetEnumNameRtti(Info: pointer; Value: integer): PShortString;
 begin
@@ -6456,7 +6489,7 @@ begin
 end;
 
 const
-  _PREFIX: array[0..5] of string[15] = (
+  _PREFIX: array[0..5] of TShort15 = (
     'WSA', 'ERROR_WINHTTP_', '', 'EXCEPTION_', 'SEC_', 'ERROR_');
 
 function AppendWinErrorText(Code: cardinal; var Dest: ShortString;
@@ -6565,11 +6598,11 @@ var
 begin
   OsErrorShort(Code, @os, NoInt); // redirect to Win/Linux/BsdErrorShort()
   if Sep <> #0 then
-    AppendShortChar(Sep, @Dest);
+    AppendShortCharSafe(Sep, Dest);
   AppendShort(os, Dest);
 end;
 
-function GetErrorShort(error: integer): ShortString;
+function GetErrorShort(error: integer): TShort63;
 begin
   if error = 0 then
     error := GetLastError;
@@ -6689,7 +6722,7 @@ const
     $70,  // aciPhytium
     $c0); // aciAmpere
 
-  ARMCPU_ID_TXT: array[TArmCpuType] of string[15] = (
+  ARMCPU_ID_TXT: array[TArmCpuType] of TShort15 = (
      '',
      'ARM810', 'ARM920', 'ARM922', 'ARM926', 'ARM940', 'ARM946', 'ARM966',
      'ARM1020', 'ARM1022', 'ARM1026', 'ARM11 MPCore', 'ARM1136', 'ARM1156',
@@ -6832,8 +6865,8 @@ begin
   else if IsAnsiCompatibleW(W, LW) then
   begin
     // fast handling of pure ASCII-7 content (very common case)
-    if LW > 255 then
-      LW := 255;
+    if LW > high(res) then
+      LW := high(res);
     res[0] := AnsiChar(LW);
     i := 1;
     repeat
@@ -6905,7 +6938,7 @@ begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
     28591 .. 28606:
       begin
         Name := 'ISO-8859-';
-        AppendShortCardinal(codepage - 28590, Name);
+        AppendShortByte(codepage - 28590, @Name); // append '0'..'16'
       end;
     50220, 50222:
       Name := 'ISO-2022-JP';
@@ -7767,7 +7800,7 @@ end;
 
 function GetFileNameWithoutExtOrPath(const FileName: TFileName): RawUtf8;
 begin
-  result := RawUtf8(GetFileNameWithoutExt(ExtractFileName(FileName)));
+  _toutf8(GetFileNameWithoutExt(ExtractFileName(FileName)), result);
 end;
 
 function PosExtString(Str: PChar): PChar; // work on AnsiString + UnicodeString
@@ -7823,6 +7856,18 @@ function NormalizeDirectoryExists(const Directory: TFileName;
 begin
   result := EnsureDirectoryExists(NormalizeFileName(Directory),
     RaiseExceptionOnCreationFailure);
+end;
+
+function WritableFolder(const parent, sub: TFileName; var folder: TFileName): boolean;
+begin
+  result := false;
+  folder := EnsureDirectoryExists(parent + sub);
+  if folder = '' then
+    exit;
+  if FileIsWritable(folder) then
+    result := true
+  else
+    folder := '';
 end;
 
 type // state machine for DirectoryDeleteOlderFiles() / DirectoryDeleteAll()
@@ -7976,12 +8021,12 @@ begin
   until u = high(_u);
   Size := (Size * 10000) shr (u * 10);
   SimpleRoundTo2DigitsCurr64(Size);
-  AppendShortCurr64(Size, Dest, 1);
+  AppendShortCurr64(Size, Dest, {fixeddecimals=}1);
   if WithSpace then
-    AppendShortChar(' ', @Dest);
+    AppendShortCharSafe(' ', Dest);
   if u <> 0 then
-    AppendShortChar(_U[u], @Dest);
-  AppendShortChar('B', @Dest);
+    AppendShortCharSafe(_U[u], Dest);
+  AppendShortCharSafe('B', Dest);
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
@@ -8400,9 +8445,9 @@ end;
 procedure AppendFreeTotalKB(free, total: QWord; var dest: ShortString);
 begin
   AppendKb(free, dest);
-  AppendShortChar('/', @dest);
+  AppendShortCharSafe('/', dest);
   AppendKb(total, dest);
-  AppendShortChar(' ', @dest);
+  AppendShortCharSafe(' ', dest);
 end;
 
 function GetMemoryInfoText: TShort31;
@@ -8414,7 +8459,7 @@ begin
     exit;
   AppendFreeTotalKB(info.memtotal - info.memfree, info.memtotal, result);
   AppendShortChar('(', @result);
-  AppendShortCardinal(info.percent, result);
+  AppendShortByte(info.percent, @result); // append '0'..'99' range
   AppendShortTwoChars(ord('%') + ord(')') shl 8, @result);
 end;
 
@@ -8440,7 +8485,7 @@ begin
      result);
 end;
 
-procedure RetrieveSysInfoText(out text: ShortString);
+procedure RetrieveSysInfoText(var text: ShortString);
 var
   si: TSysInfo;  // Linuxism, but properly emulated in thit unit on Mac/BSD
 begin
@@ -9196,7 +9241,7 @@ begin
 end;
 
 const
-  FD: array[boolean] of string[7] = ('File', 'Folder');
+  FD: array[boolean] of TShort7 = ('File', 'Folder');
 
 function TExecutableCommandLine.CheckFileName(const name: TFileName;
   isFolder: boolean): TFileName;
@@ -9271,7 +9316,7 @@ begin
       break; // no more occurence
     if fValues[i] <> '' then
     begin
-      _AddRawUtf8(value, fValues[i]);
+      _addutf8(value, fValues[i]);
       result := true;
     end;
     first := i + 1;
@@ -9310,7 +9355,7 @@ function TExecutableCommandLine.Get(const name: array of RawUtf8;
 var
   def, tmp: RawUtf8; // RTL conversion is fast enough in this unit
 begin
-  def := RawUtf8(tmp);
+  _toutf8(default, def);
   result := Get(name, tmp, description, def);
   if result then
     value := string(tmp)
@@ -9539,7 +9584,7 @@ begin
       exit; // may equal -1 e.g. from a .so on MacOS
     SetLength(fRawParams, n);
     for i := 0 to n - 1 do
-      fRawParams[i] := RawUtf8(ParamStr(i + 1));
+      _toutf8(ParamStr(i + 1), fRawParams[i]);
   end;
   Finalize(fNames);
   Finalize(fValues);
@@ -9578,22 +9623,22 @@ begin
           if j <> 1 then
             if j <> 0 then
             begin
-              _AddRawUtf8(fNames[clkParam], copy(s, 1, j - 1));
-              _AddRawUtf8(fValues, copy(s, j + 1, MaxInt));
+              _addutf8(fNames[clkParam], copy(s, 1, j - 1));
+              _addutf8(fValues, copy(s, j + 1, MaxInt));
             end
             else if (i + 1 = n) or
                     (swlen[i + 1] <> 0) then
-              _AddRawUtf8(fNames[clkOption], s)
+              _addutf8(fNames[clkOption], s)
             else
             begin
-              _AddRawUtf8(fNames[clkParam], s);
+              _addutf8(fNames[clkParam], s);
               inc(i);
-              _AddRawUtf8(fValues, fRawParams[i]);
+              _addutf8(fValues, fRawParams[i]);
             end;
           end;
       end
       else
-        _AddRawUtf8(fNames[clkArg], s);
+        _addutf8(fNames[clkArg], s);
     inc(i);
   until i = n;
   SetLength(fRetrieved[clkArg],    length(fNames[clkArg]));
@@ -11513,6 +11558,34 @@ begin
   aSafe.UnLock;
 end;
 
+function ObjArrayMove(var aObjArray, aDestArray; var aSafe: TLightLock;
+  aCount: PInteger): PtrInt;
+var
+  dest: TObjectDynArray absolute aDestArray;
+begin
+  if dest <> nil then
+    ObjArrayClear(dest); // release dest outside of the lock
+  aSafe.Lock;
+  if aCount <> nil then
+  begin
+    result := aCount^;
+    if result <> 0 then
+    begin
+      pointer(dest) := pointer(aObjArray); // no refcount involved
+      PDALen(PAnsiChar(pointer(dest)) - _DALEN)^ := result - _DAOFF;
+    end;
+  end
+  else if pointer(aObjArray) = nil then
+    result := 0
+  else
+  begin
+    pointer(dest) := pointer(aObjArray);
+    result := PDALen(PAnsiChar(pointer(dest)) - _DALEN)^ + _DAOFF;
+  end;
+  pointer(aObjArray) := nil;
+  aSafe.UnLock;
+end;
+
 function PtrArrayDelete(var aPtrArray; aItem: pointer; var aSafe: TLightLock;
   aCount: PInteger): PtrInt;
 begin
@@ -11605,7 +11678,7 @@ end;
 
 const
   // hardcoded to avoid linking mormot.core.rtti for GetEnumName()
-  _SERVICESTATE: array[TServiceState] of string[12] = (
+  _SERVICESTATE: array[TServiceState] of TShort15 = (
     'NotInstalled',
     'Stopped',
     'Starting',

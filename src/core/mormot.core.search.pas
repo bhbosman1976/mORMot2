@@ -2143,7 +2143,7 @@ end;
 procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
   out Html: RawUtf8; NoSubFolder: boolean);
 const
-  _DIR: array[boolean] of string[7] = ('[dir]', '&nbsp;');
+  _DIR: array[boolean] of TShort7 = ('[dir]', '&nbsp;');
 var
   w: TTextDateWriter;
   tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
@@ -4077,8 +4077,7 @@ end;
 
 function ToUtf8(r: TExprParserResult): RawUtf8;
 begin
-  result := TrimLeftLowerCaseShort(ToText(r));
-  UnCamelCaseSelf(result);
+  TrimLeftLowerUncamelCaseShort(ToText(r), result);
 end;
 
 

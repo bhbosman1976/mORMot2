@@ -2895,7 +2895,7 @@ end;
 
 procedure TRestServerUriContext.SetOutSetCookie(const aOutSetCookie: RawUtf8);
 const
-  HTTPONLY: array[boolean] of string[15] = (
+  HTTPONLY: array[boolean] of TShort15 = (
     '; HttpOnly', '');
 begin
 // https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
@@ -3087,7 +3087,7 @@ begin
 end;
 
 var
-  OAFR_TXT: array[TOnAuthenticationFailedReason] of RawUtf8;
+  OAFR_TXT: array[TOnAuthenticationFailedReason] of RawUtf8; // stUnCamelCase
 
 procedure TRestServerUriContext.AuthenticationFailed(
   Reason: TOnAuthenticationFailedReason; const aUserName: RawUtf8);
@@ -3260,7 +3260,7 @@ begin
 end;
 
 const
-  COMMAND_TEXT: array[TRestServerUriContextCommand] of string[15] = (
+  COMMAND_TEXT: array[TRestServerUriContextCommand] of TShort15 = (
     '?', 'Method', 'Interface', 'Read', 'Write');
 
 procedure TRestServerUriContext.LogFromContext;
@@ -3371,7 +3371,7 @@ end;
 
 procedure TRestServerUriContext.ServiceResultStart(WR: TJsonWriter);
 const
-  JSONSTART: array[boolean] of string[15] = (
+  JSONSTART: array[boolean] of TShort15 = (
     '{"result":[', '{"result":{');
 begin
   // InternalExecuteSoaByInterface has set ForceServiceResultAsJsonObject
@@ -3383,7 +3383,7 @@ end;
 
 procedure TRestServerUriContext.ServiceResultEnd(WR: TJsonWriter; ID: TID);
 const
-  JSONSEND_WITHID: array[boolean] of string[7] = (
+  JSONSEND_WITHID: array[boolean] of TShort7 = (
     '],"id":', '},"id":');
   JSONSEND_NOID: array[boolean] of AnsiChar = (
     ']', '}');
@@ -6914,7 +6914,7 @@ end;
 
 procedure TRestServer.AddStat(Flags: TRestServerAddStats; W: TJsonWriter);
 const
-  READWRITE: array[boolean] of string[9] = (
+  READWRITE: array[boolean] of TShort15 = (
     '{"read":', '{"write":');
 var
   s, i: PtrInt;
@@ -8410,7 +8410,7 @@ initialization
   // should match TPerThreadRunningContext definition in mormot.core.interfaces
   assert(SizeOf(TServiceRunningContext) =
     SizeOf(TObject) + SizeOf(TObject) + SizeOf(TThread));
-  GetEnumTrimmedNames(TypeInfo(TOnAuthenticationFailedReason), @OAFR_TXT, true);
+  GetEnumTrimmedNames(TypeInfo(TOnAuthenticationFailedReason), @OAFR_TXT, scUnCamelCase);
 
 end.
 

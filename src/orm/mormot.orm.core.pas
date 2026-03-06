@@ -5099,7 +5099,7 @@ begin
   L := ord(TypeName^[0]);
   if IdemPropName(TypeName^, 'TID') or
      (ord(TypeName^[1]) and $df <> ord('T')) or // expect T...ID pattern
-     (PWord(@TypeName^[L - 1])^ and $dfdf <> ord('I') + ord('D') shl 8) or
+     (PWord(@TypeName^[L - 1])^ and $dfdf <> _ID16) or
      (Rtti.Counts[rkClass] = 0) then
     exit;
   if (L > 13) and IdemPropName('ToBeDeletedID', @TypeName^[L - 12], 13) then
@@ -5677,7 +5677,7 @@ begin
     for i := 0 to PRttiEnumType(info.ContentTypeInfo)^.MaxValue do
     begin
       TrimLeftLowerCaseShort(P, EnumValue);
-      GetCaptionFromPCharLen(pointer(EnumValue), s); // translate
+      GetCaptionFromPCharLen(pointer(EnumValue), s); // UnCamelCase + translate
       StringToUtf8(s, EnumValue);
       if ((Lang <> sndxNone) and Soundex.Utf8(pointer(EnumValue))) or
          ((Lang = sndxNone) and FindUtf8(pointer(EnumValue), Search)) then
@@ -6795,7 +6795,7 @@ begin
     exit;
   n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
   repeat
-    p^.CopyValue(aRecord, self); // copy all fields between sibbling classes
+    p^.CopyValue(aRecord, self); // copy all fields between sibling classes
     inc(p);
     dec(n);
   until n = 0;
@@ -6820,7 +6820,7 @@ begin
   end;
   if p = nil then
     exit;
-  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibbling classes
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibling classes
   repeat
     if FieldBitGet(aRecordFieldBits, p^.PropertyIndex) then
       p^.CopyValue(aRecord, self);
@@ -7212,7 +7212,7 @@ begin
 end;
 
 const
-  ID_STR: array[{owoLowCaseID=}boolean] of string[15] = (
+  ID_STR: array[{owoLowCaseID=}boolean] of TShort15 = (
     '"ID_str":"', '"idStr":"');
 
 procedure TOrm.GetJsonValues(W: TOrmWriter);
@@ -7947,7 +7947,7 @@ var
     field: TOrmPropInfo;
     i: PtrInt;
     M: TOrmMany;
-    aManyField: string[63];
+    aManyField: TShort63;
 
     function GetManyField(F: PUtf8Char): boolean;
     var
@@ -7997,14 +7997,14 @@ var
               if GetManyField(P + 6) then
               begin
                 aManyField[1] := AnsiChar(i * 2 + 67);
-                result := RawUtf8(aManyField);
+                ShortStringToAnsi7String(aManyField, result);
                 exit; // Categories.Dest.Name=? -> C.Name=?
               end;
             end
             else if (P^ = '.') and GetManyField(P + 1) then
             begin
               aManyField[1] := AnsiChar(i * 2 + 66);
-              result := RawUtf8(aManyField);
+              ShortStringToAnsi7String(aManyField, result);
               exit;  // Categories.Kind=? -> CC.Kind=?
             end;
           end;
@@ -8071,7 +8071,7 @@ begin
   for f := 0 to length(ObjectsClass) - 1 do
     with ObjectsClass[f].OrmProps do
     begin
-      PWord(@aField[2])^ := ord('I') + ord('D') shl 8;
+      PWord(@aField[2])^ := _ID16;
       if not AddField(nil) then
         exit; // try to add the ID field
       if Props.fSqlFillPrepareMany = '' then
@@ -8300,7 +8300,11 @@ begin
   end
   else
   begin
+    if woHumanReadable in Options then
+      W.AddCRAndIndent;
     W.AddProp(pointer(props.IDJsonName), length(props.IDJsonName));
+    if woHumanReadable in Options then
+      W.AddDirect(' ');
     W.Add(TOrm(Instance).fID);
     W.BlockAfterItem(Options);
   end;
@@ -8308,9 +8312,10 @@ begin
   n := props.Count;
   repeat
     if woHumanReadable in Options then
-      W.WriteObjectPropNameHumanReadable(pointer(cur^.JsonName), length(cur^.JsonName))
-    else
-      W.AddProp(pointer(cur^.JsonName), length(cur^.JsonName));
+      W.AddCRAndIndent; // inlined WriteObjectPropNameHumanReadable()
+    W.AddProp(pointer(cur^.JsonName), length(cur^.JsonName));
+    if woHumanReadable in Options then
+      W.AddDirect(' ');
     cur^.GetJsonValues(Instance, W);
     inc(cur);
     dec(n);

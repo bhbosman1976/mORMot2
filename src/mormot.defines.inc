@@ -60,7 +60,7 @@
 {$ifdef CPUX86}
   {.$define HASNOSSE2}
   // if defined, bypass SSE2 asm on i386 and fallback to pascal code or x87 asm
-  // - SSE2 was introduced with Intel’s Pentium 4 (2000) so we assume it
+  // - SSE2 was introduced with Intel's Pentium 4 (2000) so we assume it
   // - Windows requires SSE2 since XP SP2, and FireFox/Chrome since 2017
   // - we keep this possibility for specific applications on deprecated HW
 {$endif CPUX86}
@@ -351,6 +351,7 @@
       {$ASMMODE INTEL}         // as Delphi expects
       {$define CPUINTEL}
       {$define FPC_CPUINTEL}
+      {$define FPC_CODEALIGN}  // we can use {$CODEALIGN LOOP=16} conditional
       {$define FPC_CPUX64}
       {$ifndef OSDARWIN}       // MachOS has troubles with our asm
         {$define FPC_ASMX64}
@@ -379,6 +380,7 @@
       {$ASMMODE INTEL}         // as Delphi expects
       {$define CPUINTEL}
       {$define FPC_CPUINTEL}
+      {.$define FPC_CODEALIGN} // no need of {$CODEALIGN LOOP=16} conditional
       {$define FPC_X86}
       {$ifndef FPC_PIC}        // MachOS/OpenBSD/Android require PIC on i386
         {$define ASMX86}       // supports asm with globals

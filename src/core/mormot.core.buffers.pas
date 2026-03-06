@@ -1429,9 +1429,9 @@ function Base32ToBin(B32: PAnsiChar; B32Len: integer): RawByteString; overload;
 function Base32ToBin(const base32: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// internal raw function used to initialize Base32/58/64/64uri decoding lookup
+// internal raw functions used to initialize Base32/58/64/64uri decoding lookup
+procedure FillLookupTable(s, d: PByteArray; his: PtrUInt);
 procedure FillBaseDecoder(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
-
 
 /// fill a RawBlob from TEXT-encoded blob data
 // - blob data can be encoded as SQLite3 BLOB literals (X'53514C697465' e.g.) or
@@ -6445,20 +6445,19 @@ end;
 
 { ************ Base64, Base64Uri, Base58 and Baudot Encoding / Decoding }
 
-procedure FillBaseDecoderChars(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
-  {$ifndef CPUX86} inline; {$endif}
+procedure FillLookupTable(s, d: PByteArray; his: PtrUInt);
 begin
   repeat
-    d[s[i]] := i; // pre-compute O(1) lookup table for the meaningful characters
-    dec(i);
-  until i = 0;
-  d[s[0]] := i
+    d[s[his]] := his; // pre-compute O(1) lookup table for the meaningful chars
+    dec(his);
+  until his = 0;
+  d[s[0]] := his
 end;
 
 procedure FillBaseDecoder(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
 begin
   FillcharFast(d^, SizeOf(d^), 255); // fill with -1 = invalid by default
-  FillBaseDecoderChars(s, d, i);
+  FillLookupTable(pointer(s), pointer(d), i);
 end;
 
 
@@ -6653,7 +6652,7 @@ begin
   if BinBytes = 0 then
     exit;
   destlen := BinToBase64Length(BinBytes);
-  if destlen > 255 then
+  if destlen > high(result) then
     exit; // avoid buffer overflow
   result[0] := AnsiChar(destlen);
   Base64Encode(@result[1], Bin, BinBytes);
@@ -7032,7 +7031,7 @@ begin
   if BinBytes <= 0 then
     exit;
   len := BinToBase64uriLength(BinBytes);
-  if len > 255 then
+  if len > high(result) then
     exit;
   byte(result[0]) := len;
   Base64uriEncode(@result[1], Bin, BinBytes, enc);
@@ -7591,7 +7590,7 @@ begin
     if ConvertBase32ToBin[#255] = 0 then // delayed thread-safe initialization
     begin
       FillBaseDecoder(@b32encUpper, @ConvertBase32ToBin, high(b32encUpper));
-      FillBaseDecoderChars(@b32encLower, @ConvertBase32ToBin, high(b32encLower));
+      FillLookupTable(@b32encLower, @ConvertBase32ToBin, high(b32encLower));
     end;
     p := Base32Decode(@ConvertBase32ToBin, B32,
       FastNewRawByteString(result, (B32Len shr 3) * 5), B32Len);
@@ -8855,6 +8854,7 @@ const
      mtGif,     mtFont,   mtWebm,   mtTiff,
      mtTiff,    mtTiff,   mtWebp{=riff}, mtDoc,
      mtOgg,     mtDicom,  mtZstd);
+  _HTML32 = ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24;
 
 function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 var
@@ -8868,14 +8868,13 @@ begin
   case PAnsiChar(Content)^ of
     '<':
       case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
-        ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+        _HTML32:
           result := mtHtml; // legacy HTML document
         ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
           if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
              ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
              (PAnsiChar(Content)[9] = ' ') then
-            if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
-               ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
+            if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 = _HTML32) then
               result := mtHtml // HTML5 markup
             else
               result := mtXml // malformed XML document
@@ -8916,7 +8915,7 @@ begin
             if (PtrInt(bswap32(PCardinal(Content)^)) <= Len) and
                (PCardinalArray(Content)^[1] = $70797466) then // 'ftyp'
               case PCardinalArray(Content)^[2] of // brand
-                $20207471, // qt   Apple’s QuickTime File Format
+                $20207471, // qt   Apple's QuickTime File Format
                 $3134706d, // mp41 old ISO/IEC 14496-1 MPEG-4 Version 1
                 $3234706d, // mp42 MPEG-4 Version 2 video/QuickTime file
                 $326f7369, // iso2 ISO Base Media file (MPEG-4) v2
@@ -8927,7 +8926,7 @@ begin
                 $6d6f7369: // isom ISO Base Media file (MPEG-4) v1
                   result := mtMp4;
                 $20763466, // f4v  Adobe Flash Video
-                $2076346d, // m4v  Apple’s iTunes and QuickTime
+                $2076346d, // m4v  Apple's iTunes and QuickTime
                 $31637661, // avc1 H.264/AVC codec
                 $35706733, // 3gp5 Mobile optimized 3GPP Release 5
                 $36706733: // 3gp6 Mobile optimized 3GPP Release 6
@@ -9596,7 +9595,7 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(itemname, result);
   if itemcount > 1 then
-    AppendShortCharSafe('s', @result);
+    AppendShortCharSafe('s', result);
 end;
 
 function EscapeBuffer(s: PAnsiChar; slen: integer;
@@ -9679,13 +9678,13 @@ end;
 function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString;
 begin
   result[0] := AnsiChar(
-    EscapeBuffer(source, sourcelen, @result[1], 255) - @result[1]);
+    EscapeBuffer(source, sourcelen, @result[1], high(result)) - @result[1]);
 end;
 
 function EscapeToShort(const source: RawByteString): ShortString;
 begin
   result[0] := AnsiChar(
-    EscapeBuffer(pointer(source), length(source), @result[1], 255) - @result[1]);
+    EscapeBuffer(pointer(source), length(source), @result[1], high(result)) - @result[1]);
 end;
 
 function ContentAppend(source: PAnsiChar; len, pos, max: PtrInt; txt: PUtf8Char): integer;
@@ -9727,7 +9726,7 @@ end;
 
 procedure ContentToShortAppend(source: PAnsiChar; len: PtrInt; var txt: ShortString);
 begin
-  txt[0] := AnsiChar(ContentAppend(source, len, ord(txt[0]), 255, @txt[1]));
+  txt[0] := AnsiChar(ContentAppend(source, len, ord(txt[0]), high(txt), @txt[1]));
 end;
 
 function BinToSource(const ConstName, Comment: RawUtf8;
@@ -9931,10 +9930,10 @@ begin
     PCardinal(@ctx[30])^ := ord('.') + ord('.') shl 8 + ord('.') shl 16;
   end
   else
-    Ansi7StringToShortString(Context, ctx);
+    Ansi7StringToShortString(Context, ctx{%H-});
   persec[0] := #0;
   if PerSecond <> 0 then
-    FormatShort16(' %/s', [KBNoSpace(PerSecond)], persec);
+    FormatShort(' %/s', [KBNoSpace(PerSecond)], persec);
   curr[0] := #0;
   AppendKB(CurrentSize, curr, {withspace=}false);
   if ExpectedSize = 0 then
@@ -10676,10 +10675,8 @@ end;
 function IsHttpOrHttps(P: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 begin
-  result := (PCardinal(P)^ =
-             ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
-            ((PCardinal(P + 4)^ and $ffffff =
-             ord(':') + ord('/') shl 8 + ord('/') shl 16) or
+  result := (PCardinal(P)^ = HTTP__32) and
+            ((PCardinal(P + 4)^ and $ffffff = HTTP__24) or
              (PCardinal(P + 4)^ =
              ord('s') + ord(':') shl 8 + ord('/') shl 16 + ord('/') shl 24));
 end;
@@ -10748,7 +10745,7 @@ end;
 
 procedure TTextWriterEscape.Toggle(style: TTextWriterEscapeStyle);
 const
-  HTML: array[tweBold..tweCode] of string[7] = (
+  HTML: array[tweBold..tweCode] of TShort7 = (
     'strong>', 'em>', 'code>');
 begin
   W.Add('<');
@@ -10777,9 +10774,9 @@ end;
 
 procedure TTextWriterEscape.SetLine(style: TTextWriterEscapeLineStyle);
 const
-  HTML: array[twlParagraph..twlCode3] of string[5] = (
+  HTML: array[twlParagraph..twlCode3] of TShort7 = (
     'p>', 'li>', 'li>', 'p>', 'code>', 'code>');
-  HTML2: array[twlOrderedList..twlCode3] of string[11] = (
+  HTML2: array[twlOrderedList..twlCode3] of TShort15 = (
     'ol>', 'ul>', 'blockquote>', 'pre>', 'pre>');
 begin
   if lst >= low(HTML) then
@@ -11830,7 +11827,7 @@ begin
   // HTML/Emoji Efficient Parsing
   Assert(ord(high(TEmoji)) = $4f + 1);
   EMOJI_RTTI := GetEnumName(TypeInfo(TEmoji), 1); // ignore eNone=0
-  GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT, false, {lower=}true);
+  GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT, scLowerCase);
   FastAssignNew(EMOJI_TEXT[eNone]);
   for e := succ(low(e)) to high(e) do
   begin

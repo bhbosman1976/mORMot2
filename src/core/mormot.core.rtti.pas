@@ -541,10 +541,10 @@ type
     procedure AddCaptionStrings(Strings: TStrings;
       UsedValuesBits: pointer = nil);
     /// retrieve all element names as a dynamic array of RawUtf8
-    // - names could be optionally trimmed left from their initial lower chars
+    // - names could be optionally with a custom casing, e.g. scTrimLeft
     // - optionally return the corresponding ordinal values in a TIntegerDynArray
-    procedure GetEnumNameAll(var result: TRawUtf8DynArray;
-      TrimLeftLowerCase: boolean; resOrd: PIntegerDynArray = nil); overload;
+    procedure GetEnumNames(var result: TRawUtf8DynArray;
+      newCase: TSetCase; resOrd: PIntegerDynArray = nil);
     /// retrieve all element names as CSV, with optional quotes
     procedure GetEnumNameAll(out result: RawUtf8; const Prefix: RawUtf8 = '';
       quotedValues: boolean = false; const Suffix: RawUtf8 = '';
@@ -773,7 +773,8 @@ type
         EnumMax:  cardinal;
         EnumInfo: PRttiEnumType;
         EnumList: PShortString;
-        EnumCustomText: PRawUtf8Array); // TRttiJson.RegisterCustomEnumValues
+        // from RegisterCustomEnumValues/EnumSetNameChangeCase
+        EnumCustomText: PRawUtf8Array);
       rkDynArray,
       rkArray: (
         ItemInfoManaged: PRttiInfo; // = nil for unmanaged types
@@ -784,7 +785,7 @@ type
       );
       rkClass: (
         NewInstance: pointer; // TRttiCustomNewInstance - set by mormot.core.json
-        ValueClass: TClass; // = Info.RttiClass.RttiClass
+        ValueClass: TClass;   // = Info.RttiClass.RttiClass
         SerializableInterface: pointer; // = TRttiCustom of the rkInterface
         ValueRtlClass: TRttiValueClass;
       );
@@ -796,7 +797,6 @@ type
         SerializableInterfaceEntryOffset: integer; // resolve once
       );
   end;
-
   /// map extended PRttiInfo content
   PRttiCache = ^TRttiCache;
 
@@ -1634,10 +1634,11 @@ function GetEnumType(aTypeInfo: PRttiInfo; out List: PShortString): integer;
 function GetEnumName(aTypeInfo: PRttiInfo; aIndex: integer): PShortString;
 
 /// get the corresponding enumeration name, without the first lowercase chars
-// - e.g. otDone -> 'Done'
+// - e.g. otDone -> 'Done' or following any other TSetCase conversion
 // - this will return the code-based English text; use GetEnumCaption() to
 // retrieve the enumeration display text
-function GetEnumNameTrimed(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
+function GetEnumNameTrimed(aTypeInfo: PRttiInfo; aIndex: integer;
+  aKind: TSetCase = scTrimLeft): RawUtf8;
 
 /// get the enumeration name, without the first lowercase chars, and uncamelcased
 // - e.g. otProcessDone -> 'Process done'
@@ -1647,26 +1648,31 @@ function GetEnumNameUnCamelCase(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
 // - may be used as cache for overloaded ToText() content
 procedure GetEnumNames(aTypeInfo: PRttiInfo; aDest: PPShortString);
 
-/// helper to retrieve all trimmed texts of an enumerate
+/// helper to retrieve all trimmed texts of an enumerate into a RawUtf8 array
 // - may be used as cache to retrieve UTF-8 text without lowercase 'a'..'z' chars
-// - can optionally generate the un-camelcased text of the enumerate values
+// - can optionally use another SetCase(), e.g. scUnCamelCase or scSnakeCase
 // - typical usage is the following:
 // ! var
 // !   TXT: array[TBenchmark] of RawUtf8;
 // ! ...
 // !   GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT);
 procedure GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aDest: PRawUtf8;
-  aUnCamelCase: boolean = false; aLowerCase: boolean = false;
+  aKind: TSetCase = scTrimLeft); overload;
+
+/// helper to retrieve all trimmed texts of an enumerate - compatibility function
+procedure GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aDest: PRawUtf8;
+  aUnCamelCase: boolean; aLowerCase: boolean = false;
   aLowerCaseFirst: boolean = false); overload;
 
 /// helper to retrieve all trimmed texts of an enumerate as UTF-8 strings
-function GetEnumTrimmedNames(aTypeInfo: PRttiInfo): TRawUtf8DynArray; overload;
+function GetEnumTrimmedNames(aTypeInfo: PRttiInfo;
+  aNewCase: TSetCase = scTrimLeft): TRawUtf8DynArray; overload;
 
 /// helper to retrieve all trimmed texts of an enumerate as UTF-8 strings
-// - names could be optionally trimmed left from their initial lower chars
+// - names could be optionally change their casing, e.g. using scTrimLeft
 // - optionally return the corresponding ordinal values in a TIntegerDynArray
-function GetEnumNameAll(aTypeInfo: PRttiInfo;
-  TrimLeftLowerCase: boolean; resOrd: PIntegerDynArray = nil): TRawUtf8DynArray;
+function GetEnumNameAll(aTypeInfo: PRttiInfo; aNewCase: TSetCase = scNoTrim;
+  resOrd: PIntegerDynArray = nil): TRawUtf8DynArray;
 
 /// helper to retrieve the index of an enumerate item from its text
 // - returns -1 if aValue was not found
@@ -1690,8 +1696,15 @@ function GetEnumNameValueTrimmedExact(aTypeInfo: PRttiInfo;
   aValue: PUtf8Char; aValueLen: PtrInt): integer;
 
 /// helper to retrieve the index of an enumerate item from its text
+// - AlsoTrimLowerCase = true will also trim  and search lowercase 'a'..'z' chars
+// - FallbackText could be set to search also from an 'array[TEnum] of RawUtf8'
+// constant as filled from GetEnumTrimmedNames()
 function GetEnumNameValue(aTypeInfo: PRttiInfo; const aValue: RawUtf8;
-  AlsoTrimLowerCase: boolean = false): integer; overload;
+  AlsoTrimLowerCase: boolean = false; FallbackText: PRawUtf8Array = nil): integer; overload;
+
+/// helper to retrieve the index of an enumerate item from its text
+function GetEnumNameValue(aTypeInfo: PRttiInfo; const aValue: RawUtf8;
+  out aEnum; FallbackText: PRawUtf8Array = nil): boolean; overload;
 
 /// store an enumeration value from its ordinal representation
 procedure SetEnumFromOrdinal(aTypeInfo: PRttiInfo; out Value; Ordinal: PtrUInt);
@@ -1743,7 +1756,7 @@ procedure GetEnumCaptions(aTypeInfo: PRttiInfo; aDest: PString);
 /// UnCamelCase and translate the enumeration item
 function GetCaptionFromEnum(aTypeInfo: PRttiInfo; aIndex: integer): string;
 
-/// low-level helper to retrieve a (translated) caption from a PShortString
+/// low-level helper to retrieve a (translated) caption from a RTTI PShortString
 // - as used e.g. by GetEnumCaptions or GetCaptionFromEnum
 procedure GetCaptionFromTrimmed(PS: PShortString; var result: string);
 
@@ -1858,8 +1871,8 @@ function ObjectFromInterfaceImplements(const aValue: IInterface;
   const aInterface: TGuid): boolean;
 
 const
-  PSEUDO_RESULT_NAME: string[6] = 'Result';
-  PSEUDO_SELF_NAME:   string[4] = 'Self';
+  PSEUDO_RESULT_NAME: TShort7 = 'Result';
+  PSEUDO_SELF_NAME:   TShort7 = 'Self';
 
 
 
@@ -2544,6 +2557,15 @@ type
     // - Rtti.ByClass[TMyClass].Props.NameChanges() replaces deprecated
     // TJsonSerializer.RegisterCustomSerializerFieldNames(TMyClass, ...)
     procedure NameChanges(const Old, New: array of RawUtf8);
+    /// customize all property/field names for JSON serialization
+    // - will recompute all names from RTTI using SetCase() transformation
+    // - most common are scLowerCaseFirst (aka camelCase, for API), scSnakeCase
+    // (POSIX/IT conventions) or even scKebabCase (RFC/networking)
+    // - NestedClasses will change the case of nested class/TObjArray properties
+    // and NestedEnums the case of nested enumerates/sets properties
+    // - without argument, scNoTrim will restore the original names from RTTI
+    procedure NameChangeCase(NewCase: TSetCase = scNoTrim;
+      NestedClasses: boolean = false; NestedEnums: boolean = false);
     /// reset all properties
     procedure InternalClear;
     /// manual adding of a property/field definition
@@ -2626,7 +2648,8 @@ type
     fAutoCreateObjArrays,
     fAutoResolveInterfaces: PRttiCustomPropDynArray;
     fPrivateSlots: TObjectDynArray;
-    fNoRttiInfo: TByteDynArray; // used by NoRttiSetAndRegister()
+    fNoRttiInfo: TByteDynArray;     // used by NoRttiSetAndRegister()
+    fCustomNames: TRawUtf8DynArray; // used by EnumSetNameChangeCase()
     // used to customize the class process
     fCollectionItem: TCollectionItemClass;
     fCollectionItemRtti: TRttiCustom;
@@ -2757,6 +2780,17 @@ type
     // rkClass or rkRecord/rkObject owner
     function PropFindByPath(var Data: pointer; FullName: PUtf8Char;
       PathDelim: AnsiChar = '.'): PRttiCustomProp;
+    /// search an enumeration/set value from its UTF-8 text representation
+    // - first search by Cache.EnumCustomText, then by (trimmed) RTTI names
+    function GetEnumFromText(Value: PUtf8Char; ValueLen: PtrInt): integer;
+    /// change the identifiers of enumerate/set type using a proper casing
+    // - most common are scLowerCaseFirst (aka camelCase, for API), scSnakeCase
+    // (POSIX/IT conventions) or even scKebabCase (RFC/networking)
+    // - scNoTrim would disable any custom text and fallback to regular RTTI
+    // - see also TRttiJson.RegisterCustomEnumValues() for any custom values
+    // - may be called from TRttiCustomProps.NameChangeCase(NestedEnums=true)
+    // - do nothing if this type is no rkEnumeration/rkSet or if is too big
+    procedure EnumSetNameChangeCase(NewCase: TSetCase);
     /// register once an instance of a given class per RTTI
     // - thread-safe returns aObject, or an existing object (freeing aObject)
     // - just like PrivateSlot property, but for as many class as needed
@@ -3111,8 +3145,9 @@ type
     function RegisterFromText(const TypeName: RawUtf8;
       const RttiDefinition: RawUtf8): TRttiCustom; overload;
     /// default property to access a given RTTI TypeInfo() customization
-    // - you can access or register one type by using this default property:
+    // - you can access or register one type by using this default property e.g.
     // ! Rtti[TypeInfo(TMyClass)].Props.NameChange('old', 'new')
+    // ! Rtti[TypeInfo(TMyEnum)].EnumSetNameChangeCase(scKebabCase)
     property ByTypeInfo[P: PRttiInfo]: TRttiCustom
       read RegisterType; default;
     /// default property to access a given RTTI customization of a class
@@ -3660,9 +3695,7 @@ end;
 procedure TRttiEnumType.AddCaptionStrings(Strings: TStrings;
   UsedValuesBits: pointer);
 var
-  i, L: PtrInt;
-  Line: TByteToAnsiChar;
-  P: PAnsiChar;
+  i: PtrInt;
   V: PShortString;
   s: string;
 begin
@@ -3676,23 +3709,7 @@ begin
       if (UsedValuesBits = nil) or
          GetBitPtr(UsedValuesBits, i) then
       begin
-        L := ord(V^[0]);
-        P := @V^[1];
-        while (L > 0) and
-              (P^ in ['a'..'z']) do
-        begin
-          // ignore left lowercase chars
-          inc(P);
-          dec(L);
-        end;
-        if L = 0 then
-        begin
-          L := ord(V^[0]);
-          P := @V^[1];
-        end;
-        Line[L] := #0; // GetCaptionFromPCharLen() expect it as ASCIIZ
-        MoveFast(P^, Line, L);
-        GetCaptionFromPCharLen(Line, s);
+        GetCaptionFromTrimmed(V, s);
         Strings.AddObject(s, pointer(i));
       end;
       inc(PByte(V), length(V^)+1);
@@ -3715,8 +3732,8 @@ begin
   end;
 end;
 
-procedure TRttiEnumType.GetEnumNameAll(var result: TRawUtf8DynArray;
-  TrimLeftLowerCase: boolean; resOrd: PIntegerDynArray);
+procedure TRttiEnumType.GetEnumNames(var result: TRawUtf8DynArray;
+  newCase: TSetCase; resOrd: PIntegerDynArray);
 var
   min, n, i: PtrInt;
   V: PShortString;
@@ -3736,10 +3753,7 @@ begin
   begin
     if resOrd <> nil then
       resOrd^[i] := min + i;
-    if TrimLeftLowerCase then
-      TrimLeftLowerCaseShort(V, result[i])
-    else
-      ShortStringToAnsi7String(V^, result[i]);
+    ShortTrim(V, result[i], newCase);
     inc(PByte(V), length(V^) + 1);
   end;
 end;
@@ -6194,15 +6208,14 @@ begin
   end;
 end;
 
-function GetEnumNameTrimed(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
+function GetEnumNameTrimed(aTypeInfo: PRttiInfo; aIndex: integer; aKind: TSetCase): RawUtf8;
 begin
-  TrimLeftLowerCaseShort(GetEnumName(aTypeInfo, aIndex), result);
+  ShortTrim(GetEnumName(aTypeInfo, aIndex), result, aKind);
 end;
 
 function GetEnumNameUnCamelCase(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
 begin
-  result := GetEnumNameTrimed(aTypeInfo, aIndex);
-  UnCamelCaseSelf(result);
+  TrimLeftLowerUncamelCaseShort(GetEnumName(aTypeInfo, aIndex), result);
 end;
 
 procedure GetEnumNames(aTypeInfo: PRttiInfo; aDest: PPShortString);
@@ -6225,7 +6238,7 @@ begin
 end;
 
 procedure GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aDest: PRawUtf8;
-  aUnCamelCase, aLowerCase, aLowerCaseFirst: boolean);
+  aKind: TSetCase);
 var
   info: PRttiEnumType;
   p: PShortString;
@@ -6237,28 +6250,37 @@ begin
     p := info^.NameList;
     for i := info^.MinValue to info^.MaxValue do
     begin
-      TrimLeftLowerCaseShort(p, aDest^);
-      if aUnCamelCase then
-        UnCamelCaseSelf(aDest^)
-      else if aLowerCase then
-        CaseNew(aDest^, @NormToLower)
-      else if aLowerCaseFirst then
-        PByte(aDest^)^ := NormToLowerByte[PByte(aDest^)^];
+      ShortTrim(p, aDest^, aKind);
       p := @PByteArray(p)^[ord(p^[0]) + 1];
       inc(aDest);
     end;
   end;
 end;
 
-function GetEnumTrimmedNames(aTypeInfo: PRttiInfo): TRawUtf8DynArray;
+procedure GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aDest: PRawUtf8;
+  aUnCamelCase, aLowerCase, aLowerCaseFirst: boolean);
+var
+  sc: TSetCase; // just a backward compatibility wrapper function
 begin
-  aTypeInfo^.BaseType^.GetEnumNameAll(result{%H-}, {trim=}true);
+  sc := scTrimLeft;
+  if aUnCamelCase then
+    sc := scUnCamelCase
+  else if aLowerCase then
+    sc := scLowerCase
+  else if aLowerCaseFirst then
+    sc := scLowerCaseFirst;
+  GetEnumTrimmedNames(aTypeInfo, aDest, sc);
 end;
 
-function GetEnumNameAll(aTypeInfo: PRttiInfo;
-  TrimLeftLowerCase: boolean; resOrd: PIntegerDynArray): TRawUtf8DynArray;
+function GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aNewCase: TSetCase): TRawUtf8DynArray;
 begin
-  aTypeInfo^.BaseType^.GetEnumNameAll(result, TrimLeftLowerCase, resOrd);
+  aTypeInfo^.BaseType^.GetEnumNames(result{%H-}, aNewCase);
+end;
+
+function GetEnumNameAll(aTypeInfo: PRttiInfo; aNewCase: TSetCase;
+  resOrd: PIntegerDynArray): TRawUtf8DynArray;
+begin
+  aTypeInfo^.BaseType^.GetEnumNames(result, aNewCase, resOrd);
 end;
 
 function GetEnumNameValue(aTypeInfo: PRttiInfo; aValue: PUtf8Char;
@@ -6283,10 +6305,27 @@ begin
 end;
 
 function GetEnumNameValue(aTypeInfo: PRttiInfo; const aValue: RawUtf8;
-  AlsoTrimLowerCase: boolean): integer;
+  AlsoTrimLowerCase: boolean; FallbackText: PRawUtf8Array): integer;
+var
+  e: PRttiEnumType;
 begin
-  result := aTypeInfo^.BaseType^.
-    GetEnumNameValue(pointer(aValue), length(aValue), AlsoTrimLowerCase);
+  e := aTypeInfo^.BaseType;
+  result := e^.GetEnumNameValue(pointer(aValue), length(aValue), AlsoTrimLowerCase);
+  if (result < 0) and
+     (FallbackText <> nil) and
+     (e <> nil) then
+    result := FindPropName(FallbackText, aValue, e^.MaxValue - e^.MinValue + 1);
+end;
+
+function GetEnumNameValue(aTypeInfo: PRttiInfo; const aValue: RawUtf8;
+  out aEnum; FallbackText: PRawUtf8Array = nil): boolean;
+var
+  i: integer;
+begin
+  i := GetEnumNameValue(aTypeInfo, aValue, {trim=}true, FallbackText);
+  result := i >= 0;
+  if result then
+    byte(aEnum) := i;
 end;
 
 procedure SetEnumFromOrdinal(aTypeInfo: PRttiInfo; out Value; Ordinal: PtrUInt);
@@ -6460,21 +6499,11 @@ end;
 
 procedure GetCaptionFromTrimmed(PS: PShortString; var result: string);
 var
-  tmp: TByteToAnsiChar;
-  L: integer;
+  p: PAnsiChar;
+  len: PtrInt;
 begin
-  L := ord(PS^[0]);
-  inc(PByte(PS));
-  while (L > 0) and
-        (PS^[0] in ['a'..'z']) do
-  begin
-    inc(PByte(PS));
-    dec(L);
-  end;
-  tmp[L] := #0; // as expected by GetCaptionFromPCharLen/UnCamelCase
-  if L > 0 then
-    MoveFast(PS^, tmp, L);
-  GetCaptionFromPCharLen(tmp, result);
+  len := TrimLeftLowerCaseP(PS, p);                // 'otDone' -> 'Done'
+  GetCaptionFromPCharLen(pointer(p), result, len); // UnCamelCase and translate
 end;
 
 procedure GetEnumCaptions(aTypeInfo: PRttiInfo; aDest: PString);
@@ -8704,6 +8733,28 @@ begin
   CountNonVoid := FromNames(pointer(List), Count, NamesAsJsonArray);
 end;
 
+procedure TRttiCustomProps.NameChangeCase(NewCase: TSetCase;
+  NestedClasses, NestedEnums: boolean);
+var
+  i: integer;
+  p: PRttiCustomProp;
+begin
+  p := pointer(List);
+  for i := 1 to Count do
+  begin
+    SetCase(p^.Name, pointer(p^.fOrigName), length(p^.fOrigName), NewCase);
+    if NestedClasses then // recursive change case
+      if p^.Value.Props.Count <> 0 then // e.g. class/record
+        p^.Value.Props.NameChangeCase(NewCase, NestedEnums)
+      else if p^.Value.ArrayRtti.PropsCount <> 0 then // e.g. TObjArray
+        p^.Value.ArrayRtti.Props.NameChangeCase(NewCase, NestedClasses, NestedEnums);
+    if NestedEnums and
+       (p^.Value.Kind in [rkEnumeration, rkSet]) then
+      p^.Value.EnumSetNameChangeCase(NewCase);
+    inc(p);
+  end;
+end;
+
 procedure TRttiCustomProps.InternalAdd(Info: PRttiInfo; Offset: PtrInt;
   const PropName: RawUtf8; AddFirst: boolean);
 var
@@ -9623,6 +9674,61 @@ begin
   until false;
 end;
 
+function EnumFind(List: PPUtf8Char; Max: PtrInt; Value: pointer; ValueLen: TStrLen): PtrInt;
+var
+  v: PUtf8Char;
+begin
+  result := 0;
+  repeat
+    v := List^;
+    if v <> nil then
+    begin
+      if (PStrLen(v - _STRLEN)^ = ValueLen) and   // same length
+         (v^ = PUtf8Char(Value)^) and             // same first char
+         CompareMemFixed(v, Value, ValueLen) then // efficiently inlined on FPC
+      exit;
+    end else if ValueLen = 0 then
+      exit;
+    if result = Max then
+      break;
+    inc(List);
+    inc(result);
+  until false;
+  result := -1;
+end;
+
+function TRttiCustom.GetEnumFromText(Value: PUtf8Char; ValueLen: PtrInt): integer;
+begin
+  result := -1;
+  if (self = nil) or
+     (ValueLen = 0) or
+     not (Kind in [rkEnumeration, rkSet]) then
+    exit;
+  if Cache.EnumCustomText <> nil then
+  begin
+    result := EnumFind(pointer(Cache.EnumCustomText), Cache.EnumMax, Value, ValueLen);
+    if result >= 0 then
+      exit;
+  end;
+  result := FindShortStringListExact(Cache.EnumList, Cache.EnumMax, Value, ValueLen);
+  if result < 0 then
+    result := FindShortStringListTrimLowerCase(Cache.EnumList, Cache.EnumMax, Value, ValueLen);
+end;
+
+procedure TRttiCustom.EnumSetNameChangeCase(NewCase: TSetCase);
+begin
+  if (self = nil) or
+     not (Kind in [rkEnumeration, rkSet]) then
+    exit;
+  fCustomNames := nil;
+  if (NewCase <> scNoTrim) and
+     (Cache.EnumMin = 0) and
+     ((Kind = rkEnumeration) and (Cache.Size in [1, 2])) or // up to 65536 items
+     ((Kind = rkSet) and (Cache.Size <> 0)) then            // up to 64-bit
+    Cache.EnumInfo.GetEnumNames(fCustomNames, NewCase);
+  fCache.EnumCustomText := pointer(fCustomNames);
+end;
+
 function TRttiCustom.SetObjArray(Item: TClass): TRttiCustom;
 begin
   if (self <> nil) and
@@ -9910,7 +10016,7 @@ begin
   result := slot^;
   if PClass(result)^ = c then // if fPrivateSlots[0].ClassType = c then
     exit;
-  n := PDALen(PAnsiChar(slot) - _DALEN)^ + (_DAOFF - 1);
+  n := PDALen(PAnsiChar(slot) - _DALEN)^ + (_DAOFF - 1); // favor FPC high()
   if n <> 0 then
     repeat
       inc(slot);
@@ -11114,59 +11220,64 @@ end;
 
 
 procedure InitializeUnit;
-var
-  k: TRttiKind;
-  t: TRttiParserType;
 begin
-  RTTI_FROM_ORD[roSByte] := @FromRttiOrdSByte;
-  RTTI_FROM_ORD[roSWord] := @FromRttiOrdSWord;
-  RTTI_FROM_ORD[roSLong] := @FromRttiOrdSLong;
-  RTTI_FROM_ORD[roUByte] := @FromRttiOrdUByte;
-  RTTI_FROM_ORD[roUWord] := @FromRttiOrdUWord;
-  RTTI_FROM_ORD[roULong] := @FromRttiOrdULong;
-  RTTI_TO_ORD[roSByte] := @ToRttiOrd1;
-  RTTI_TO_ORD[roSWord] := @ToRttiOrd2;
-  RTTI_TO_ORD[roSLong] := @ToRttiOrd4;
-  RTTI_TO_ORD[roUByte] := @ToRttiOrd1;
-  RTTI_TO_ORD[roUWord] := @ToRttiOrd2;
-  RTTI_TO_ORD[roULong] := @ToRttiOrd4;
+  RTTI_FROM_ORD[roSByte]         := @FromRttiOrdSByte;
+  RTTI_FROM_ORD[roSWord]         := @FromRttiOrdSWord;
+  RTTI_FROM_ORD[roSLong]         := @FromRttiOrdSLong;
+  RTTI_FROM_ORD[roUByte]         := @FromRttiOrdUByte;
+  RTTI_FROM_ORD[roUWord]         := @FromRttiOrdUWord;
+  RTTI_FROM_ORD[roULong]         := @FromRttiOrdULong;
+  RTTI_TO_ORD[roSByte]           := @ToRttiOrd1;
+  RTTI_TO_ORD[roSWord]           := @ToRttiOrd2;
+  RTTI_TO_ORD[roSLong]           := @ToRttiOrd4;
+  RTTI_TO_ORD[roUByte]           := @ToRttiOrd1;
+  RTTI_TO_ORD[roUWord]           := @ToRttiOrd2;
+  RTTI_TO_ORD[roULong]           := @ToRttiOrd4;
   {$ifdef FPC_NEWRTTI}
-  RTTI_FROM_ORD[roSQWord] := @FromRttiOrdInt64;
-  RTTI_FROM_ORD[roUQWord] := @FromRttiOrdInt64;
-  RTTI_TO_ORD[roSQWord]   := @ToRttiOrd8;
-  RTTI_TO_ORD[roUQWord]   := @ToRttiOrd8;
+  RTTI_FROM_ORD[roSQWord]        := @FromRttiOrdInt64;
+  RTTI_FROM_ORD[roUQWord]        := @FromRttiOrdInt64;
+  RTTI_TO_ORD[roSQWord]          := @ToRttiOrd8;
+  RTTI_TO_ORD[roUQWord]          := @ToRttiOrd8;
   {$endif FPC_NEWRTTI}
-  RTTI_TO_FLOAT[rfSingle]   := @ToRttiFloat32;
-  RTTI_TO_FLOAT[rfDouble]   := @ToRttiFloat64;
-  RTTI_TO_FLOAT[rfExtended] := @ToRttiFloat80;
-  RTTI_TO_FLOAT[rfCurr]     := @ToRttiFloatCurr;
-  RTTI_FINALIZE[rkLString]   := @_StringClear;
-  RTTI_FINALIZE[rkWString]   := @_WStringClear;
-  RTTI_FINALIZE[rkVariant]   := @_VariantClear;
-  RTTI_FINALIZE[rkArray]     := @_ArrayClear;
-  RTTI_FINALIZE[rkRecord]    := @FastRecordClear;
-  RTTI_FINALIZE[rkInterface] := @_InterfaceClear;
-  RTTI_FINALIZE[rkDynArray]  := @_DynArrayClear;
-  RTTI_TO_VARTYPE[rkInteger] := varInt64;
-  RTTI_TO_VARTYPE[rkInt64]   := varWord64;
-  RTTI_TO_VARTYPE[rkFloat]   := varDouble;
-  RTTI_TO_VARTYPE[rkLString] := varString;
-  RTTI_TO_VARTYPE[rkWString] := varOleStr;
-  RTTI_TO_VARTYPE[rkVariant] := varVariant;
-  RTTI_TO_VARTYPE[rkChar]    := varUnknown; // to use temp RawUtf8 -> varString
-  RTTI_TO_VARTYPE[rkWChar]   := varUnknown;
-  RTTI_TO_VARTYPE[rkSString] := varUnknown;
-  RTTI_MANAGEDCOPY[rkLString]   := @_LStringCopy;
-  RTTI_MANAGEDCOPY[rkWString]   := @_WStringCopy;
-  RTTI_MANAGEDCOPY[rkVariant]   := @_VariantCopy;
-  RTTI_MANAGEDCOPY[rkArray]     := @_ArrayCopy;
-  RTTI_MANAGEDCOPY[rkRecord]    := @_RecordCopy;
-  RTTI_MANAGEDCOPY[rkInterface] := @_InterfaceCopy;
-  RTTI_MANAGEDCOPY[rkDynArray]  := @_DynArrayCopy;
+  RTTI_TO_FLOAT[rfSingle]        := @ToRttiFloat32;
+  RTTI_TO_FLOAT[rfDouble]        := @ToRttiFloat64;
+  RTTI_TO_FLOAT[rfExtended]      := @ToRttiFloat80;
+  RTTI_TO_FLOAT[rfCurr]          := @ToRttiFloatCurr;
+  RTTI_FINALIZE[rkLString]       := @_StringClear;
+  RTTI_FINALIZE[rkWString]       := @_WStringClear;
+  RTTI_FINALIZE[rkVariant]       := @_VariantClear;
+  RTTI_FINALIZE[rkArray]         := @_ArrayClear;
+  RTTI_FINALIZE[rkRecord]        := @FastRecordClear;
+  RTTI_FINALIZE[rkInterface]     := @_InterfaceClear;
+  RTTI_FINALIZE[rkDynArray]      := @_DynArrayClear;
+  RTTI_FINALIZE[rkClass]         := @_ObjClear;
+  RTTI_TO_VARTYPE[rkInteger]     := varInt64;
+  RTTI_TO_VARTYPE[rkInt64]       := varWord64;
+  RTTI_TO_VARTYPE[rkFloat]       := varDouble;
+  RTTI_TO_VARTYPE[rkLString]     := varString;
+  RTTI_TO_VARTYPE[rkWString]     := varOleStr;
+  RTTI_TO_VARTYPE[rkVariant]     := varVariant;
+  RTTI_TO_VARTYPE[rkChar]        := varUnknown; // to use temp RawUtf8/varString
+  RTTI_TO_VARTYPE[rkWChar]       := varUnknown;
+  RTTI_TO_VARTYPE[rkSString]     := varUnknown;
+  RTTI_TO_VARTYPE[rkEnumeration] := varAny; // TVarData.VAny pointing to value
+  RTTI_TO_VARTYPE[rkSet]         := varAny;
+  RTTI_TO_VARTYPE[rkDynArray]    := varAny;
+  RTTI_TO_VARTYPE[rkClass]       := varAny;
+  RTTI_TO_VARTYPE[rkInterface]   := varAny;
+  RTTI_TO_VARTYPE[rkRecord]      := varAny;
+  RTTI_TO_VARTYPE[rkArray]       := varAny;
+  RTTI_MANAGEDCOPY[rkLString]    := @_LStringCopy;
+  RTTI_MANAGEDCOPY[rkWString]    := @_WStringCopy;
+  RTTI_MANAGEDCOPY[rkVariant]    := @_VariantCopy;
+  RTTI_MANAGEDCOPY[rkArray]      := @_ArrayCopy;
+  RTTI_MANAGEDCOPY[rkRecord]     := @_RecordCopy;
+  RTTI_MANAGEDCOPY[rkInterface]  := @_InterfaceCopy;
+  RTTI_MANAGEDCOPY[rkDynArray]   := @_DynArrayCopy;
   {$ifdef HASVARUSTRING}
-  RTTI_FINALIZE[rkUString]      := @_StringClear; // share same PStrRec layout
-  RTTI_TO_VARTYPE[rkUString]    := varUString;
-  RTTI_MANAGEDCOPY[rkUString]   := @_UStringCopy;
+  RTTI_FINALIZE[rkUString]       := @_StringClear; // share same PStrRec layout
+  RTTI_TO_VARTYPE[rkUString]     := varUString;
+  RTTI_MANAGEDCOPY[rkUString]    := @_UStringCopy;
   {$endif HASVARUSTRING}
   {$ifdef FPC}
   RTTI_FINALIZE[rkLStringOld]    := @_StringClear;
@@ -11184,110 +11295,94 @@ begin
   RTTI_MANAGEDCOPY[rkMRecord]    := @_RecordCopy;
   {$endif UNICODE}
   {$endif FPC}
-  for k := low(k) to high(k) do
-  begin
-    // paranoid checks
-    assert(Assigned(RTTI_FINALIZE[k]) = (k in rkManagedTypes));
-    assert(Assigned(RTTI_MANAGEDCOPY[k]) = (k in rkManagedTypes));
-    // TJsonWriter.AddRttiVarData for TRttiCustomProp.GetRttiVarData
-    case k of
-      rkEnumeration,
-      rkSet,
-      rkDynArray,
-      rkClass,
-      rkInterface,
-      {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
-      rkRecord,
-      rkArray:
-        RTTI_TO_VARTYPE[k] := varAny; // TVarData.VAny pointing to the value
-    end;
-  end;
-  RTTI_FINALIZE[rkClass]   := @_ObjClear;
-  PT_INFO[ptBoolean]       := TypeInfo(boolean);
-  PT_INFO[ptByte]          := TypeInfo(byte);
-  PT_INFO[ptCardinal]      := TypeInfo(cardinal);
-  PT_INFO[ptCurrency]      := TypeInfo(Currency);
-  PT_INFO[ptDouble]        := TypeInfo(Double);
-  PT_INFO[ptExtended]      := TypeInfo(Extended);
-  PT_INFO[ptInt64]         := TypeInfo(Int64);
-  PT_INFO[ptInteger]       := TypeInfo(integer);
-  PT_INFO[ptQWord]         := TypeInfo(QWord);
-  PT_INFO[ptRawByteString] := TypeInfo(RawByteString);
-  PT_INFO[ptRawJson]       := TypeInfo(RawJson);
-  PT_INFO[ptRawUtf8]       := TypeInfo(RawUtf8);
-  PT_INFO[ptSingle]        := TypeInfo(Single);
-  PT_INFO[ptString]        := TypeInfo(String);
-  PT_INFO[ptSynUnicode]    := TypeInfo(SynUnicode);
-  PT_INFO[ptDateTime]      := TypeInfo(TDateTime);
-  PT_INFO[ptDateTimeMS]    := TypeInfo(TDateTimeMS);
+  PT_INFO[ptBoolean]             := TypeInfo(boolean);
+  PT_INFO[ptByte]                := TypeInfo(byte);
+  PT_INFO[ptCardinal]            := TypeInfo(cardinal);
+  PT_INFO[ptCurrency]            := TypeInfo(Currency);
+  PT_INFO[ptDouble]              := TypeInfo(Double);
+  PT_INFO[ptExtended]            := TypeInfo(Extended);
+  PT_INFO[ptInt64]               := TypeInfo(Int64);
+  PT_INFO[ptInteger]             := TypeInfo(integer);
+  PT_INFO[ptQWord]               := TypeInfo(QWord);
+  PT_INFO[ptRawByteString]       := TypeInfo(RawByteString);
+  PT_INFO[ptRawJson]             := TypeInfo(RawJson);
+  PT_INFO[ptRawUtf8]             := TypeInfo(RawUtf8);
+  PT_INFO[ptSingle]              := TypeInfo(Single);
+  PT_INFO[ptString]              := TypeInfo(String);
+  PT_INFO[ptSynUnicode]          := TypeInfo(SynUnicode);
+  PT_INFO[ptDateTime]            := TypeInfo(TDateTime);
+  PT_INFO[ptDateTimeMS]          := TypeInfo(TDateTimeMS);
   {$ifdef HASNOSTATICRTTI} // for Delphi 7/2007: use fake TypeInfo()
-  PT_INFO[ptGuid]          := @_TGUID;
-  PT_INFO[ptHash128]       := @_THASH128;
-  PT_INFO[ptHash256]       := @_THASH256;
-  PT_INFO[ptHash512]       := @_THASH512;
-  PT_INFO[ptPUtf8Char]     := @_PUTF8CHAR;
+  PT_INFO[ptGuid]                := @_TGUID;
+  PT_INFO[ptHash128]             := @_THASH128;
+  PT_INFO[ptHash256]             := @_THASH256;
+  PT_INFO[ptHash512]             := @_THASH512;
+  PT_INFO[ptPUtf8Char]           := @_PUTF8CHAR;
   {$else}
-  PT_INFO[ptGuid]          := TypeInfo(TGuid);
-  PT_INFO[ptHash128]       := TypeInfo(THash128);
-  PT_INFO[ptHash256]       := TypeInfo(THash256);
-  PT_INFO[ptHash512]       := TypeInfo(THash512);
-  PT_INFO[ptPUtf8Char]     := TypeInfo(PUtf8Char);
+  PT_INFO[ptGuid]                := TypeInfo(TGuid);
+  PT_INFO[ptHash128]             := TypeInfo(THash128);
+  PT_INFO[ptHash256]             := TypeInfo(THash256);
+  PT_INFO[ptHash512]             := TypeInfo(THash512);
+  PT_INFO[ptPUtf8Char]           := TypeInfo(PUtf8Char);
   {$endif HASNOSTATICRTTI}
   {$ifdef HASVARUSTRING}
-  PT_INFO[ptUnicodeString]     := TypeInfo(UnicodeString);
-  PT_DYNARRAY[ptUnicodeString] := TypeInfo(TUnicodeStringDynArray);
+  PT_INFO[ptUnicodeString]       := TypeInfo(UnicodeString);
+  PT_DYNARRAY[ptUnicodeString]   := TypeInfo(TUnicodeStringDynArray);
   {$else}
-  PT_INFO[ptUnicodeString]     := TypeInfo(SynUnicode);
-  PT_DYNARRAY[ptUnicodeString] := TypeInfo(TSynUnicodeDynArray);
+  PT_INFO[ptUnicodeString]       := TypeInfo(SynUnicode);
+  PT_DYNARRAY[ptUnicodeString]   := TypeInfo(TSynUnicodeDynArray);
   {$endif HASVARUSTRING}
-  PT_INFO[ptUnixTime]      := TypeInfo(TUnixTime);
-  PT_INFO[ptUnixMSTime]    := TypeInfo(TUnixMSTime);
-  PT_INFO[ptVariant]       := TypeInfo(Variant);
-  PT_INFO[ptWideString]    := TypeInfo(WideString);
-  PT_INFO[ptWinAnsi]       := TypeInfo(WinAnsiString);
-  PT_INFO[ptWord]          := TypeInfo(Word);
+  PT_INFO[ptUnixTime]            := TypeInfo(TUnixTime);
+  PT_INFO[ptUnixMSTime]          := TypeInfo(TUnixMSTime);
+  PT_INFO[ptVariant]             := TypeInfo(Variant);
+  PT_INFO[ptWideString]          := TypeInfo(WideString);
+  PT_INFO[ptWinAnsi]             := TypeInfo(WinAnsiString);
+  PT_INFO[ptWord]                := TypeInfo(Word);
   // ptComplexTypes may have several matching TypeInfo() -> put generic
-  PT_INFO[ptOrm]           := TypeInfo(TID);
-  PT_INFO[ptTimeLog]       := TypeInfo(TTimeLog);
-  PTC_INFO[pctTimeLog]     := TypeInfo(TTimeLog);
-  PTC_INFO[pctID]          := TypeInfo(TID);
-  PTC_INFO[pctCreateTime]  := TypeInfo(TTimeLog);
-  PTC_INFO[pctModTime]     := TypeInfo(TTimeLog);
+  PT_INFO[ptOrm]                 := TypeInfo(TID);
+  PT_INFO[ptTimeLog]             := TypeInfo(TTimeLog);
+  PTC_INFO[pctTimeLog]           := TypeInfo(TTimeLog);
+  PTC_INFO[pctID]                := TypeInfo(TID);
+  PTC_INFO[pctCreateTime]        := TypeInfo(TTimeLog);
+  PTC_INFO[pctModTime]           := TypeInfo(TTimeLog);
   // may be overriden to the exact TRecordReference/TRecordVersion TypeInfo()
-  PTC_INFO[pctSpecificClassID] := TypeInfo(QWord);
-  PTC_INFO[pctRecordReference] := TypeInfo(QWord);
-  PTC_INFO[pctRecordVersion]   := TypeInfo(QWord);
+  PTC_INFO[pctSpecificClassID]   := TypeInfo(QWord);
+  PTC_INFO[pctRecordReference]   := TypeInfo(QWord);
+  PTC_INFO[pctRecordVersion]     := TypeInfo(QWord);
   PTC_INFO[pctRecordReferenceToBeDeleted] := TypeInfo(QWord);
-  PT_DYNARRAY[ptBoolean]       := TypeInfo(TBooleanDynArray);
-  PT_DYNARRAY[ptByte]          := TypeInfo(TByteDynArray); // = TBytes
-  PT_DYNARRAY[ptCardinal]      := TypeInfo(TCardinalDynArray);
-  PT_DYNARRAY[ptCurrency]      := TypeInfo(TCurrencyDynArray);
-  PT_DYNARRAY[ptDouble]        := TypeInfo(TDoubleDynArray);
-  PT_DYNARRAY[ptExtended]      := TypeInfo(TExtendedDynArray);
-  PT_DYNARRAY[ptInt64]         := TypeInfo(TInt64DynArray);
-  PT_DYNARRAY[ptInteger]       := TypeInfo(TIntegerDynArray);
-  PT_DYNARRAY[ptQWord]         := TypeInfo(TQWordDynArray);
-  PT_DYNARRAY[ptRawByteString] := TypeInfo(TRawByteStringDynArray);
-  PT_DYNARRAY[ptRawJson]       := TypeInfo(TRawJsonDynArray);
-  PT_DYNARRAY[ptRawUtf8]       := TypeInfo(TRawUtf8DynArray);
-  PT_DYNARRAY[ptSingle]        := TypeInfo(TSingleDynArray);
-  PT_DYNARRAY[ptString]        := TypeInfo(TStringDynArray);
-  PT_DYNARRAY[ptSynUnicode]    := TypeInfo(TSynUnicodeDynArray);
-  PT_DYNARRAY[ptDateTime]      := TypeInfo(TDateTimeDynArray);
-  PT_DYNARRAY[ptDateTimeMS]    := TypeInfo(TDateTimeMSDynArray);
-  PT_DYNARRAY[ptGuid]          := TypeInfo(TGuidDynArray);
-  PT_DYNARRAY[ptHash128]       := TypeInfo(THash128DynArray);
-  PT_DYNARRAY[ptHash256]       := TypeInfo(THash256DynArray);
-  PT_DYNARRAY[ptHash512]       := TypeInfo(THash512DynArray);
-  PT_DYNARRAY[ptOrm]           := TypeInfo(TIDDynArray);
-  PT_DYNARRAY[ptTimeLog]       := TypeInfo(TTimeLogDynArray);
-  PT_DYNARRAY[ptUnixTime]      := TypeInfo(TUnixTimeDynArray);
-  PT_DYNARRAY[ptUnixMSTime]    := TypeInfo(TUnixMSTimeDynArray);
-  PT_DYNARRAY[ptVariant]       := TypeInfo(TVariantDynArray);
-  PT_DYNARRAY[ptWideString]    := TypeInfo(TWideStringDynArray);
-  PT_DYNARRAY[ptWinAnsi]       := TypeInfo(TWinAnsiDynArray);
-  PT_DYNARRAY[ptWord]          := TypeInfo(TWordDynArray);
-  PT_DYNARRAY[ptPUtf8Char]     := TypeInfo(TPUtf8CharDynArray);
+  PT_DYNARRAY[ptBoolean]         := TypeInfo(TBooleanDynArray);
+  PT_DYNARRAY[ptByte]            := TypeInfo(TByteDynArray); // = TBytes
+  PT_DYNARRAY[ptCardinal]        := TypeInfo(TCardinalDynArray);
+  PT_DYNARRAY[ptCurrency]        := TypeInfo(TCurrencyDynArray);
+  PT_DYNARRAY[ptDouble]          := TypeInfo(TDoubleDynArray);
+  PT_DYNARRAY[ptExtended]        := TypeInfo(TExtendedDynArray);
+  PT_DYNARRAY[ptInt64]           := TypeInfo(TInt64DynArray);
+  PT_DYNARRAY[ptInteger]         := TypeInfo(TIntegerDynArray);
+  PT_DYNARRAY[ptQWord]           := TypeInfo(TQWordDynArray);
+  PT_DYNARRAY[ptRawByteString]   := TypeInfo(TRawByteStringDynArray);
+  PT_DYNARRAY[ptRawJson]         := TypeInfo(TRawJsonDynArray);
+  PT_DYNARRAY[ptRawUtf8]         := TypeInfo(TRawUtf8DynArray);
+  PT_DYNARRAY[ptSingle]          := TypeInfo(TSingleDynArray);
+  PT_DYNARRAY[ptString]          := TypeInfo(TStringDynArray);
+  PT_DYNARRAY[ptSynUnicode]      := TypeInfo(TSynUnicodeDynArray);
+  PT_DYNARRAY[ptDateTime]        := TypeInfo(TDateTimeDynArray);
+  PT_DYNARRAY[ptDateTimeMS]      := TypeInfo(TDateTimeMSDynArray);
+  PT_DYNARRAY[ptGuid]            := TypeInfo(TGuidDynArray);
+  PT_DYNARRAY[ptHash128]         := TypeInfo(THash128DynArray);
+  PT_DYNARRAY[ptHash256]         := TypeInfo(THash256DynArray);
+  PT_DYNARRAY[ptHash512]         := TypeInfo(THash512DynArray);
+  PT_DYNARRAY[ptOrm]             := TypeInfo(TIDDynArray);
+  PT_DYNARRAY[ptTimeLog]         := TypeInfo(TTimeLogDynArray);
+  PT_DYNARRAY[ptUnixTime]        := TypeInfo(TUnixTimeDynArray);
+  PT_DYNARRAY[ptUnixMSTime]      := TypeInfo(TUnixMSTimeDynArray);
+  PT_DYNARRAY[ptVariant]         := TypeInfo(TVariantDynArray);
+  PT_DYNARRAY[ptWideString]      := TypeInfo(TWideStringDynArray);
+  PT_DYNARRAY[ptWinAnsi]         := TypeInfo(TWinAnsiDynArray);
+  PT_DYNARRAY[ptWord]            := TypeInfo(TWordDynArray);
+  PT_DYNARRAY[ptPUtf8Char]       := TypeInfo(TPUtf8CharDynArray);
+  {$ifdef FPC_OR_UNICODE}
+  assert(SizeOf(TRttiRecordField) = SizeOf(TManagedField));
+  {$endif FPC_OR_UNICODE}
   // prepare global thread-safe TRttiCustomList
   Rtti := RegisterGlobalShutdownRelease(TRttiCustomList.Create);
   // replace mormot.core.base/mormot.core.os limited implementation
@@ -11298,15 +11393,6 @@ begin
   {$ifdef FPC_CPUX64}
   RedirectRtl;
   {$endif FPC_CPUX64}
-  // validate some redefined RTTI structures with compiler definitions
-  for t := succ(low(t)) to high(t) do
-    assert(Assigned(PT_INFO[t]) <> (t in (ptComplexTypes - [ptOrm, ptTimeLog])));
-  assert(SizeOf(TRttiVarData) = SizeOf(TVarData));
-  assert(SizeOf(TSynVarData) = SizeOf(TVarData));
-  assert(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
-  {$ifdef FPC_OR_UNICODE}
-  assert(SizeOf(TRttiRecordField) = SizeOf(TManagedField));
-  {$endif FPC_OR_UNICODE}
 end;
 
 

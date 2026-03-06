@@ -47,11 +47,6 @@ uses
 
 // define some raw text functions, to avoid linking mormot.core.text
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
-  overload; forward;
-procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload; forward;
-procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8); forward;
 function _GetNextSpaced(var P: PAnsiChar): RawUtf8; forward;
 function _GetNextCardinal(var P: PAnsiChar): PtrUInt; forward;
 function PosExtString(Str: PChar): PChar; forward; // to extract extension
@@ -117,6 +112,11 @@ begin // file extension, then file name case-sensitive comparison on POSIX
               PosExtString(pointer(A)), PosExtString(pointer(B)));
   if result = 0 then
     result := {$ifdef UNICODE}StrCompW{$else}StrComp{$endif}(pointer(A), pointer(B));
+end;
+
+procedure _toutf8(const Str: TFileName; var Utf8: RawUtf8);
+begin
+  Utf8 := Str; // assumed both AnsiString on POSIX - or use RTL
 end;
 
 function TDirectoryBrowser.Make(const fn: TFileName): TFileName;
@@ -426,6 +426,29 @@ procedure TIcuLibrary.SharedUcnvUnLock(ndx: PtrInt);
 begin
   ucnv_reset(fSharedCnv[ndx]); // clean-up from this thread (before unlock)
   PLightLock(@fSharedLock[ndx])^.UnLock;
+end;
+
+procedure syslog(priv: integer; fmt: PAnsiChar; arg: array of const);
+  cdecl; external clib name 'syslog';
+
+const
+  MAX_SYSLOG = 1500; // mimics UDP/Ethernet frame truncation
+
+function SysLogSend(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
+var
+  tmp: array[0 .. MAX_SYSLOG] of AnsiChar;
+begin
+  result := (len > 1) and
+            (len <= MAX_SYSLOG);
+  if not result then
+    exit;
+  if msg[len] <> #0 then
+  begin
+    MoveFast(msg^, tmp, len);
+    tmp[len] := #0; // make ASCIIZ for %s parameter
+    msg := @tmp;
+  end;
+  syslog(priority, '%s', [msg]);
 end;
 
 const
@@ -1322,6 +1345,13 @@ begin
             (FpUnlink(pointer(aFileName)) >= 0);
 end;
 
+function RenameFile(const aOld, aNew: TFileName): boolean;
+begin
+  result := (aOld <> '') and
+            (aNew <> '') and
+            (FpRename(pointer(aOld), pointer(aNew)) >= 0);
+end;
+
 function RemoveDir(const aDirName: TFileName): boolean;
 begin
   result := (aDirName <> '') and
@@ -1667,7 +1697,7 @@ begin
   begin
     AppendShortTwoChars(ord(' ') + ord('(') shl 8, @dest);
     AppendShort(StrError(error), dest); // e.g. 'ECHILD (No child processes)'
-    AppendShortChar(')', @dest);
+    AppendShortCharSafe(')', dest);
   end;
 end;
 
@@ -1864,6 +1894,11 @@ begin
   DoneCriticalSection(cs);
 end;
 
+function GetCurrentProcessId: TThreadIDInt;
+begin
+  result := FpGetpid;
+end;
+
 function GetFileOpenLimit(hard: boolean): integer;
 var
   limit: TRLIMIT;
@@ -1929,15 +1964,15 @@ begin
        (s <> 'nodev') and
        (s <> 'squashfs') and
        (s <> 'nullfs') then
-      _AddRawUtf8(_ProcFileSystems, s);
+      _addutf8(_ProcFileSystems, s);
     p := GotoNextLine(p);
   until p = nil;
   if _ProcFileSystems = nil then
     exit;
   // add some FS which may be marked as nodev but could be considered as "real"
-  _AddRawUtf8(_ProcFileSystems, 'zfs');
-  _AddRawUtf8(_ProcFileSystems, 'cifs');
-  _AddRawUtf8(_ProcFileSystems, 'drvfs');
+  _addutf8(_ProcFileSystems, 'zfs');
+  _addutf8(_ProcFileSystems, 'cifs');
+  _addutf8(_ProcFileSystems, 'drvfs');
   result := true;
 end;
 
@@ -1985,7 +2020,7 @@ begin
         p^ := dlsym(systemd, SD_NAMES[i]);
         if p^ = nil then
         begin
-          p := @@listen_fds;
+          p := @@listen_fds; // missing entry: reset all other API functions
           for j := 0 to i do
           begin
             p^ := nil;
@@ -2008,11 +2043,43 @@ begin
   result := Assigned(listen_fds);
 end;
 
+const
+  _MESSAGE: array[0..7] of AnsiChar = 'MESSAGE=';
+
+function TSystemD.Send(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
+var
+  v: array[0..1] of TIoVec;
+  v0: TShort16;
+  tmp: array[0 .. MAX_SYSLOG + 8] of AnsiChar;
+begin
+  result := false;
+  if (len < 2) or
+     (len > MAX_SYSLOG) or
+     not IsAvailable then
+    exit;
+  // prepare and send the information to the journal
+  if priority > 7 then
+    priority := 7;
+  v0 := 'PRIORITY=#';
+  v0[10] := AnsiChar(priority + ord('0'));
+  v[0].iov_base := @v0[1];
+  v[0].iov_len := ord(v0[0]);
+  PInt64(@tmp)^ := PInt64(@_MESSAGE)^;
+  MoveFast(msg^, tmp[8], len);
+  v[1].iov_base := @tmp;
+  v[1].iov_len := len + 8;
+  result := sd.journal_sendv(v[0], 2) = 0;
+  // if systemd-journald is not running (the socket is not present), sendv()
+  // does nothing, and returns 0 = success
+end;
+
 function TSystemD.ProcessIsStartedBySystemd: boolean;
 begin
   result := IsAvailable and
-    (fpgetppid() = 1) and // e.g. under Docker or when started by init.d
-    (BaseUnix.fpGetenv(PAnsiChar('INVOCATION_ID')) <> nil); // as set e.g. on Ubuntu 20.04
+            // parent PID = 1 e.g. under Docker or when started by init.d
+            (fpgetppid() = 1) and
+            // INVOCATION_ID is set e.g. on Ubuntu 20.04
+            (BaseUnix.fpGetenv(PAnsiChar('INVOCATION_ID')) <> nil);
 end;
 
 procedure TSystemD.Done;
@@ -2379,18 +2446,6 @@ begin
     else
       folder := IncludeTrailingPathDelimiter(folder);
   result := folder <> '';
-end;
-
-function WritableFolder(const parent, sub: TFileName; var folder: TFileName): boolean;
-begin
-  result := false;
-  folder := EnsureDirectoryExists(Join([parent, sub]));
-  if folder = '' then
-    exit;
-  if FileIsWritable(folder) then
-    result := true
-  else
-    folder := '';
 end;
 
 function IsExpandedPath(const FileName: TFileName): boolean;
@@ -3175,7 +3230,7 @@ function StringFromFileNoSize(const FileName: TFileName): RawByteString;
 var
   h: THandle;
   pos, read: PtrInt;
-  tmp: array[0..$7fff] of AnsiChar; // 32KB stack buffer
+  tmp: TBuffer64K; // 64KB stack buffer - /proc/cpuinfo could be huge
 begin
   result := '';
   if FileName = '' then
@@ -3189,8 +3244,8 @@ begin
     if read <= 0 then
       break; // end of input
     inc(pos, read);
-    if pos < SizeOf(tmp) then // is likely to flush before 32KB of output
-      continue;
+    if pos < SizeOf(tmp) then // kernel-side may iterate on PAGE_SIZE (4KB)
+      continue;               // but is likely to flush before 64KB of output
     AppendBufferToUtf8(@tmp, pos, RawUtf8(result)); // in-place resize
     pos := 0;
   until false;
@@ -3474,7 +3529,7 @@ const
   // read some of the /sys/class/dmi/id/* files (may require root access)
   _KNOWN: array[0..15] of record
     id: TSmbiosBasicInfo;
-    fn: string[15];
+    fn: TShort15;
   end = (
     (id: sbiBiosVendor;        fn: 'bios_vendor'),
     (id: sbiBiosVersion;       fn: 'bios_version'),
@@ -4158,7 +4213,7 @@ procedure DoShutDown(Sig: integer; Info: PSigInfo; Context: PSigContext); cdecl;
 var
   level: TSynLogLevel;
   si_code: integer;
-  text: string[4]; // code below has no memory allocation
+  text: TShort7; // code below has no memory allocation
 begin
   if Assigned(SynDaemonInterceptLog) then
   begin
@@ -4397,7 +4452,7 @@ var
   pidfilename: TFileName;
   s: AnsiString;
 const
-  TXT: array[boolean] of string[4] = ('run', 'fork');
+  TXT: array[boolean] of TShort7 = ('run', 'fork');
 begin
   SynDaemonIntercept(onlog);
   if dofork then
@@ -4787,7 +4842,7 @@ begin
         AppendShort('/address'#0, fn);
         LoadProcFileTrimed(@fn[1], f);
         if f <> '' then
-          _AddRawUtf8(result, f);
+          _addutf8(result, f);
       end;
     end;
   until FindNext(SR) <> 0;
@@ -4811,8 +4866,8 @@ var
 {$endif OSLINUX}
 begin
   {$ifdef OSLINUX}
-  txt := TrimU(Join([LoadProcFileTrim('/sys/class/dmi/id/sys_vendor'), ' ',
-                     LoadProcFileTrim('/sys/class/dmi/id/product_name')]));
+  TrimU(Join([LoadProcFileTrim('/sys/class/dmi/id/sys_vendor'), ' ',
+              LoadProcFileTrim('/sys/class/dmi/id/product_name')]), txt);
   if txt <> '' then
   begin // e.g. 'QEMU KVM Virtual Machine' or 'LENOVO 20HES23B0U'
     LoadProcFileTrimed('/sys/class/dmi/id/product_version', prod);
@@ -4823,9 +4878,9 @@ begin
     // return e.g. 'Raspberry Pi 3 Model B Rev 1.2'
     LoadProcFileTrimed('/proc/device-tree/model', txt);
   {$else} // get this information the Android way
-  txt := TrimU(Join([GetSystemProperty('ro.product.brand'), ' ',
-                     GetSystemProperty('ro.product.name'), ' ',
-                     GetSystemProperty('ro.product.device')]));
+  TrimU(Join([GetSystemProperty('ro.product.brand'), ' ',
+              GetSystemProperty('ro.product.name'), ' ',
+              GetSystemProperty('ro.product.device')]), txt);
   {$endif OSLINUX}
   if __BiosInfoHardwareFromCpuInfo <> '' then // e.g. 'Hardware : BCM2709' on RPi3
     if txt = '' then
@@ -5146,16 +5201,16 @@ begin
   {$endif CPUARM3264}
   if cache <> nil then
   begin
-    CpuCacheText := TrimU(cache);
+    TrimU(cache, CpuCacheText);
     CpuCacheSize := _GetNextCardinal(cache);
     while cache^ = ' ' do
       inc(cache);
-    case upcase(cache^) of
-      'K':
+    case cache^ of
+      'k', 'K':
         cacheshr := 10;
-      'M':
+      'm', 'M':
         cacheshr := 20;
-      'G':
+      'g', 'G':
         cacheshr := 30;
     else
       cacheshr := 0;
