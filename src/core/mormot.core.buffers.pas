@@ -7829,10 +7829,10 @@ begin
         end
         else
           IdemPCharAndGetNextItem(P, 'CONTENT-TRANSFER-ENCODING: ', part.Encoding);
-        P := GotoNextLine(P);
-        if P = nil then
+        P := GotoNextLineSmall(P);
+        if P^ = #0 then
           exit;
-      until PWord(P)^ = 13 + 10 shl 8;
+      until PWord(P)^ = EOLW;
       // decode section content
       i := P - PUtf8Char(pointer(Body)) + 3; // i = just after header
       j := PosEx(boundary, Body, i);
@@ -9445,7 +9445,7 @@ begin
       {$endif CPUX64}
       Map.ProcessOneLine(PBeg, P);
       if P + 1 < PEnd then
-        if PWord(P)^ = 13 + 10 shl 8 then
+        if PWord(P)^ = EOLW then
         begin
           inc(P, 2); // ignore #13#10
           if P < PEnd then
@@ -9645,7 +9645,7 @@ begin
     exit;
   until false;
   result := d;
-  PWord(result - 2)^ := ord('.') + ord('.') shl 8;
+  PWord(result - 2)^ := DOT_16;
   result^ := #0;
 end;
 
@@ -9927,7 +9927,7 @@ begin
   begin
     ctx[0] := #32; // truncate to keep information on a single line
     MoveFast(pointer(Context)^, ctx[1], 29);
-    PCardinal(@ctx[30])^ := ord('.') + ord('.') shl 8 + ord('.') shl 16;
+    PCardinal(@ctx[30])^ := DOT_24;
   end
   else
     Ansi7StringToShortString(Context, ctx{%H-});
@@ -10562,7 +10562,7 @@ end;
 
 function SameFileContent(const One, Another: TFileName): boolean;
 var
-  b1, b2: array[word] of word; // 2 * 128KB of buffers
+  b1, b2: TBuffer128K;
   r1, r2: integer;
   f1, f2: THandle;
 begin

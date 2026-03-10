@@ -9099,7 +9099,7 @@ str:          W.AddDirect('"');
         else
           if IsStringJson(U) then // fast and safe enough to guess from value
             goto str
-          else
+          else // constant or number
             W.AddNoJsonEscape(U, {$ifdef NOTORMTABLELEN}StrLen(U){$else}fLen[o]{$endif});
         end;
       W.AddComma;
@@ -9190,7 +9190,7 @@ begin
           begin
             len := GetResultsLen(o, U);
             if Tab or not IsStringJson(U) then
-              W.AddNoJsonEscape(U, len)
+              W.AddNoJsonEscape(U, len) // constant or number
             else
               W.AddQuotedStr(U, len, '"');
           end;

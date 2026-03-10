@@ -2851,7 +2851,7 @@ begin
   end
   else
   begin
-    WR.AddString(Value);
+    WR.AddString(Value); // constant or number
     WR.AddComma;
   end;
 end;
@@ -8578,11 +8578,10 @@ var
   begin
     // ignore any $ifdef ... $endif lines (should be at the line beginning)
     repeat
-      P := GotoNextLine(P);
-      if P = nil then
-        exit;
-    until IdemPChar(GotoNextNotSpace(P), '{$ENDIF');
-    P := GotoNextLine(P);
+      P := GotoNextLineSmall(P);
+    until (P^ = #0) or
+          IdemPChar(GotoNextNotSpace(P), '{$ENDIF');
+    P := GotoNextLineSmall(P);
   end;
 
 begin
@@ -8674,8 +8673,8 @@ begin
                 RawUtf8ToVariant(desc));
     end
     else
-      P := GotoNextLine(P);
-  until (P = nil);
+      P := GotoNextLineSmall(P);
+  until P^ = #0;
 end;
 
 

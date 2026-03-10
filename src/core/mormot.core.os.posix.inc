@@ -1784,6 +1784,8 @@ begin
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
 end;
 
+var
+  OSSafe: TLightLock; // when GlobalLock is overkill
 
 {$undef HASEVENTFD}
 {$undef HASGETRANDOM}
@@ -1965,8 +1967,8 @@ begin
        (s <> 'squashfs') and
        (s <> 'nullfs') then
       _addutf8(_ProcFileSystems, s);
-    p := GotoNextLine(p);
-  until p = nil;
+    p := GotoNextLineSmall(p);
+  until p^ = #0;
   if _ProcFileSystems = nil then
     exit;
   // add some FS which may be marked as nodev but could be considered as "real"
@@ -2008,9 +2010,10 @@ var
   p: PPointer;
   i, j: PtrInt;
 begin
-  GlobalLock;
-  if not tested then
-  begin
+  OSSafe.Lock;
+  try
+    if tested then
+      exit;
     systemd := dlopen(LIBSYSTEMD_PATH, RTLD_LAZY);
     if systemd <> nil then
     begin
@@ -2032,8 +2035,9 @@ begin
       end;
     end;
     tested := true;
+  finally
+    OSSafe.UnLock;
   end;
-  GlobalUnLock;
 end;
 
 function TSystemD.IsAvailable: boolean;
@@ -2419,27 +2423,60 @@ begin
 end;
 {$endif FPCUSEVERSIONINFO}
 
-function GetEnv(name: PAnsiChar; var env: RawUtf8): boolean;
+procedure _GetSystemEnv;
+var
+  e: PPUtf8Char;
+  b, p: PUtf8Char;
+  n: PtrInt;
 begin
-  name := BaseUnix.FPGetenv(name); // local GetEnvironmentVariable()
-  result := name <> nil;
-  if result then
-    FastSetString(env, name, StrLen(name));
+  e := pointer(system.envp);
+  if e = nil then
+    exit;
+  n := 0; // pre-compute the number of entries
+  while e^ <> nil do
+  begin
+    if e^^ <> '=' then
+      inc(n);
+    inc(e);
+  end;
+  if n = 0 then
+    exit; // should never happen
+  SetLength(_SystemEnvNames, n);
+  SetLength(_SystemEnvValues, n);
+  e := pointer(system.envp);
+  n := 0;
+  repeat
+    p := e^;
+    if p^ <> '=' then
+    begin
+      b := p;
+      repeat
+        inc(p);
+      until p^ = '=';
+      FastSetString(_SystemEnvNames[n], b, p - b);
+      inc(p);
+      b := p;
+      inc(p, StrLen(p));
+      FastSetString(_SystemEnvValues[n], b, p - b);
+      inc(n);
+    end;
+    inc(e);
+  until e^ = nil;
 end;
 
 procedure GetUserHost(out User, Host: RawUtf8);
 begin
   Host := SystemInfo.uts.nodename;
   if Host = '' then
-    GetEnv('HOSTNAME', Host);
-  if not GetEnv('LOGNAME', User) then // POSIX
-    GetEnv('USER', User);
+    GetSystemEnv('HOSTNAME', Host);
+  if not GetSystemEnv('LOGNAME', User) then // POSIX
+    GetSystemEnv('USER', User);
 end;
 
 function GetEnvFolder(name: PAnsiChar; var folder: TFileName;
   writable: boolean): boolean;
 begin
-  if GetEnv(name, RawUtf8(folder)) then
+  if GetSystemEnv(name, RawUtf8(folder)) then
     if writable and
        not FileIsWritable(folder) then
       folder := ''
@@ -3581,7 +3618,7 @@ begin
     include(_F0, fIsDebuggerPresent);
   if (not (fIsDebuggerPresent in _F0)) and
      (IsATTY(StdOut) = 1) and
-     GetEnv('TERM', term) and
+     GetSystemEnv('TERM', term) and
      IdemPChars(term, ['XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']) then
     include(_F0, fStdOutIsTTY);
 end;
@@ -3925,8 +3962,8 @@ begin
   repeat
     AddDiskPartition(
       _GetNextSpaced(p), _GetNextSpaced(p), _GetNextSpaced(p), result, n);
-    p := GotoNextLine(p);
-  until p = nil;
+    p := GotoNextLineSmall(p);
+  until p^ = #0;
   SetLength(result, n);
 end;
 
@@ -4253,7 +4290,7 @@ begin
   // note: SIGFPE/SIGSEGV/SIGBUS/SIGILL are handled by the RTL
   if fSynDaemonIntercepted in _F1 then
     exit;
-  GlobalLock;
+  OSSafe.Lock;
   try
     if fSynDaemonIntercepted in _F1 then
       exit;
@@ -4267,7 +4304,7 @@ begin
     fpSigaction(SIGABRT, @sa, nil);
     include(_F1, fSynDaemonIntercepted); // set AFTER interception
   finally
-    GlobalUnLock;
+    OSSafe.UnLock;
   end;
 end;
 
@@ -4284,7 +4321,7 @@ var
 begin
   if fSigPipeDisabled in _F1 then
     exit; // quickly return if already done
-  GlobalLock;
+  OSSafe.Lock;
   try
     if fSigPipeDisabled in _F1 then
       exit;
@@ -4293,7 +4330,7 @@ begin
     fpSigaction(SIGPIPE, @sa, nil);
     include(_F1, fSigPipeDisabled); // set AFTER disabling it
   finally
-    GlobalUnLock;
+    OSSafe.UnLock;
   end;
 end;
 

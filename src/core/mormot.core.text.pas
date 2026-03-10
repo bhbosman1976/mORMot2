@@ -359,6 +359,7 @@ type
   // - twoNonExpandedArrays will force the 'non expanded' optimized JSON layout
   // for array of records or classes, ignoring other formatting options:
   // $ {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+  // - twoIndentSpaces will indent with two spaces instead of two tabs
   TTextWriterOption = (
     twoEnumSetsAsTextInRecord,
     twoEnumSetsAsBooleanInRecord,
@@ -369,7 +370,8 @@ type
     twoEndOfLineCRLF,
     twoIgnoreDefaultInRecord,
     twoDateTimeWithZ,
-    twoNonExpandedArrays);
+    twoNonExpandedArrays,
+    twoIndentSpaces);
 
   /// available internal flags defining TTextWriter / TJsonWriter process
   // - twfStreamIsOwned is set if the associated TStream is owned by the
@@ -493,20 +495,26 @@ type
     hfOutsideAttributes,
     hfWithinAttributes);
 
-  /// the available JSON/JSON-like formats, for TTextWriter.AddJsonReformat()
-  // and its JsonBufferReformat() and JsonReformat() wrappers
-  // - jsonCompact is the default machine-friendly single-line layout
-  // - jsonHumanReadable will add line feeds and indentation, for a more
-  // human-friendly result
+  /// the JSON/JSON-like known formats supported by JsonReformat()
+  // - all those formats are inter-operable within the JSON data model
+  // - jsonCompact is the default standard machine-friendly single-line JSON
+  // - jsonHumanReadable will add line feeds and #9 (tab) indentation, for a
+  // more human-friendly result of a standard JSON content
   // - jsonUnquotedPropName will emit the jsonHumanReadable layout, but
   // with all property names being quoted only if necessary: this format
   // could be used e.g. for configuration files - this format, similar to the
-  // one used in the MongoDB extended syntax, is not JSON compatible: do not
+  // one used in the MongoDB extended syntax, is NOT JSON compatible: do not
   // use it e.g. with AJAX clients, but is would be handled as expected by all
   // our units as valid JSON input, without previous correction
   // - jsonUnquotedPropNameCompact will emit single-line layout with unquoted
   // property names, which is the smallest data output within mORMot instances
-  // - json5 will emit jsonUnquotedPropName, but with a trailing , before } or ]
+  // - jsonC will keep and normalize comments whereas jsonHumanReadable won't
+  // - json5 will emit unquoted names, but with a trailing , before } or ]
+  // - jsonH for indented unquoted names and values, using LF as delimiter -
+  // i.e. the .hjson "Human JSON" format, very suitable for config files
+  // - jsonMorml is as unquoted, unindented and as small as possible - resulting
+  // "mORMot Markup Language" - aka .morml - is actually 100% UTF-8 so much more
+  // human readable and editable than binary alternatives
   // - by default we rely on UTF-8 encoding (which is mandatory in the RFC 8259)
   // but you can use jsonEscapeUnicode to produce pure 7-bit ASCII output,
   // with \u#### escape of non-ASCII chars, e.g. as default python json.dumps
@@ -518,9 +526,21 @@ type
     jsonHumanReadable,
     jsonUnquotedPropName,
     jsonUnquotedPropNameCompact,
+    jsonC,
     json5,
+    jsonH,
+    jsonMorml,
     jsonEscapeUnicode,
     jsonNoEscapeUnicode);
+  /// enable JsonReformat() pre-processor features - defined in a $$..$$ section
+  // - jppTemplate will enable $".." ${..} $[..] and $ident$/${ident} expansion
+  // - jppInclude will enable "include <filename>" keyword within $$..$$
+  // - jppDebugComment will emit verbose debugging comments during pre-processing
+  TTextWriterJsonPreProcessor = set of (
+    jppTemplate,
+    jppInclude,
+    jppIncludeAbsolute,
+    jppDebugComment);
 
   /// parent to T*Writer text processing classes, with the minimum set of methods
   // - use an internal buffer, so much faster than naive string+string
@@ -533,12 +553,12 @@ type
   TTextWriter = class
   protected
     fStream: TStream;
-    fWrittenBytes: Int64;
-    fInitialStreamPosition: Int64;
     fHumanReadableLevel: integer;
-    fTempBufSize: integer; // internal temporary buffer
+    fTempBufSize: integer;
     fTempBuf: PUtf8Char;
     fOnFlushToStream: TOnTextWriterFlush;
+    fWrittenBytes: Int64;
+    fInitialStreamPosition: Int64;
     fCustomOptions: TTextWriterOptions;
     fFlags: TTextWriterFlags;
     function GetTextLength: Int64;
@@ -547,6 +567,8 @@ type
     procedure WriteToStream(data: pointer; len: PtrUInt); virtual;
     procedure InternalSetBuffer(aBuf: PUtf8Char; const aBufSize: PtrUInt);
       {$ifdef FPC} inline; {$endif}
+    function DoJsonReformat(Json: PUtf8Char; Fmt: TTextWriterJsonFormat;
+      Dsl: TTextWriterJsonPreProcessor): boolean; virtual;
     class procedure RaiseUnimplemented(const Method: ShortString);
     function GetFlag(one: TTextWriterFlag): boolean;
     procedure SetFlag(one: TTextWriterFlag; value: boolean);
@@ -733,7 +755,7 @@ type
     // only LF (#10) depending on its internal options
     procedure AddCR;
       {$ifdef HASINLINE}inline;{$endif}
-    /// append CR+LF (#13#10) chars and #9 indentation
+    /// append CR+LF (#13#10) chars and #9/#32 indentation
     // - indentation depth is defined by the HumanReadableLevel value
     procedure AddCRAndIndent; virtual;
     /// write the same character multiple times (up to the internal buffer size)
@@ -994,30 +1016,30 @@ type
     procedure Add(const Format: RawUtf8; const Values: array of const;
       Escape: TTextWriterKind = twNone;
       WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); overload; virtual;
-    /// this class implementation will raise an exception
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    /// append a JSON value, array or document, in a specified format
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     function AddJsonReformat(Json: PUtf8Char; Format: TTextWriterJsonFormat;
-      EndOfObject: PUtf8Char): PUtf8Char; virtual;
+      PreProcessor: TTextWriterJsonPreProcessor = []): boolean;
     /// this class implementation will raise an exception
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     procedure AddVariant(const Value: variant; Escape: TTextWriterKind = twJsonEscape;
       WriteOptions: TTextWriterWriteObjectOptions = []); virtual;
     /// append a variant content as UTF-8 text
     // - with optional HTML escape (via a TTempUtf8) but no JSON serialization
     procedure AddVarData(Value: PVarData; HtmlEscape: boolean);
-    /// this class implementation will raise an exception
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    /// append some JSON value using RTTI
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     // - TypeInfo is a PRttiInfo instance - but not available in this early unit
     function AddTypedJson(Value: pointer; TypeInfo: pointer;
       WriteOptions: TTextWriterWriteObjectOptions = []): pointer; virtual;
     /// write some #0 ended UTF-8 text, according to the specified format
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     procedure Add(P: PUtf8Char; Escape: TTextWriterKind); overload; virtual;
     /// write some #0 ended UTF-8 text, according to the specified format
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     procedure Add(P: PUtf8Char; Len: PtrInt; Escape: TTextWriterKind); overload; virtual;
     /// append an open array constant value as UTF-8 text
-    // - this method may raise an ESynException e.g. on vtVariant: use TJsonWriter
+    // - this class may raise an ESynException e.g. on vtVariant: use TJsonWriter
     procedure AddVarRec(V: PVarRec); overload;
     /// prepare direct access to the internal output buffer
     // - return nil if Len is too big to fit in the current buffer size
@@ -1030,10 +1052,10 @@ type
     function AddPrepareShort(Len: PtrInt): pointer;
       {$ifdef HASINLINE}inline;{$endif}
     /// write some data Base64 encoded
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     procedure WrBase64(P: PAnsiChar; Len: PtrUInt; withMagic: boolean); virtual;
     /// serialize as JSON the given object
-    // - this method will raise an ESynException: use inherited TJsonWriter instead
+    // - this class will raise an ESynException: use inherited TJsonWriter instead
     procedure WriteObject(Value: TObject;
       WriteOptions: TTextWriterWriteObjectOptions = [woDontStoreDefault]); virtual;
     /// append a T*ObjArray dynamic array as a JSON array
@@ -1129,6 +1151,20 @@ type
 
   /// class of our simple TEXT format writer to a Stream
   TBaseWriterClass = class of TTextWriter;
+
+const
+  /// the file extensions suitable for each JsonReformat() function
+  JSON_FMT_EXT: array[TTextWriterJsonFormat] of TFileName = (
+    '.json',  // jsonCompact
+    '.json',  // jsonHumanReadable
+    '.json5', // jsonUnquotedPropName
+    '.json5', // jsonUnquotedPropNameCompact
+    '.jsonc', // jsonC
+    '.json5', // json5
+    '.hjson', // jsonH
+    '.morml', // jsonMorml
+    '.json',  // jsonEscapeUnicode
+    '.json'); // jsonNoEscapeUnicode
 
 var
   /// contains the default JSON serialization class for the framework
@@ -4380,11 +4416,17 @@ begin
       exclude(fFlags, one);
 end;
 
-function TTextWriter.{%H-}AddJsonReformat(Json: PUtf8Char;
-  Format: TTextWriterJsonFormat; EndOfObject: PUtf8Char): PUtf8Char;
+function TTextWriter.DoJsonReformat(Json: PUtf8Char; Fmt: TTextWriterJsonFormat;
+  Dsl: TTextWriterJsonPreProcessor): boolean;
 begin
   RaiseUnimplemented('AddJsonReformat');
-  result := nil; // make compiler happy
+  result := false; // make compiler happy
+end;
+
+function TTextWriter.AddJsonReformat(Json: PUtf8Char;
+  Format: TTextWriterJsonFormat; PreProcessor: TTextWriterJsonPreProcessor): boolean;
+begin
+  result := DoJsonReformat(Json, Format, PreProcessor);
 end;
 
 procedure TTextWriter.Add(P: PUtf8Char; Escape: TTextWriterKind);
@@ -4651,7 +4693,7 @@ begin
     // reformat using the very same temp buffer but not the same RawUtf8
     temp := DefaultJsonWriter.CreateOwnedStream(fTempBuf, fTempBufSize);
     try
-      temp.AddJsonReformat(pointer(result), reformat, nil);
+      temp.AddJsonReformat(pointer(result), reformat);
       temp.SetText(result);
     finally
       temp.Free;
@@ -5030,7 +5072,7 @@ procedure TTextWriter.AddCR;
 begin
   if B >= BEnd then
     FlushToStream;
-  PCardinal(B + 1)^ := 13 + 10 shl 8; // CR + LF
+  PCardinal(B + 1)^ := EOLW; // CR + LF
   inc(B, 2);
 end;
 
@@ -5038,12 +5080,19 @@ procedure TTextWriter.AddCRAndIndent;
 var
   ntabs: PtrUInt;
   p: PUtf8Char;
+  c32: cardinal;
 begin
+  ntabs := fHumanReadableLevel;
+  c32 := $09090909;
+  if twoIndentSpaces in fCustomOptions then
+  begin
+    c32 := $20202020;
+    ntabs := ntabs * 2; // indent by two spaces instead of a single #9 tab
+  end;
   p := B;
   if (p >= fTempBuf) and
-     (p^ = #9) then
+     (ord(p^) = ToByte(c32)) then
     exit; // we just already added an indentation level - do it once
-  ntabs := fHumanReadableLevel;
   if ntabs >= PtrUInt(fTempBufSize) then
     ntabs := 0; // fHumanReadableLevel=-1 after the last level of a document
   if PtrInt(BEnd - p) <= PtrInt(ntabs) then // note: PtrInt(BEnd - B) could be < 0
@@ -5051,10 +5100,18 @@ begin
     FlushToStream;
     p := B;
   end;
-  PCardinal(p + 1)^ := $09090a0d; // CR + LF [ + #9 + #9 ]
-  if ntabs > 2 then
-    FillCharFast(p[3], ntabs, 9); // #9=tab
-  B := @p[ntabs + 2];
+  inc(p);
+  if twoEndOfLineCRLF in fCustomOptions then
+  begin
+    PCardinal(p)^ := EOLW;
+    inc(p);
+  end
+  else
+    p^ := #10;
+  PCardinal(p + 1)^ := c32; // #9#9#9#9 or #32#32#32#32
+  if ntabs > 4 then
+    FillCharFast(p[5], ntabs - 4, ToByte(c32)); // #9 or #32
+  B := @p[ntabs];
 end;
 
 procedure TTextWriter.AddChars(aChar: AnsiChar; aCount: PtrInt);
@@ -5587,7 +5644,7 @@ begin
     MoveFast(Text[1], B^, L);
     inc(B, L);
   end;
-  PCardinal(B)^ := 13 + 10 shl 8; // CR + LF
+  PCardinal(B)^ := EOLW; // CR + LF
   inc(B);
 end;
 
@@ -5609,15 +5666,19 @@ begin // mostly used for TSynLog RawUtf8 append
         if P^ = #0 then
           exit; // most common case
       end;
-      Add(' '); // properly inlined
-      inc(P);
-    until P^ = #0;
+      repeat
+        inc(P);
+        if P^ = #0 then
+          exit;
+      until P^ > ' ';
+      AddOnce(' ');
+    until false;
 end;
 
 procedure TTextWriter.AddOnSameLine(P: PUtf8Char; Len: PtrInt);
 var
   i, s: PtrInt;
-begin // mostly used for TSynLog shortstring append
+begin // mostly used for TSynLog shortstring append or Reformat() comments
   i := 0;
   if (P <> nil) and
      (i < Len) then
@@ -5633,9 +5694,13 @@ begin // mostly used for TSynLog shortstring append
         if i = Len then
           exit; // most common case
       end;
-      Add(' ');
-      inc(i);
-    until i = Len;
+      repeat
+        inc(i);
+        if i = Len then
+          exit;
+      until P[i] > ' ';
+      AddOnce(' ');
+    until false;
 end;
 
 procedure TTextWriter.AddOnSameLineW(P: PWord);
@@ -6228,7 +6293,7 @@ begin
         if c = $00a0 then // &nbsp;
           Add(' ')
         else if c = $2026 then
-          AddShort4(ord('.') + ord('.') shl 8 + ord('.') shl 16, 3) // &hellip;
+          AddShort4(DOT_24, 3) // &hellip;
         else
           AddWideChar(WideChar(c));
         inc(p, l + 1);

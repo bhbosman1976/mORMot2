@@ -5831,8 +5831,9 @@ var
 begin
   result := 0;
   p := pointer(text);
-  while p <> nil do
-  begin
+  if p = nil then
+    exit;
+  repeat
     while p^ in [#1 .. ' ' ] do
       inc(p);
     if NetIsIP4(p, @ip) then // ignore any line starting e.g. with # or ;
@@ -5848,8 +5849,8 @@ begin
          Add(ip, mask) then
         inc(result); // first time seen
     end;
-    p := GotoNextLine(p);
-  end;
+    p := GotoNextLineSmall(p);
+  until p^ = #0;
 end;
 
 function TIp4SubNets.AfterAdd: integer;
@@ -5957,7 +5958,7 @@ begin
       usUdp:  // 'udp://server:port'
         Layer := nlUdp;
       usFile: // https://en.wikipedia.org/wiki/File_URI_scheme#Number_of_slash_characters
-        if PWord(s + 3)^ = ord('/') + ord('/') shl 8 then
+        if cardinal(PWord(s + 3)^) = SLASH_16 then
           inc(s, 2); // support 'file:////server/folder/data.xml' form
     end;
     p := s + 3;

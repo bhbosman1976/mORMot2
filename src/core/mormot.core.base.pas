@@ -821,6 +821,11 @@ const
   DELE_32    = ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24;
   OPTI_32    = ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
   NONE_32    = ord('N') + ord('O') shl 8 + ord('N') shl 16 + ord('E') shl 24;
+  SLASH_16   = ord('/') + ord('/') shl 8;
+  SLBEG_16   = ord('/') + ord('*') shl 8;
+  SLEND_16   = ord('*') + ord('/') shl 8;
+  DOT_16     = ord('.') + ord('.') shl 8;
+  DOT_24     = ord('.') + ord('.') shl 8 + ord('.') shl 16;
 
 /// fill a TGuid with 0
 procedure FillZero(var result: TGuid); overload;
@@ -3336,6 +3341,11 @@ function StrLenW(S: PWideChar): PtrInt;
 function GotoNextLine(source: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// go to next text line, ended by #10 or #13#10 - smaller version
+// - returns the beginning of next line, or #0 (not nil) if source^=#0 was reached
+function GotoNextLineSmall(source: PUtf8Char): PUtf8Char;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// fast go to the first char <= #13
 // - source is expected to be not nil
 function GotoNextControlChar(source: PUtf8Char): PUtf8Char;
@@ -3576,17 +3586,19 @@ function EventEquals(const eventA, eventB): boolean;
 
 type
   /// define a buffer of 1KB of data
-  TBuffer1K = array[0..1023] of AnsiChar;
+  TBuffer1K = array[0 .. pred(1 shl 10)] of AnsiChar;
   /// define a buffer of 2KB of data
-  TBuffer2K = array[0..2047] of AnsiChar;
+  TBuffer2K = array[0 .. pred(2 shl 10)] of AnsiChar;
   /// define a buffer of 4KB of data
-  TBuffer4K = array[0..4095] of AnsiChar;
+  TBuffer4K = array[0 .. pred(4 shl 10)] of AnsiChar;
   /// define a buffer of 8KB of data
-  TBuffer8K = array[0..8191] of AnsiChar;
+  TBuffer8K = array[0 .. pred(8 shl 10)] of AnsiChar;
   /// define a buffer of 16KB of data
-  TBuffer16K = array[0..16383] of AnsiChar;
+  TBuffer16K = array[0 .. pred(16 shl 10)] of AnsiChar;
   /// define a buffer of 64KB of data
   TBuffer64K = array[word] of AnsiChar;
+  /// define a buffer of 128KB of data
+  TBuffer128K = array[0 .. pred(128 shl 10)] of AnsiChar;
 
   /// implements a 4KB stack-based storage of some (UTF-8 or binary) content
   // - could be used e.g. to make a temporary copy when JSON is parsed in-place
@@ -3661,7 +3673,7 @@ type
   private
     procedure AddRealloc(new: PtrInt);
   public
-    /// direct access to the internal temporary buffer
+    /// direct access to the internal 4KB temporary buffer
     Store: TSynTempBuffer;
     /// initialize a local buffer from stack, as Temp.InitOnStack
     procedure Init; overload;
@@ -10049,9 +10061,24 @@ _0: if source[0] = #0 then
       inc(source);
       continue; // e.g. #9
     end;
-    result := source + 1;
+    result := source + 1; // points just after #10
     exit;
   until false;
+end;
+
+function GotoNextLineSmall(source: PUtf8Char): PUtf8Char;
+begin
+  result := source;
+  while true do
+    if result^ > #10 then
+      inc(result)
+    else if result^ = #10 then
+      break
+    else if result^ = #0 then
+      exit
+    else
+      inc(result);
+  inc(result); // points just after #10
 end;
 
 function IsAnsiCompatible(PC: PAnsiChar): boolean;

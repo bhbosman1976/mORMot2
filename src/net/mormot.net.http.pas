@@ -2678,10 +2678,9 @@ begin
     if upIgnore = nil then
       upIgnore := TOBEPURGED;
     if PStrLen(h - _STRLEN)^ <= high(pos[0]) then // void pos[]/len[] overflow
-      while (P <> nil) and
-            (P^ <> #0) do
+      while P^ <> #0 do
       begin
-        next := GotoNextLine(P);
+        next := GotoNextLineSmall(P);
         if IdemPCharSep(P, upIgnore) < 0 then // append this entry
         begin
           l := next - P;
@@ -3000,7 +2999,7 @@ begin
       inc(i);
       inc(p, i);
       dec(l, i);
-    until PWord(p)^ = ord('/') + ord('/') shl 8; // found http://xxxxx
+    until cardinal(PWord(p)^) = SLASH_16; // found http://xxxxx
     i := ByteScanIndex(pointer(p + 2), l - 2, ord('/'));
     if i < 0 then
       exit;

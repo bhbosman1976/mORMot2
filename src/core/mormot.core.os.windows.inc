@@ -2036,6 +2036,7 @@ const
   PROCESS_QUERY_LIMITED_INFORMATION = $1000;
 
 var
+  OSSafe: TLightLock; // when GlobalLock is overkill
   // PROCESS_QUERY_INFORMATION (XP) / PROCESS_QUERY_LIMITED_INFORMATION (Vista+)
   OpenProcessAccess: DWord;
 
@@ -2058,7 +2059,7 @@ begin
   if pointer(api) = nil then
   begin
     proc := nil;
-    GlobalLock; // avoid race condition
+    OSSafe.Lock; // avoid race condition
     if lib = 0 then
       lib := Windows.LoadLibrary(libname);
     if lib >= 32 then
@@ -2068,7 +2069,7 @@ begin
     if proc = nil then
       proc := pointer(1); // mark non available
     pointer(api) := proc; // set it last
-    GlobalUnLock;
+    OSSafe.UnLock;
   end;
   result := pointer(api) <> pointer(1);
 end;
@@ -2897,7 +2898,7 @@ const
 
 procedure _ComputeSystemPath(kind: TSystemPath; var result: TFileName);
 const
-  _ENV: array[TSystemPath] of TFileName = (
+  _ENV: array[TSystemPath] of RawUtf8 = (
     'ALLUSERSAPPDATA', // spCommonData
     'LOCALAPPDATA',    // spUserData
     '',                // spCommonDocuments
@@ -2930,7 +2931,7 @@ begin
         if GetTempPathW(MAX_PATH, @tmp) <> 0 then // first try Windows API
           Win32PWideCharToFileName(tmp, result);
         if result = '' then
-          result := GetEnvironmentVariable(_ENV[spTemp]); // fallback
+          result := GetSystemEnvString(_ENV[spTemp]); // fallback
       end;
   else
     if (CSIDL[kind] <> 0) and
@@ -2942,10 +2943,10 @@ begin
     else
     begin
       // fallback to environment variables (very unlikely)
-      result := GetEnvironmentVariable(_ENV[kind]);
+      result := GetSystemEnvString(_ENV[kind]);
       if result = '' then
       begin
-        result := GetEnvironmentVariable('APPDATA');
+        result := GetSystemEnvString('APPDATA');
         if result = '' then
           result := Executable.ProgramFilePath;
       end;
@@ -2953,6 +2954,53 @@ begin
   end;
   if result <> '' then
     result := IncludeTrailingPathDelimiter(result); // no EnsureDirectoryExists
+end;
+
+var
+  _SystemEnvUnicode: SynUnicode; // for RunCommandWin() below
+
+procedure _GetSystemEnv;
+var
+  p, e, env: PWideChar;
+  i, n: PtrInt;
+begin
+  env := GetEnvironmentStringsW;
+  p := env;
+  if p = nil then
+    exit;
+  n := 0; // pre-compute the number of entries
+  while p^ <> #0 do
+  begin
+    if p^ <> '=' then
+      inc(n);
+    inc(p, StrLenW(p) + 1);
+  end;
+  if n = 0 then
+    exit; // should never happen
+  FastSynUnicode(_SystemEnvUnicode, env, (PtrUInt(p) - PtrUInt(env)) shr 1);
+  SetLength(_SystemEnvNames, n);
+  SetLength(_SystemEnvValues, n);
+  p := env;
+  i := 0;
+  repeat
+    if p^ = '=' then
+      inc(p, StrLenW(p)) // no void string in _SystemEnvNames[]
+    else
+    begin
+      e := p;
+      repeat
+        inc(p);
+      until p^ = '=';
+      Win32PWideCharToUtf8(e, p - e, _SystemEnvNames[i]);
+      inc(p);
+      e := p;
+      inc(p, StrLenW(p));
+      Win32PWideCharToUtf8(e, p - e, _SystemEnvValues[i]);
+      inc(i);
+    end;
+    inc(p);
+  until p^ = #0;
+  FreeEnvironmentStringsW(env);
 end;
 
 procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer;
@@ -4424,27 +4472,6 @@ begin
     [path, arg1, arg2, arg3, arg4, arg5]), waitfor, env, options);
 end;
 
-var
-  EnvironmentCache: SynUnicode;
-  EnvironmentCacheLock: TLightLock; // just set once
-
-procedure GetEnvironmentCache;
-var
-  e, p: PWideChar;
-begin
-  EnvironmentCacheLock.Lock;
-  if EnvironmentCache = '' then
-  begin
-    e := GetEnvironmentStringsW;
-    p := e;
-    while p^ <> #0 do
-      inc(p, StrLenW(p) + 1); // go to name=value#0 pairs end
-    FastSynUnicode(EnvironmentCache, e, (PtrUInt(p) - PtrUInt(e)) shr 1);
-    FreeEnvironmentStringsW(e);
-  end;
-  EnvironmentCacheLock.UnLock;
-end;
-
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
   options: TRunOptions; processhandle: PHandle): integer;
 var
@@ -4650,9 +4677,9 @@ begin
     wenv := SynUnicode(env);
     if roEnvAddExisting in options then
     begin
-      if EnvironmentCache = '' then
-        GetEnvironmentCache;
-      wenv := EnvironmentCache + wenv;
+      if _SystemEnvUnicode = '' then
+        _GetSystemEnv;
+      wenv := _SystemEnvUnicode + wenv;
     end
     else
       UniqueString(wenv);
@@ -5103,7 +5130,7 @@ begin
   if prodver <> '' then
     BiosInfoText := BiosInfoText + ' ' + prodver;
   if {%H-}cpu = '' then
-    _toutf8(GetEnvironmentVariable('PROCESSOR_IDENTIFIER'), cpu);
+   cpu := GetSystemEnv('PROCESSOR_IDENTIFIER');
   if Assigned(GetLogicalProcessorInformation) then
   begin
     SetLength(proc, 1024);
