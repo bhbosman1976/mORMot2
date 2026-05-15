@@ -43,11 +43,17 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.search,
   mormot.lib.sspi,   // for WinCertDecode() - void unit on POSIX
   mormot.crypt.core;
 
 
 { ***************** Password-Safe and TSynConnectionDefinition Classes }
+
+const
+  /// set this to TObjectWithPassword.Key to disable password obfuscation
+  // - i.e. trigger PasswordPlain = Password
+  OBJECTPASSWORD_PLAIN = cardinal(-1);
 
 type
   /// abstract class allowing safe storage of a password in a published property
@@ -63,10 +69,8 @@ type
   protected
     fPassWord: SpiUtf8;
     fKey: cardinal;
-    function GetKey: cardinal;
-      {$ifdef HASINLINE}inline;{$endif}
+    procedure XorKey(var Value: RawByteString);
     function GetPassWordPlain: SpiUtf8;
-    function GetPassWordPlainInternal(AppSecret: RawUtf8): SpiUtf8;
     procedure SetPassWordPlain(const Value: SpiUtf8);
   public
     /// finalize the instance
@@ -87,14 +91,27 @@ type
     // expected user stored in the field
     class function ComputePlainPassword(const CypheredPassword: SpiUtf8;
       CustomKey: cardinal = 0; const AppSecret: RawUtf8 = ''): SpiUtf8;
+    /// append the password encoded via CryptDataForCurrentUser()
+    // - would store it as 'username:passwordbase64' CSV values
+    // - each Executable.User would have its own encrypted value: so we store
+    // each username with its associated encrypted password
+    // - you could remove the current user password by setting Value = ''
+    // - you can use this method at runtime to safely obfucate a password in
+    // memory using a local private key and Windows DPAPI for the current user
+    procedure SetPassWordPlainCurrentUser(const Value: SpiUtf8;
+      AppSecret: RawUtf8 = '');
+    /// getter for PasswordPlain property to eventually call FillZero(Value)
+    procedure GetPasswordSafe(var Value: SpiUtf8; const AppSecret: RawUtf8 = '');
     /// the private key used to cypher the password storage on serialization
     // - application can override the default 0 value at runtime
+    // - set OBJECTPASSWORD_PLAIN would disable obfuscation
     property Key: cardinal
-      read GetKey write fKey;
+      read fKey write fKey;
     /// access to the associated unencrypted Password value
     // - may trigger a ECrypt if the password was stored using hardened
     // CryptDataForCurrentUser, and the current user doesn't match the
     // expected user stored in the field
+    // - equals fPassword field if Key is set to OBJECTPASSWORD_PLAIN
     property PasswordPlain: SpiUtf8
       read GetPassWordPlain write SetPassWordPlain;
   end;
@@ -387,7 +404,7 @@ type
     /// convert this identifier as an explicit TDocVariant JSON object
     // - returns e.g.
     // ! {"Created":"2016-04-19T15:27:58","Identifier":1,"Counter":1,
-    // ! "Value":3137644716930138113,"Hex":"2B8B273F00008001"}
+    // !  "Value":3137644716930138113,"Hex":"2B8B273F00008001"}
     function AsVariant: variant;
       {$ifdef HASINLINE}inline;{$endif}
     /// convert this identifier to an explicit TDocVariant JSON object
@@ -1047,14 +1064,18 @@ function HashDetect(const Hash: RawUtf8; out Digest: THashDigest): boolean;
 function HashDigestEqual(const a, b: THashDigest): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// anti-forensic method for a hash digest
+procedure FillZero(var Digest: THashDigest); overload;
+
 /// compute the hexadecimal hash of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
 function HashFile(const aFileName: TFileName; aAlgo: THashAlgo): RawUtf8; overload;
 
 /// compute one or several hexadecimal hash(es) of any (big) file
-// - using a temporary buffer of 1MB for the sequential reading
+// - using a temporary buffer of 1MB for the sequential one-pass reading
 // - returns the hash in THashAlgo type definition order in aAlgos set
-function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos): TRawUtf8DynArray;
+function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos;
+  aFileSize: PInt64 = nil): TRawUtf8DynArray;
 
 /// compute the hexadecimal hashe(s) of one file, as external .md5/.sha256/.. files
 // - generate the text hash files in the very same folder
@@ -3872,6 +3893,10 @@ type
       aIsComputer: boolean = false; const aSalt: RawUtf8 = '';
       aEncType: integer = ENCTYPE_AES256_CTS_HMAC_SHA1_96;
       aIterations: integer = 0): boolean;
+    /// compute a binary KeyTab with one entry with supplied credentials
+    class function Generate(const aPrincipal: RawUtf8; const aPassword: SpiUtf8;
+      aIsComputer: boolean = false; const aSalt: RawUtf8 = '';
+      aEncType: integer = ENCTYPE_AES256_CTS_HMAC_SHA1_96): RawByteString;
   end;
 
 /// raw function to recognize the OID(s) of a public key ASN1_SEQ definition
@@ -4651,7 +4676,8 @@ begin
   result := hasher.Full(aAlgo, pointer(aBuffer), length(aBuffer));
 end;
 
-function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos): TRawUtf8DynArray;
+function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos;
+  aFileSize: PInt64): TRawUtf8DynArray;
 var
   hasher: array of TSynHasher;
   temp: RawByteString;
@@ -4662,6 +4688,8 @@ var
   h: PtrInt;
 begin
   result := nil;
+  if aFileSize <> nil then
+    aFileSize^ := 0;
   if aFileName = '' then
     exit;
   n := 0;
@@ -4681,6 +4709,8 @@ begin
         else
           exit;
     size := FileSize(F);
+    if aFileSize <> nil then
+      aFileSize^ := size;
     tempsize := 1 shl 20; // 1MB temporary buffer for reading seems good enough
     if tempsize > size then
       tempsize := size;
@@ -4695,7 +4725,7 @@ begin
         hasher[h].Update(pointer(temp), read);
       dec(size, read);
     end;
-    SetLength(result, n + 1);
+    SetLength(result, n + 1); // don't return any partial hash result
     for h := 0 to n do
       hasher[h].Final(result[h]);
   finally
@@ -4922,7 +4952,7 @@ var
   logN, R, P: cardinal;
   hasher: TSynHasher absolute signer;
   dig: THash256 absolute signer;
-begin
+{%H-}begin
   case format of
     mcfMd5Crypt .. mcfSha512Crypt:
       result := hasher.UnixCryptHash(MCF_ALGO[format], password, rounds, saltsize, salt);
@@ -5000,9 +5030,14 @@ begin
         SCryptRoundsDecode(rounds, logN, R, P);
         h := SCryptHash(password, salt, logN, R, P, @pos);
       end;
+  else
+    begin
+      result := mcfUnknown;
+      exit;
+    end;
   end;
   if (pos = 0) or
-     (mormot.core.base.StrComp(checksum, PUtf8Char(pointer(h)) + pos - 1) <> 0) then
+     (mormot.core.base.StrComp(checksum, PUtf8Char(pointer({%H-}h)) + pos - 1) <> 0) then
     result := mcfInvalid;
 end;
 
@@ -5272,7 +5307,7 @@ begin
   fLastError := 'invalid Server initial response';
   resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
   if not resp.GetAsRawUtf8('r', fullnonce) or
-     not StartWithExact(fullnonce, fClientNonce) then
+     not StartWithExact(fullnonce{%H-}, fClientNonce) then
     exit;
   if fMcfSupport and
      resp.GetAsRawUtf8('f', mcf) then // SCRAM-MCF extension
@@ -5284,9 +5319,9 @@ begin
       exit; // unsupported Modular Crypt algorithm or invalid prefix
   end
   else if not resp.GetAsRawUtf8('s', s) or
-          not Base64ToBin(pointer(s), length(s), salt) or
+          not Base64ToBin(pointer({%H-}s), length({%H-}s), salt) or
           not resp.GetAsRawUtf8('i', i) or
-          not ToInteger(i, iterations) or
+          not ToInteger(i{%H-}, iterations) or
           (iterations <= 0) or
           (iterations > MAX_PBKDF2_ROUNDS) then // avoid DoS attacks
     // invalid s=... and i=... standard SCRAM parameters
@@ -5296,7 +5331,7 @@ begin
   Join([fAuthMessage, ',', ServerResponse, ',', key], msg);
   if mcf = '' then
   begin
-    fSigner.Pbkdf2(fAlgo, Password, salt, iterations, @salted);
+    fSigner.Pbkdf2(fAlgo, Password, salt{%H-}, iterations, @salted);
     fSigner.Full(fAlgo, @salted, fSize, 'Client Key', @client);
     fSigner.Full(fAlgo, @salted, fSize, 'Server Key', @server);
     FillZero(salted, fSize);
@@ -5359,8 +5394,8 @@ var
 begin
   fAlgo := aAlgo;
   a := SIGN_HASH[Algo];
-  fSignatureSize := SIGN_SIZE[Algo];
-  fBlockMax := BLOCK_SIZE[Algo]; // typically 15 (256-bit) or 31 (512-bit)
+  fSignatureSize := SIGN_SIZE[fAlgo];
+  fBlockMax := BLOCK_SIZE[fAlgo]; // typically 15 (256-bit) or 31 (512-bit)
   fBlockSize := (fBlockMax + 1) shl 2;
   if fBlockMax = 0 then
   begin // we estimate that the HMAC pattern is part of the SHA-3 sponge design
@@ -5465,7 +5500,7 @@ end;
 function TSynSigner.Hash(aAlgo: TSignAlgo; aBuffer: pointer; aLen: integer;
   out aDigest: THash512Rec): integer;
 begin
-  result := fHasher.Full(SIGN_HASH[fAlgo], aBuffer, aLen, aDigest);
+  result := fHasher.Full(SIGN_HASH[aAlgo], aBuffer, aLen, aDigest);
 end;
 
 function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
@@ -5479,7 +5514,7 @@ begin
   if aSecretPbkdf2Round <> 0 then
     fHasher.CopyTo(bak); // save initial PRF(secret) state
   Update(aSalt);
-  if not (Algo in SIGNER_SHA3) then // padding + XOF mode are part of SHA-3
+  if not (fAlgo in SIGNER_SHA3) then // padding + XOF mode are part of SHA-3
     // U1 = PRF(secret, salt + INT_32_BE(part))
     UpdateBigEndian(aPartNumber);  // is a 1-based index
   Final(aDerivatedKey, {noinit=}true);
@@ -5488,7 +5523,7 @@ begin
     // F(secret, salt, c, i) = U1 ^ U2 ^ .. ^ Uc  with Uc = PRF(secret, Uc-1)
     MoveFast(aDerivatedKey^, tmp, fSignatureSize);
     repeat
-      MoveFast(bak.ctxt, fHasher.ctxt, HASH_INSTANCE[fHasher.fAlgo]); // restore
+      MoveFast({%H-}bak.ctxt, fHasher.ctxt, HASH_INSTANCE[fHasher.fAlgo]); // restore
       Update(@tmp, fSignatureSize);
       Final(@tmp, {noinit=}true);
       XorMemory(pointer(aDerivatedKey), @tmp, fSignatureSize);
@@ -5577,10 +5612,10 @@ begin
   r := aDestLen - (l * hlen); // mod
   if r <> 0 then
     inc(l); // ceil()
-  if (Algo in SIGNER_SHA3) and
+  if (aAlgo in SIGNER_SHA3) and
      (l > 1) then
     ESynCrypto.RaiseUtf8('TSynSigner.Pbkdf2(%) with DestLen=%: use SHAKE instead',
-      [ToText(algo)^, aDestLen]);
+      [ToText(aAlgo)^, aDestLen]);
   // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, part)
   p := FastNewString(l * hlen); // pre-allocate destination buffer
   pointer(result) := p;
@@ -5663,7 +5698,7 @@ procedure TSynSigner.AssignTo(var aDerivatedKey: THash512Rec;
 var
   ks: integer;
 begin
-  case algo of
+  case fAlgo of
     saSha3S128:
       ks := 128; // truncate to Keccak sponge precision
     saSha3S256:
@@ -5846,8 +5881,15 @@ end;
 
 function HashDigestEqual(const a, b: THashDigest): boolean;
 begin
-  result := (a.Algo <= high(THashAlgo)) and
+  result := (a.Algo <= high(THashAlgo)) and // avoid buffer overflow
             mormot.core.base.CompareMem(@a, @b, HASH_SIZE[a.Algo] + 1);
+end;
+
+procedure FillZero(var Digest: THashDigest);
+begin
+  if Digest.Algo <= high(THashAlgo) then // avoid buffer overflow
+    FillZero(Digest.Bin, HASH_SIZE[Digest.Algo]);
+  Digest.Algo := low(Digest.Algo);
 end;
 
 procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
@@ -6372,16 +6414,16 @@ end;
 
 function TDigestAuthServer.DigestAlgoMatch(const FromClient: RawUtf8): boolean;
 var
-  p: PUtf8Char;
-  alg: ShortString;
+  p, a: PUtf8Char;
+  l: PtrInt;
 begin
   result := false;
   p := StrPosI('ALGORITHM=', pointer(FromClient));
   if p = nil then
     exit;
   inc(p, 10);
-  GetNextItemShortString(p, @alg);
-  result := IdemPropNameU(DIGEST_NAME[fAlgo], @alg[1], ord(alg[0]));
+  l := GetNextItemTrimedBuffer(p, ',', a);
+  result := IdemPropNameU(DIGEST_NAME[fAlgo], a, l);
 end;
 
 function TDigestAuthServer.DigestAuth(FromClient: PUtf8Char;
@@ -6668,6 +6710,7 @@ end;
 destructor TObjectWithPassword.Destroy;
 begin
   FillZero(fPassword);
+  fKey := 0; // this is also a sensitive value
   inherited Destroy;
 end;
 
@@ -6703,18 +6746,15 @@ begin
   try
     instance.Key := CustomKey;
     instance.fPassWord := CypheredPassword;
-    result := instance.GetPassWordPlainInternal(AppSecret);
+    instance.GetPasswordSafe(result, AppSecret);
   finally
     instance.Free;
   end;
 end;
 
-function TObjectWithPassword.GetKey: cardinal;
+procedure TObjectWithPassword.XorKey(var Value: RawByteString);
 begin
-  if self = nil then
-    result := 0
-  else
-    result := fKey xor $A5abba5A;
+  SymmetricEncrypt(fKey xor $A5abba5A, Value);
 end;
 
 function TObjectWithPassword.GetPassWordPlain: SpiUtf8;
@@ -6722,24 +6762,31 @@ begin
   if (self = nil) or
      (fPassWord = '') then
     result := ''
+  else if fKey = OBJECTPASSWORD_PLAIN then
+    result := fPassword
   else
-    result := GetPassWordPlainInternal('');
+    GetPasswordSafe(result, '');
 end;
 
-function TObjectWithPassword.GetPassWordPlainInternal(
-  AppSecret: RawUtf8): SpiUtf8;
+procedure TObjectWithPassword.GetPasswordSafe(var Value: SpiUtf8;
+  const AppSecret: RawUtf8);
 var
-  value, pass: RawByteString;
-  usr: RawUtf8;
-  i, j: integer;
+  pwd: RawByteString;
+  app, usr: RawUtf8;
+  i, j: PtrInt;
 begin
-  result := '';
-  if (self = nil) or
-     (fPassWord = '') then
+  if (fPassword = '') or
+     (fKey = OBJECTPASSWORD_PLAIN) then
+  begin
+    Value := fPassWord;
     exit;
+  end;
+  FastAssignNew(Value);
   if AppSecret = '' then
-    ClassToText(ClassType, AppSecret);
-  usr := Executable.User + ':';
+    ClassToText(ClassType, app)
+  else
+    app := AppSecret;
+  Join([Executable.User, ':'], usr);
   i := PosEx(usr, fPassword);
   if (i = 1) or
      ((i > 0) and
@@ -6750,24 +6797,46 @@ begin
     j := PosEx(',', fPassword, i);
     if j = 0 then
       j := length(fPassword) + 1;
-    Base64ToBin(@fPassword[i], j - i, pass);
-    if pass <> '' then
-      result := CryptDataForCurrentUser(pass, AppSecret, false);
+    Base64ToBin(@fPassword[i], j - i, pwd);
+    if pwd <> '' then
+    begin
+      Value := CryptDataForCurrentUser(pwd, app, false);
+      if Value <> '' then
+        exit;
+    end;
   end
   else
   begin
     i := PosExChar(':', fPassword);
     if i > 0 then
-      ECrypt.RaiseUtf8('%.GetPassWordPlain unable to retrieve the ' +
-        'stored value: current user is [%], but password in % was encoded for [%]',
-        [self, Executable.User, AppSecret, copy(fPassword, 1, i - 1)]);
+      ECrypt.RaiseUtf8('%.PassWordPlain unable to retrieve the stored ' +
+        'v: current user is [%], but password in % was encoded for [%]',
+        [self, Executable.User, app, copy(fPassword, 1, i - 1)]);
   end;
-  if result = '' then
+  Base64ToBinSafe(pointer(fPassword), length(fPassword), RawByteString(Value));
+  XorKey(RawByteString(Value));
+end;
+
+procedure TObjectWithPassword.SetPassWordPlainCurrentUser(const Value: SpiUtf8;
+  AppSecret: RawUtf8);
+var
+  list: TSynNameValue;
+begin // follow GetPasswordSafe() encoding logic
+  if PosExChar(':', fPassword) = 0 then
+    FillZero(fPassword); // both formats are incompatible
+  list.InitFromCsv(pointer(fPassWord), ':', ',');
+  FillZero(fPassword);
+  list.Delete(Executable.User);
+  if Value <> '' then
   begin
-    value := Base64ToBin(fPassWord);
-    SymmetricEncrypt(GetKey, value);
-    result := value;
+    if AppSecret = '' then
+      ClassToText(ClassType, AppSecret);
+    list.Add(Executable.User,
+      BinToBase64(CryptDataForCurrentUser(Value, AppSecret, true)));
+    if fKey = OBJECTPASSWORD_PLAIN then
+      fKey := 0; // disable plain password storage from now on
   end;
+  fPassWord := list.AsCsv(':', ',');
 end;
 
 procedure TObjectWithPassword.SetPassWordPlain(const Value: SpiUtf8);
@@ -6776,14 +6845,17 @@ var
 begin
   if self = nil then
     exit;
-  if value = '' then
+  FillZero(fPassword);
+  if (value = '') or
+     (fKey = OBJECTPASSWORD_PLAIN) then
   begin
-    fPassWord := '';
+    fPassWord := value;
     exit;
   end;
   FastSetRawByteString(tmp, pointer(value), Length(value)); // private copy
-  SymmetricEncrypt(GetKey, tmp);
+  XorKey(tmp);
   fPassWord := BinToBase64(tmp);
+  FillZero(tmp);
 end;
 
 
@@ -7998,7 +8070,7 @@ end;
 // core is not published outside of the system unit, it consumes 2KB from a weak
 // 32-bit seed from GetTickCount/fptime, and is not thread-safe either
 
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
 
 { TCryptRandomRdRand }
 
@@ -8013,7 +8085,7 @@ begin
   result := RdRand32; // class is only registered if cfRAND in CpuFeatures
 end;
 
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 { TCryptHash }
 
@@ -9986,10 +10058,10 @@ begin
     TCryptRandomAesPrng.Implements('rnd-default,rnd-aes');
     TCryptRandomLecuyerPrng.Implements('rnd-lecuyer');
     TCryptRandomDelphi.Implements('rnd-delphi');
-    {$ifdef CPUINTEL}
+    {$ifdef ASMINTEL}
     if cfRAND in CpuFeatures then
       TCryptRandomRdRand.Implements('rnd-rdrand');
-    {$endif CPUINTEL}
+    {$endif ASMINTEL}
     TCryptRandomEntropy.Implements(RndAlgosText);
     TCryptRandomSysPrng.Implements('rnd-system,rnd-systemblocking');
     TCryptHasherInternal.Implements(HashAlgosText);
@@ -10719,9 +10791,13 @@ begin
   if aSalt <> '' then
     salt := aSalt
   else if aIsComputer then // see [MS-KILE] 3.1.1.2 Cryptographic Material
-    salt := Join([realm, 'host', name, '.', LowerCaseU(realm)])
+  begin
+    if EndWithExact(name, '$') then
+      SetLength(name, Length(name) - 1);
+    Join([realm, 'host', LowerCaseU(name), '.', LowerCaseU(realm)], salt);
+  end
   else
-    salt := Join([realm, name]);
+    Join([realm, name], salt);
   aEntry.Key := MakeKerberosKey(aPassword, salt, aEncType, aIterations);
   result := aEntry.Key <> '';
 end;
@@ -10738,6 +10814,22 @@ begin
               aIsComputer, aEncType, aIterations) and
             Add(e);
   FillZero(e.Key); // anti-forensic
+end;
+
+class function TKerberosKeyTabGenerator.Generate(const aPrincipal: RawUtf8;
+  const aPassword: SpiUtf8; aIsComputer: boolean; const aSalt: RawUtf8;
+  aEncType: integer): RawByteString;
+var
+  gen: TKerberosKeyTabGenerator;
+begin
+  result := '';
+  gen := TKerberosKeyTabGenerator.Create;
+  try
+    if gen.AddNew(aPrincipal, aPassword, aIsComputer, aSalt, aEncType) then
+      result := gen.SaveToBinary;
+  finally
+    gen.Free;
+  end;
 end;
 
 function OidToCka(const oid, oid2: RawUtf8): TCryptKeyAlgo;
@@ -10975,7 +11067,7 @@ function ParsedToText(const c: TX509Parsed): RawUtf8;
   begin
     for cu := l to h do
       if cu in c.Usage then
-        AddToCsv(CU_FULLTEXT[cu], usage, ', ');
+        AddToCsv(CU_FULLTEXT[cu], usage{%H-}, ', ');
     if usage <> '' then
       result := result +   '    X509v3 ' + ext + #13#10 +
                            '      ' + usage + #13#10;

@@ -41,6 +41,7 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.threads,
   mormot.core.perf,
   mormot.core.zip,     // for ODS export
@@ -3544,7 +3545,7 @@ begin
                 dec(MultiInsertRowCount);
               end;
             end;
-            W.CancelLastComma(')');
+            W.ReplaceLastComma(')');
           end;
         end;
     else
@@ -7762,7 +7763,7 @@ begin
   begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
-      exit;
+      break; // reached end of the CSV input text
     ndx := IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
@@ -9280,7 +9281,7 @@ begin
             W.Add('f');
             W.AddU(f);
             W.AddDirect('=', '"');
-            W.AddXmlEscape(U);
+            AddXmlEscape(W, U);
             W.AddDirect('"', ' ');
           end;
           inc(o); // points to next value
@@ -9390,20 +9391,20 @@ begin
                   ftCurrency:
                     begin
                       W.AddShort('float" office:value="');
-                      W.AddXmlEscape(U);
+                      AddXmlEscape(W, U);
                       W.AddDirect('"', ' ', '/', '>');
                     end;
                   ftDate:
                     begin
                       W.AddShort('date" office:date-value="');
-                      W.AddXmlEscape(U);
+                      AddXmlEscape(W, U);
                       W.AddDirect('"', ' ', '/', '>');
                     end;
                 else
                   begin
                     //ftUnknown,ftNull,ftUtf8,ftBlob:
                     W.AddShort('string"><text:p>');
-                    W.AddXmlEscape(U);
+                    AddXmlEscape(W, U);
                     W.AddShort('</text:p></table:table-cell>');
                   end;
                 end;
@@ -9414,7 +9415,7 @@ begin
               for f := 0 to FieldCount - 1 do
               begin
                 W.AddShort('<table:table-cell office:value-type="string"><text:p>');
-                W.AddXmlEscape(GetResults(o));
+                AddXmlEscape(W, GetResults(o));
                 W.AddShort('</text:p></table:table-cell>');
                 inc(o);
               end;
@@ -9453,7 +9454,7 @@ begin
         Dest.AddDirect('<', 't', 'd', '>');
       if Assigned(OnExportValue) and
          (r > 0) then
-        Dest.AddHtmlEscapeUtf8(OnExportValue(self, r, f, true), hfOutsideAttributes)
+        AddHtmlEscapeUtf8(Dest, OnExportValue(self, r, f, true), hfOutsideAttributes)
       else
         Dest.AddHtmlEscape(GetResults(o), hfOutsideAttributes);
       if r = 0 then
@@ -9586,7 +9587,7 @@ begin
   end;
 end;
 
-{$ifdef CPUX86}
+{$ifdef ASMX86}
 procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: integer);
 {$ifdef FPC} nostackframe; assembler; {$endif}
 asm     // eax=P1 edx=P2 ecx=FieldCount
@@ -9631,7 +9632,7 @@ begin
     dec(FieldCount);
   until FieldCount = 0;
 end;
-{$endif CPUX86}
+{$endif ASMX86}
 
 procedure TUtf8QuickSort.Sort(L, R: integer);
 var
@@ -9688,7 +9689,7 @@ begin
             dec(OJ, f);
             ExchgData(@Data[OI], @Data[OJ], Params.FieldCount);
             {$ifndef NOTORMTABLELEN}
-            {$ifdef CPUX86}ExchgData{$else}ExchgLen{$endif}(
+            {$ifdef ASMX86}ExchgData{$else}ExchgLen{$endif}(
               @Len[OI], @Len[OJ], Params.FieldCount);
             {$endif NOTORMTABLELEN}
             f := Params.FieldIndex;
@@ -9898,7 +9899,7 @@ begin
             ExchgData(@Data[i * FieldCount],
                       @Data[j * FieldCount], FieldCount);
             {$ifndef NOTORMTABLELEN}
-            {$ifdef CPUX86}ExchgData{$else}ExchgLen{$endif}(
+            {$ifdef ASMX86}ExchgData{$else}ExchgLen{$endif}(
               @Len[i * FieldCount], @Len[j * FieldCount], FieldCount);
             {$endif NOTORMTABLELEN}
           end;
@@ -11219,19 +11220,19 @@ begin
   W.AddColumns(KnownRowsCount);
 end;
 
-function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream; Expand,
-  withID: boolean; const aFields: TFieldBits; KnownRowsCount, aBufSize: integer;
-  aStackBuffer: PTextWriterStackBuffer): TOrmWriter;
+function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream;
+  Expand, withID: boolean; const aFields: TFieldBits; KnownRowsCount,
+  aBufSize: integer; aStackBuffer: PTextWriterStackBuffer): TOrmWriter;
 var
   f: TFieldIndexDynArray;
 begin
   FieldBitsToIndex(aFields, f, Fields.Count);
-  result := CreateJsonWriter(
-    Json, Expand, withID, f, KnownRowsCount, aBufSize, aStackBuffer);
+  result := CreateJsonWriter(Json,
+    Expand, withID, f, KnownRowsCount, aBufSize, aStackBuffer);
 end;
 
-function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream; Expand,
-  withID: boolean; const aFields: TFieldIndexDynArray; KnownRowsCount,
+function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream;
+  Expand, withID: boolean; const aFields: TFieldIndexDynArray; KnownRowsCount,
   aBufSize: integer; aStackBuffer: PTextWriterStackBuffer): TOrmWriter;
 begin
   if (self = nil) or
@@ -11253,8 +11254,8 @@ var
   bits: TFieldBits;
 begin
   if FieldBitsFromCsv(aFieldsCsv, bits, withID) then
-    result := CreateJsonWriter(
-      Json, Expand, withID, bits, KnownRowsCount, aBufSize, aStackBuffer)
+    result := CreateJsonWriter(Json,
+      Expand, withID, bits, KnownRowsCount, aBufSize, aStackBuffer)
   else
     result := nil;
 end;
@@ -11324,7 +11325,7 @@ begin
     if (decoded <> 0) and
        (sfoPutIDLast in Format) then
       W.AddPropInt64('ID', decoded);
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
     W.SetText(JsonObject);
   finally
     W.Free;
@@ -11476,7 +11477,7 @@ begin
   begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
-      exit;
+      break; // reached end of the CSV input text
     ndx := Fields.IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
@@ -11516,7 +11517,7 @@ begin
   begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
-      exit;
+      break; // reached end of the CSV input text
     if IsRowIDShort(n) then
     begin
       withID := true;

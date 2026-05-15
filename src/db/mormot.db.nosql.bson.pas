@@ -258,7 +258,7 @@ type
     procedure Init;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// ObjectID content be filled with some unique values
-    // - this implementation is thread-safe
+    // - this implementation is thread-safe and very efficient
     procedure ComputeNew;
     /// convert an hexadecimal string value into one ObjectID
     // - returns TRUE if conversion was made, FALSE on any error
@@ -4309,7 +4309,7 @@ begin
             exit;
           W.AddComma;
         end;
-        W.CancelLastComma('}');
+        W.ReplaceLastComma('}');
       end;
     betArray:
       begin
@@ -4322,7 +4322,7 @@ begin
             exit;
           W.AddComma;
         end;
-        W.CancelLastComma(']');
+        W.ReplaceLastComma(']');
       end;
   else
     EBsonException.RaiseUtf8('BsonListToJson(Kind=%)', [ord(Kind)]);

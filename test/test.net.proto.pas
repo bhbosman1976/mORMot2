@@ -21,6 +21,7 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.log,
   mormot.core.test,
   mormot.core.perf,
@@ -99,6 +100,8 @@ type
     function DoRequest4(Ctxt: THttpServerRequestAbstract): cardinal;
     // this is the main method called by RtspOverHttp[BufferedWrite]
     procedure DoRtspOverHttp(options: TAsyncConnectionsOptions);
+    // helper invoked from OpenAPI to verify YAML dispatch
+    procedure OpenApiYamlDispatch;
   published
     /// Engine.IO and Socket.IO regression tests
     procedure _SocketIO;
@@ -307,7 +310,10 @@ begin
   for i := 0 to high(OpenApiName) do
     if OpenApiName[i] <> '' then
     begin
-      fn := FormatString('%OpenApi%.json', [WorkDir, OpenApiName[i]]);
+      fn := '';
+      if PosExChar('.', OpenApiName[i]) = 0 then
+        fn := '.json';
+      fn := FormatString('%OpenApi%%', [WorkDir, OpenApiName[i], fn]);
       api[i] := StringFromFile(fn);
       if api[i] <> '' then
         continue; // already downloaded
@@ -351,6 +357,80 @@ begin
       end;
       NotifyTestSpeed('%', [OpenApiName[i]], 0, length(dto) + length(client), @timer);
     end;
+  // YAML dispatch smoke test: TOpenApiParser must produce identical output
+  // for a YAML spec and its JSON counterpart when consumed via ParseYaml/
+  // ParseFile. Covers the spec-approved invariant behind mopenapi's .yaml
+  // support.
+  OpenApiYamlDispatch;
+end;
+
+procedure TNetworkProtocols.OpenApiYamlDispatch;
+const
+  YAML_SPEC: RawUtf8 =
+    'openapi: 3.0.0'#10 +
+    'info:'#10 +
+    '  title: DispatchTest'#10 +
+    '  version: 1.0.0'#10 +
+    'paths:'#10 +
+    '  /ping:'#10 +
+    '    get:'#10 +
+    '      operationId: ping'#10 +
+    '      responses:'#10 +
+    '        "200":'#10 +
+    '          description: OK'#10 +
+    'components:'#10 +
+    '  schemas:'#10 +
+    '    Info:'#10 +
+    '      type: object'#10 +
+    '      properties:'#10 +
+    '        name:'#10 +
+    '          type: string'#10;
+  JSON_SPEC: RawUtf8 =
+    '{"openapi":"3.0.0",' +
+    '"info":{"title":"DispatchTest","version":"1.0.0"},' +
+    '"paths":{"/ping":{"get":{"operationId":"ping",' +
+    '"responses":{"200":{"description":"OK"}}}}},' +
+    '"components":{"schemas":{"Info":{"type":"object",' +
+    '"properties":{"name":{"type":"string"}}}}}}';
+var
+  oaY, oaJ, oaF: TOpenApiParser;
+  dtoY, dtoJ, dtoF, clientY, clientJ, clientF: RawUtf8;
+  fn: TFileName;
+begin
+  oaY := TOpenApiParser.Create('DispatchTest');
+  oaJ := TOpenApiParser.Create('DispatchTest');
+  oaF := TOpenApiParser.Create('DispatchTest');
+  try
+    oaY.ParseYaml(YAML_SPEC);
+    oaJ.ParseJson(JSON_SPEC);
+    dtoY := oaY.GenerateDtoUnit;
+    dtoJ := oaJ.GenerateDtoUnit;
+    CheckEqual(dtoY, dtoJ);
+    Check(dtoY <> '', 'yaml dto');
+    Check(dtoJ <> '', 'json dto');
+    clientY := oaY.GenerateClientUnit;
+    clientJ := oaJ.GenerateClientUnit;
+    CheckEqual(clientY, clientJ);
+    Check(clientY <> '', 'yaml client');
+    Check(clientJ <> '', 'json client');
+    // ParseFile with .yaml extension must dispatch to the YAML path
+    fn := WorkDir + 'test.openapi.dispatch.yaml';
+    FileFromString(YAML_SPEC, fn);
+    try
+      oaF.Name := 'DispatchTest'; // match oaY so outputs are comparable
+      oaF.ParseFile(fn);
+      dtoF := oaF.GenerateDtoUnit;
+      clientF := oaF.GenerateClientUnit;
+      CheckEqual(dtoF, dtoY, 'ParseFile(.yaml) dto must equal ParseYaml');
+      CheckEqual(clientF, clientY, 'ParseFile(.yaml) client must equal ParseYaml');
+    finally
+      DeleteFile(fn);
+    end;
+  finally
+    oaY.Free;
+    oaJ.Free;
+    oaF.Free;
+  end;
 end;
 
 procedure RtspRegressionTests(proxy: TRtspOverHttpServer; test: TSynTestCase;
@@ -432,7 +512,7 @@ begin
     test.Check(false, 'expect a running proxy on 127.0.0.1')
   else
   try
-    if SystemInfo.dwNumberOfProcessors < 8 then
+    if CpuThreads < 8 then
       Sleep(50); // seems mandatory from LUTI regression tests
     rmax := clientcount - 1;
     streamer := TCrtSocket.Bind(proxy.RtspPort);
@@ -463,7 +543,7 @@ begin
         end;
       if log <> nil then
         log.Log(sllCustom1, 'RegressionTests % POST', [clientcount], proxy);
-      if SystemInfo.dwNumberOfProcessors < 8 then
+      if CpuThreads < 8 then
         Sleep(50); // seems mandatory from LUTI regression tests
       for r := 0 to rmax do
         with req[r] do
@@ -914,7 +994,8 @@ begin
       one.Sock.Close; // simulate socket disconnection
       Check(not one.Connected, 'closed'); // validate Reconnect
       dv := one.SearchAllRaw('uid=einstein,dc=example,dc=com', '', [], []);
-      CheckHash(_Safe(dv)^.ToHumanJson, $39B7C7F1, one.Settings.UserName);
+      //ConsoleWrite(_Safe(dv)^.ToHumanJson);
+      CheckHash(_Safe(dv)^.ToHumanJson, $47808069, one.Settings.UserName);
     finally
       one.Free;
     end;
@@ -942,7 +1023,7 @@ var
   ip, rev, u, v, json, sid: RawUtf8;
   o: TAsnObject;
   c: cardinal;
-  withntp: boolean;
+  withntp, kerberosusrpwd: boolean;
   guid: TGuid;
   i, j, k, n: PtrInt;
   dns, clients, a: TRawUtf8DynArray;
@@ -960,6 +1041,8 @@ var
   sfs: TSystemFlags;
   l: TLdapClientSettings;
   one: TLdapClient;
+  keytab: RawByteString;
+  keytabfile: TFileName;
   res: TLdapResult;
   utc1, utc2: TDateTime;
   ntp, usr, pwd, ku, main, txt: RawUtf8;
@@ -1468,6 +1551,7 @@ begin
         txt := '';
         if clients[j] = main then
           txt := ' (main)';
+        kerberosusrpwd := false;
         one := TLdapClient.Create;
         try
           one.Settings.TargetUri := clients[j];
@@ -1476,6 +1560,8 @@ begin
             if Executable.Command.Get('ldapusr', usr) and
                Executable.Command.Get('ldappwd', pwd) then
             begin
+              if keytab = '' then
+                keytab := TKerberosKeyTabGenerator.Generate(usr, pwd);
               one.Settings.UserName := usr;
               one.Settings.Password := pwd;
               if Executable.Command.Option('ldaps') then
@@ -1495,8 +1581,11 @@ begin
               else
                 // Windows/SSPI and POSIX/GSSAPI with no prior loggued user
                 if one.BindSaslKerberos('', @ku) then
+                begin
                   AddConsole('connected to % with specific user % = %',
-                    [one.Settings.TargetUri, usr, ku])
+                    [one.Settings.TargetUri, usr, ku]);
+                  kerberosusrpwd := true;
+                end
                 else
                 begin
                   CheckUtf8(false, '% on ldap:% [%]%',
@@ -1545,6 +1634,31 @@ begin
           end;
         finally
           one.Free;
+        end;
+        if kerberosusrpwd then
+        begin
+          Check(keytab <> '', 'keytab?');
+          Check(BufferIsKeyTab(keytab), 'keytab!');
+          keytabfile := TemporaryFileName;
+          FileFromString(keytab, keytabfile);
+          ku := FileIsKeyTabMachineAccountPrincipal(keytabfile, true);
+          CheckUtf8(IdemPropNameU(ku, usr), '%=%', [ku, usr]);
+          {$ifdef OSPOSIX}
+          one := TLdapClient.Create;
+          try
+            one.Settings.TargetUri := clients[j];
+            //one.Settings.UserName := usr;        // user from keytab
+            //one.Settings.KerberosDN := dns[i];   // DN from keytab
+            one.Settings.Password := Make(['FILE:', keytabfile]);
+            ku := '';
+            Check(one.BindSaslKerberos('', @ku), 'Bind keytab');
+            AddConsole('connected via keytab to % with specific user % = %',
+              [one.Settings.TargetUri, usr, ku]);
+          finally
+            one.Free;
+          end;
+          {$endif OSPOSIX}
+          DeleteFile(keytabfile);
         end;
       end;
     end;
@@ -1957,7 +2071,7 @@ begin
   server := TDhcpProcess.Create;
   try
     // custom settings for our tests
-    settings.AddScope; // with default subnet
+    settings.AddScope(TDhcpScopeSettings.Create); // with default/fixed subnet
     CheckEqual(settings.Scope[0].SubnetMask, '192.168.1.1/24');
     settings.Scope[0].SubnetMask := '192.168.0.1/14'; // allow 262,144 IPs
     //ConsoleObject(settings);
@@ -2009,7 +2123,7 @@ begin
     // DISCOVER -> OFFER
     d.RecvLen := length(refdisc);
     d.RecvIp4 := 0; // use the default server.Scope[]
-    d.Tix32 := GetTickSec; // ComputeResponse() requires Tix32
+    d.BootTix32 := GetUptimeSec; // ComputeResponse() requires Tix32
     MoveFast(pointer(refdisc)^, d.Recv, d.RecvLen);
     i := server.ComputeResponse(d);
     CheckEqual(i, d.SendLen);
@@ -2067,7 +2181,7 @@ begin
     d.Recv := d.Send;
     d.RecvLen := d.SendLen;
     Check(server.ComputeResponse(d) < 0, 'ack');
-    Check(d.RecvHostName^ = '', 'no hostname');
+    Check(d.RecvHostName^[0] = #0, 'no hostname');
     CheckEqual(server.Count, 1);
     txt := server.SaveToText;
     CheckNotEqual(txt, CRLF, 'offer not saved');
@@ -3103,10 +3217,14 @@ var
   s: ShortString;
   txt, uri: RawUtf8;
   ip: THash128Rec;
+  sn: TIp4SubNet;
   sub: TIp4SubNets;
   bin, bin2: RawByteString;
   timer: TPrecisionTimer;
 begin
+  CheckEqual(SizeOf(TNetIP4), 4);
+  CheckEqual(SizeOf(TNetIP6), 16);
+  CheckEqual(SizeOf(TNetAddr), SOCKADDR_SIZE);
   FillZero(ip.b);
   Check(IsZero(ip.b));
   IP4Short(@ip, s);
@@ -3186,8 +3304,16 @@ begin
   Check(not IP4Match('193.168.1.1',   '192.168.1.0/24'), 'match9');
   Check(IP4Match('192.168.1.250', '192.168.1.250'),     'match10');
   Check(not IP4Match('192.168.1.251', '192.168.1.250'), 'match11');
+  Check(sn.From('1.2.3.4/24'));
+  CheckEqualShort(sn.ToShort, '1.2.3.0/24');
+  CheckEqual(sn.ToBroadCast, '1.2.3.255');
+  Check(sn.Match('1.2.3.0'));
+  Check(sn.Match('1.2.3.4'));
+  Check(sn.Match('1.2.3.5'));
+  Check(not sn.Match('1.2.4.5'));
   sub := TIp4SubNets.Create;
   try
+    Check(sub.SubNet = nil);
     CheckEqual(sub.AfterAdd, 0);
     bin := sub.SaveToBinary;
     if CheckEqual(length(bin), 8) then
@@ -3197,6 +3323,7 @@ begin
     Check(not sub.Match('190.16.1.250'));
     Check(not sub.Match('190.16.2.135'));
     Check(sub.Add('190.16.1.0/24'));
+    Check(sub.SubNet <> nil);
     Check(sub.Match('190.16.1.1'));
     Check(sub.Match('190.16.1.135'));
     Check(sub.Match('190.16.1.250'));
@@ -3206,11 +3333,14 @@ begin
     CheckEqual(sub.AfterAdd, 1);
     bin := sub.SaveToBinary;
     sub.Clear;
+    Check(sub.SubNet = nil);
     CheckEqual(sub.AfterAdd, 0);
+    Check(sub.SubNet = nil);
     Check(not sub.Match('190.16.1.1'));
     Check(not sub.Match('190.16.1.135'));
     Check(not sub.Match('190.16.1.250'));
     CheckEqual(sub.LoadFromBinary(bin), 1, 'load1');
+    Check(sub.SubNet <> nil);
     CheckEqual(sub.AfterAdd, 1);
     Check(sub.Match('190.16.1.1'));
     Check(sub.Match('190.16.1.135'));
@@ -3520,6 +3650,35 @@ begin
   end;
 end;
 
+function MsgToText(const msg: THttpPeerCacheMessage): RawUtf8; // reference code
+var
+  algoext: PUtf8Char;
+  algohex: string[SizeOf(msg.Hash.Bin.b) * 2];
+  tmp: ShortString;
+begin
+  tmp[0] := #0;
+  if msg.Kind > high(msg.Kind) then
+    exit; // clearly invalid message
+  algoext := nil;
+  algohex[0] := #0;
+  if not IsZero(msg.Hash.Bin.b) then // append e.g. 'xxxHexaHashxxx.sha256'
+  begin
+    BinToHexLower(@msg.Hash.Bin, @algohex[1], HASH_SIZE[msg.Hash.Algo]);
+    algohex[0] := AnsiChar(HASH_SIZE[msg.Hash.Algo] * 2);
+    algoext := pointer(HASH_EXT[msg.Hash.Algo]);
+  end; // IsZero(Hash.Bin) = no hash known = no hash computed nor verified
+  with msg do
+    FormatShort('% #% % %% % % to % % % %Mb/s % %% siz=% con=% ',
+      [ToText(Kind)^, PointerToHexShort(pointer(PtrUInt(Seq))),
+       OS_INITIAL[Os.os], OsvToShort(Os)^, WinOsBuild(Os, ' '),
+       MAK_TXT[Hardware], IP4ToShort(@IP4), IP4ToShort(@DestIP4),
+       IP4ToShort(@MaskIP4), IP4ToShort(@BroadcastIP4), Speed,
+       UnixTimeToFileShort(QWord(Timestamp) + UNIXTIME_MINIMAL),
+       algohex, algoext, Size, Connections], tmp);
+  AppendShortUuid(msg.Uuid, tmp);
+  result := ShortStringToUtf8(tmp);
+end;
+
 procedure TNetworkProtocols._THttpPeerCache;
 var
   hpc: THttpPeerCacheHook;
@@ -3617,6 +3776,7 @@ begin
           m := RawUtf8(ToText(msg));
           m2 := RawUtf8(ToText(msg2));
           CheckEqual(m, m2);
+          CheckEqual(m, MsgToText(msg));
           // validate UDP messages alteration (quick CRC identification)
           timer.Start;
           n := 10000;
@@ -3693,9 +3853,11 @@ begin
         // in a background thread due to remote http://ictuswin.com access
         // (will also validate rfProgressiveStatic process of our web server)
         if hasinternet then // checked by above DNSAndLDAP method
+        begin
           Run(RunPeerCacheDirect, hpc, 'peercachedirect', true, false, false);
-        hpc := nil; // will be owned and freed by RunPeerCacheDirect from now on
-        hps := nil;
+          hpc := nil; // will be owned and freed by RunPeerCacheDirect from now on
+          hps := nil;
+        end;
       finally
         hpc.Free;
       end;
@@ -3729,14 +3891,14 @@ var
 
   procedure Check4;
   begin
-    CheckEqual(hc.Name(0), 'name');
-    CheckEqual(hc.Value(0), 'value');
-    CheckEqual(hc.Name(1), 'name 1');
-    CheckEqual(hc.Value(1), 'value1');
-    CheckEqual(hc.Name(2), 'name 2');
-    CheckEqual(hc.Value(2), 'value 2');
-    CheckEqual(hc.Name(3), 'name3');
-    CheckEqual(hc.Value(3), 'value3');
+    CheckEqual(NameTextBufferPair(hc.Cookies, 0), 'name');
+    CheckEqual(ValueTextBufferPair(hc.Cookies, 0), 'value');
+    CheckEqual(NameTextBufferPair(hc.Cookies, 1), 'name 1');
+    CheckEqual(ValueTextBufferPair(hc.Cookies, 1), 'value1');
+    CheckEqual(NameTextBufferPair(hc.Cookies, 2), 'name 2');
+    CheckEqual(ValueTextBufferPair(hc.Cookies, 2), 'value 2');
+    CheckEqual(NameTextBufferPair(hc.Cookies, 3), 'name3');
+    CheckEqual(ValueTextBufferPair(hc.Cookies, 3), 'value3');
     {$ifdef HASINLINE}
     CheckEqual(hc.Cookie['name'], 'value');
     CheckEqual(hc.Cookie['name 1'], 'value1');
@@ -3901,8 +4063,8 @@ begin
   hc.ParseServer('');
   CheckEqual(length(hc.Cookies), 0);
   hc.ParseServer(HDR1);
-  CheckEqual(hc.Name(0), 'name');
-  CheckEqual(hc.Value(0), 'value');
+  CheckEqual(NameTextBufferPair(hc.Cookies, 0), 'name');
+  CheckEqual(ValueTextBufferPair(hc.Cookies, 0), 'value');
   CheckEqual(length(hc.Cookies), 1);
   CheckEqual(hc.GetCookie('name'), 'value');
   CheckEqual(hc.Cookies[0].NameLen, 4);
@@ -3911,8 +4073,8 @@ begin
   hc.Clear;
   CheckEqual(length(hc.Cookies), 0);
   hc.ParseServer(HDR2);
-  CheckEqual(hc.Name(0), 'name');
-  CheckEqual(hc.Value(0), 'value');
+  CheckEqual(NameTextBufferPair(hc.Cookies, 0), 'name');
+  CheckEqual(ValueTextBufferPair(hc.Cookies, 0), 'value');
   CheckEqual(length(hc.Cookies), 1);
   CheckEqual(hc.GetCookie('name'), 'value');
   CheckEqual(hc.Cookies[0].NameLen, 4);
@@ -3968,21 +4130,22 @@ begin
   CheckEqual(l, SizeOf(THash256));
   Check(dig.Algo = hfSHA256);
   CheckEqual(Sha256DigestToString(dig.Bin.Lo),
-    'cc991f15d823e419ef45f8b94e6759c4f992056c1c1a64cc79338c49f9720273');
+    '19b9f18055bc3307c80f58159938f4e6bd0eb583f672fe7793e1b0df50e60bb2');
   FillCharFast(dig, SizeOf(dig), 0);
   l := HttpRequestHash(hfSHA256, U,
     'Content-Length: 100'#13#10'Last-Modified: 2025', dig);
   CheckEqual(l, SizeOf(THash256));
   Check(dig.Algo = hfSHA256);
   CheckEqual(Sha256DigestToString(dig.Bin.Lo),
-    '9b23e3b9894578f2709eca35aa9afad277ab5aa4afe9344192f59535719ac734');
-  CheckEqual(HttpRequestHashBase32(
-    U, 'Content-Length: 100'#13#10'Last-Modified: 2025'),
-    'tmr6homjiv4pe4e6zi22vgx22j32wwve');
-  CheckEqual(HttpRequestHashBase32(
-    U, 'Content-Length: 101'#13#10'Last-Modified: 2025'),
-    '5umuom5hoh7sohesrs3fqse4rweeum7d');
-  CheckEqual(HttpRequestHashBase32(U, nil), 'bq4n2dkrduzo2v3arzy2lafegac3wmbw');
+    'dd36778462987d817a662b4a602accde058d26f4247aa55ca70bf476a9a442e7');
+  Check(HttpRequestHashBase32(U, @s,
+    'Content-Length: 100'#13#10'Last-Modified: 2025'));
+  CheckEqual(s, '3u3hpbdctb6yc6tgfnfgakwm3ycy2jxu');
+  Check(HttpRequestHashBase32(U, @s,
+    'Content-Length: 101'#13#10'Last-Modified: 2025'));
+  CheckEqual(s, 'utip3vleydamax5oayo7tjfyaoub6y5w');
+  Check(HttpRequestHashBase32(U, @s, nil));
+  CheckEqual(s, 'na3q2n4gw6cly5fvf5da4frmek667zk2');
 end;
 
 procedure TNetworkProtocols._THttpProxyCache;

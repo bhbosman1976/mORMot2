@@ -365,17 +365,17 @@ type
   /// SQL Query comparison operators
   // - used e.g. by CompareOperator() functions in mormot.orm.storage.pas
   TSqlCompareOperator = (
-     soEqualTo,
-     soNotEqualTo,
-     soLessThan,
-     soLessThanOrEqualTo,
-     soGreaterThan,
-     soGreaterThanOrEqualTo,
-     soBeginWith,
-     soContains,
-     soSoundsLikeEnglish,
-     soSoundsLikeFrench,
-     soSoundsLikeSpanish);
+    soEqualTo,
+    soNotEqualTo,
+    soLessThan,
+    soLessThanOrEqualTo,
+    soGreaterThan,
+    soGreaterThanOrEqualTo,
+    soBeginWith,
+    soContains,
+    soSoundsLikeEnglish,
+    soSoundsLikeFrench,
+    soSoundsLikeSpanish);
 
 const
   /// special TFieldBits value containing all field bits set to 1
@@ -958,12 +958,12 @@ type
     fExpand: boolean;
     /// used to store output format for TOrm.GetJsonValues()
     fWithID: boolean;
-    /// used to store field for TOrm.GetJsonValues()
-    fFields: TFieldIndexDynArray;
     /// if not Expanded format, contains the Stream position of the first
     // useful Row of data; i.e. ',val11' position in:
     // & { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
     fStartDataPosition: integer;
+    /// used to store field for TOrm.GetJsonValues()
+    fFields: TFieldIndexDynArray;
   public
     /// used internally to store column names and count for AddColumns
     ColNames: TRawUtf8DynArray;
@@ -2401,7 +2401,6 @@ end;
 const
   _FROM32 = ord('F') + ord('R') shl 8 + ord('O') shl 16 + ord('M') shl 24;
   _WHER32 = ord('W') + ord('H') shl 8 + ord('E') shl 16 + ord('R') shl 24;
-  _NULL32 = ord('N') + ord('U') shl 8 + ord('L') shl 16 + ord('L') shl 24;
 
 function PosSelectTable(Sql: PUtf8Char): PUtf8Char;
 begin
@@ -2706,7 +2705,7 @@ begin
           else
             AddComma;
         end;
-        CancelLastComma(')');
+        ReplaceLastComma(')');
       end;
       AddString(Suffix);
       SetText(result);
@@ -2751,7 +2750,7 @@ begin
           else
             AddComma;
         end;
-        CancelLastComma(')');
+        ReplaceLastComma(')');
       end;
       AddString(Suffix);
       SetText(result);
@@ -2983,15 +2982,15 @@ end;
 
 const
   VOID_ARRAYFIELD: array[boolean] of TShort16 = (
-    '[]'#10, '{"FieldCount":0}'); // same as sqlite3_get_table()
+    '[]'#10, '{"FieldCount":0}');
 
 procedure TResultsWriter.CancelAllVoid;
 var
   p: PShortString;
-begin
+begin // called from TSqlRequest.ExecuteStream with no data
   CancelAll; // rewind JSON
   p := @VOID_ARRAYFIELD[fExpand];
-  inc(fWrittenBytes, fStream.Write(p^[1], ord(p^[0])));
+  WriteToStream(@p^[1], ord(p^[0]));
 end;
 
 constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;
@@ -3006,13 +3005,17 @@ constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;
 begin
   if aStream = nil then
     if aStackBuffer <> nil then
-      CreateOwnedStream(aStackBuffer^)
+      SetOwnedRawUtf8(aStackBuffer^)
     else
-      CreateOwnedStream(aBufSize)
-  else if aStackBuffer <> nil then
-    inherited Create(aStream, aStackBuffer, SizeOf(aStackBuffer^))
+      SetOwnedStream(nil, aBufSize)
   else
-    inherited Create(aStream, aBufSize);
+  begin
+    SetStream(aStream);
+    if aStackBuffer <> nil then
+      SetBuffer(aStackBuffer, SizeOf(aStackBuffer^))
+    else
+      SetBuffer(nil, aBufSize);
+  end;
   fExpand := Expand;
   fWithID := withID;
   fFields := aFields;
@@ -3020,34 +3023,39 @@ end;
 
 procedure TResultsWriter.AddColumns(aKnownRowsCount: integer);
 var
-  i, len: PtrInt;
-  c: PPAnsiChar;
+  n, len: PtrInt;
+  c: PRawUtf8;
+  p: PUtf8Char;
 begin
+  c := pointer(ColNames);
+  if c = nil then
+    exit;
+  n := PDALen(PAnsiChar(c) - _DALEN)^ + _DAOFF;
   if fExpand then
   begin
-    c := pointer(ColNames);
-    for i := 1 to length(ColNames) do
-    begin
-      len := PStrLen(c^ - _STRLEN)^; // ColNames[] <> ''
+    repeat
+      len := PStrLen(PPAnsiChar(c)^ - _STRLEN)^; // ColNames[] <> ''
       if twoForceJsonExtended in CustomOptions then
       begin
-        SetLength(PRawUtf8(c)^, len + 1); // colname: in-place
-        c^[len] := ':';
+        SetLength(c^, len + 1); // colname: in-place
+        PPUtf8Char(c)^[len] := ':';
       end
       else
       begin
-        SetLength(PRawUtf8(c)^, len + 3); // "colname": in-place
-        MoveFast(c^[0], c^[1], len);
-        c^[0] := '"';
-        PWord(c^ + len + 1)^ := ord('"') + ord(':') shl 8;
+        SetLength(c^, len + 3); // "colname": in-place
+        p := PPUtf8Char(c)^;
+        MoveFast(p[0], p[1], len);
+        p[0] := '"';
+        PWord(p + len + 1)^ := ord('"') + ord(':') shl 8;
       end;
       inc(c);
-    end;
+      dec(n);
+    until n = 0;
   end
   else
   begin
     AddShort('{"fieldCount":');
-    AddU(length(ColNames));
+    AddU(n);
     if aKnownRowsCount > 0 then
     begin
       AddShort(',"rowCount":');
@@ -3055,13 +3063,14 @@ begin
     end;
     AddShort(',"values":["');
     // first row is FieldNames
-    for i := 0 to length(ColNames) - 1 do
-    begin
-      AddString(ColNames[i]);
-      AddDirect('"', ',', '"')
-    end;
+    repeat
+      AddString(c^);
+      AddDirect('"', ',', '"');
+      inc(c);
+      dec(n);
+    until n = 0;
     CancelLastChar;
-    fStartDataPosition := PtrInt(fStream.Position) + PtrInt(B - fTempBuf);
+    fStartDataPosition := GetTextLength;
   end;
 end;
 
@@ -3104,7 +3113,7 @@ begin
     begin
       // last AddColumn() call would finalize the non-expanded header
       AddDirect('"' , ',');
-      fStartDataPosition := PtrInt(fStream.Position) + PtrInt(B - fTempBuf);
+      fStartDataPosition := GetTextLength;
     end
     else
       AddDirect('"', ',', '"')
@@ -3124,7 +3133,7 @@ end;
 procedure TResultsWriter.EndJsonObject(aKnownRowsCount, aRowsCount: integer;
   aFlushFinal: boolean);
 begin
-  CancelLastComma(']');
+  ReplaceLastComma(']');
   if not fExpand then
   begin
     if aKnownRowsCount = 0 then
@@ -3142,17 +3151,19 @@ end;
 procedure TResultsWriter.TrimFirstRow;
 var
   P, PBegin, PEnd: PUtf8Char;
+  ms: TCustomMemoryStream;
 begin
   if (self = nil) or
-     not fStream.InheritsFrom(TCustomMemoryStream) or
+     not TStream(fDest).InheritsFrom(TCustomMemoryStream) or
      fExpand or
      (fStartDataPosition = 0) then
     exit;
   // go to begin of first row
-  FlushToStream; // we need the data to be in fStream memory
+  FlushToStream; // we need the data to be in fDest: TStream memory
   // PBegin^=val11 in { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
-  PBegin := TCustomMemoryStream(fStream).Memory;
-  PEnd := PBegin + fStream.Position;
+  ms := fDest;
+  PBegin := ms.Memory;
+  PEnd := PBegin + ms.Position;
   PEnd^ := #0; // mark end of current values
   inc(PBegin, fStartDataPosition + 1); // +1 to include ',' of ',val11'
   // jump to end of first row
@@ -3162,7 +3173,7 @@ begin
   // trim first row data
   if P^ <> #0 then
     MoveFast(P^, PBegin^, PEnd - P); // erase content
-  fStream.Seek(PBegin - P, soCurrent){%H-}; // adjust current stream position
+  ms.Seek(PBegin - P, soCurrent){%H-}; // adjust current stream position
 end;
 
 
@@ -3276,7 +3287,7 @@ var
         exit; // end of string before end quote -> incorrect
       RawUtf8ToVariant(Where.Value, Where.ValueVariant);
     end
-    else if (PInteger(P)^ and $DFDFDFDF = _NULL32) and
+    else if (PInteger(P)^ and $DFDFDFDF = NULL_HI) and
             (P[4] in [#0..' ', ';']) then
     begin
       // NULL statement
@@ -4079,7 +4090,7 @@ begin
       W.AddShort(') values (');
       for f := 0 to FieldCount - 1 do
         AddValue;
-      W.CancelLastComma(')');
+      W.ReplaceLastComma(')');
     end;
     W.SetText(result);
   finally
@@ -4110,7 +4121,7 @@ begin
         W.AddString(FieldValues[f]);
       W.AddComma;
     end;
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
     W.SetText(result);
   finally
     W.Free;

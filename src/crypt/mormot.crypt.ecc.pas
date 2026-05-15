@@ -34,8 +34,9 @@ uses
   mormot.core.data,
   mormot.core.datetime,
   mormot.core.variants,
-  mormot.core.json,
   mormot.core.rtti,
+  mormot.core.json,
+  mormot.core.fmt,
   mormot.core.search, // for EccKeyFileFind()
   mormot.crypt.core,
   mormot.crypt.secure,
@@ -523,7 +524,7 @@ type
     function SaveToSource(const ConstName, Comment, PassWord: RawUtf8;
       IncludePassword: boolean = true; AFStripes: integer = 0;
       Pbkdf2Round: integer = 100; Aes: TAesAbstractClass = nil;
-      IncludeRaw: boolean = true): RawUtf8;
+      IncludeRaw: boolean = true; LF: TLineFeed = lfSystem): RawUtf8;
     /// read a private secret key from an encrypted secure binary buffer
     // - perform all reverse steps from SaveToSecureBinary() method
     // - returns TRUE on success, FALSE otherwise
@@ -2145,7 +2146,7 @@ begin
   if FileExists(TruncatedFileName) then
     exit;
   ext := ECCCERTIFICATE_FILEEXT[privkey];
-  if ExtractFileExt(TruncatedFileName) <> ext then
+  if ExtractExt(TruncatedFileName) <> ext then
   begin
     fn := TruncatedFileName + ext;
     if FileExists(fn) then
@@ -2464,7 +2465,7 @@ var
 begin
   content := StringFromFile(FileName);
   if (content = '') and
-     (ExtractFileExt(filename) = '') then
+     not HasExt(filename) then
     content := StringFromFile(filename + ECCCERTIFICATEPUBLIC_FILEEXT);
   if content = '' then
     result := false
@@ -3141,7 +3142,7 @@ function TEccCertificateSecret.LoadFromSecureFile(const FileName: TFileName;
 var
   FN: TFileName;
 begin
-  if ExtractFileExt(FileName) = '' then
+  if not HasExt(FileName) then
     FN := FileName + ECCCERTIFICATESECRET_FILEEXT
   else
     FN := FileName;
@@ -3152,7 +3153,7 @@ end;
 function TEccCertificateSecret.SaveToSource(
   const ConstName, Comment, PassWord: RawUtf8; IncludePassword: boolean;
   AFStripes, Pbkdf2Round: integer; Aes: TAesAbstractClass;
-  IncludeRaw: boolean): RawUtf8;
+  IncludeRaw: boolean; LF: TLineFeed): RawUtf8;
 var
   data: RawByteString;
   name, suffix: RawUtf8;
@@ -3181,7 +3182,7 @@ begin
   if IncludeRaw then
     suffix := FormatUtf8('  %_RAW = ''%'';'#13#10'%', [name,
       mormot.core.text.BinToHex(@fPrivateKey, SizeOf(fPrivateKey)), suffix]);
-  result := BinToSource(name, Comment, pointer(data), length(data), 16, suffix)
+  result := BinToSource(name, Comment, pointer(data), length(data), 16, suffix, LF);
 end;
 
 function TEccCertificateSecret.SignToBase64(Data: pointer; Len: integer): RawUtf8;
@@ -3658,7 +3659,7 @@ function TEccSignatureCertifiedFile.FromFile(const aFileName: TFileName): boolea
 var
   json: RawUtf8;
 begin
-  if SameText(ExtractFileExt(aFileName), ECCCERTIFICATESIGN_FILEEXT) then
+  if SameTextS(ExtractExt(aFileName), ECCCERTIFICATESIGN_FILEEXT) then
     json := StringFromFile(aFileName)
   else
     json := StringFromFile(aFileName + ECCCERTIFICATESIGN_FILEEXT);
@@ -4619,7 +4620,7 @@ end;
 
 function GetChainFileName(const jsonfile: TFileName): TFileName;
 begin
-  if ExtractFileExt(jsonfile) = '' then
+  if not HasExt(jsonfile) then
     result := jsonfile + ECCCERTIFICATES_FILEEXT
   else
     result := jsonfile;

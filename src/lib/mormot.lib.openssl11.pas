@@ -87,10 +87,15 @@ uses
   sysutils,
   mormot.core.base,
   {$ifdef OSPOSIX}
+  {$ifdef FPC}
   unixtype,
+  {$else}
+  mormot.core.os.delphi,
+  {$endif FPC}
   {$endif OSPOSIX}
   mormot.core.os,
-  mormot.net.sock; // for INetTls
+  mormot.core.os.security, // for TSystemCertificateStore
+  mormot.net.sock;         // for INetTls
 
 
 { ******************** Dynamic or Static OpenSSL Library Loading }
@@ -768,6 +773,17 @@ const
   SSL_TLSEXT_ERR_ALERT_WARNING = 1;
   SSL_TLSEXT_ERR_ALERT_FATAL = 2;
   SSL_TLSEXT_ERR_NOACK = 3;
+
+  SSL_MODE_ENABLE_PARTIAL_WRITE = $00000001;
+  SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER = $00000002;
+  SSL_MODE_AUTO_RETRY = $00000004;
+  SSL_MODE_NO_AUTO_CHAIN = $00000008;
+  SSL_MODE_RELEASE_BUFFERS = $00000010;
+  SSL_MODE_SEND_CLIENTHELLO_TIME = $00000020;
+  SSL_MODE_SEND_SERVERHELLO_TIME = $00000040;
+  SSL_MODE_SEND_FALLBACK_SCSV = $00000080;
+  SSL_MODE_ASYNC = $00000100;
+  SSL_MODE_DTLS_SCTP_LABEL_LENGTH_BUG = $00000400;
 
   X509_FILETYPE_PEM = 1;
   X509_FILETYPE_ASN1 = 2;
@@ -2613,8 +2629,12 @@ function SSL_CTX_set_tlsext_servername_callback(ctx: PSSL_CTX; cb: SSL_SNI_serve
   {$ifdef HASINLINE} inline; {$endif}
 function SSL_CTX_set_tlsext_servername_arg(ctx: PSSL_CTX; arg: pointer): integer;
   {$ifdef HASINLINE} inline; {$endif}
+function SSL_CTX_set_mode(ctx: PSSL_CTX; mode: integer): integer;
+  {$ifdef HASINLINE} inline; {$endif}
 function SSL_set_mode(s: PSSL; version: integer): integer;
+  {$ifdef HASINLINE} inline; {$endif}
 function SSL_get_mode(s: PSSL): integer;
+  {$ifdef HASINLINE} inline; {$endif}
 
 function EVP_MD_CTX_size(ctx: PEVP_MD_CTX): integer;
 function BN_num_bytes(bn: PBIGNUM): integer;
@@ -10452,6 +10472,11 @@ begin
   result := SSL_CTX_ctrl(ctx, SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG, 0, arg);
 end;
 
+function SSL_CTX_set_mode(ctx: PSSL_CTX; mode: integer): integer;
+begin
+  result := SSL_CTX_ctrl(ctx, SSL_CTRL_MODE, mode, nil);
+end;
+
 function SSL_set_mode(s: PSSL; version: integer): integer;
 begin
   result := SSL_ctrl(s, SSL_CTRL_MODE, version, nil);
@@ -10976,7 +11001,7 @@ begin
 end;
 
 const
-  // list taken on 2021-02-19 from https://ssl-config.mozilla.org/
+  // list taken on 2026-05-01 from https://ssl-config.mozilla.org/
   SAFE_CIPHERLIST: array[ {hwaes=} boolean ] of PUtf8Char = (
     // without AES acceleration: prefer CHACHA20-POLY1305
     'ECDHE-ECDSA-CHACHA20-POLY1305:' +
@@ -10984,18 +11009,14 @@ const
     'ECDHE-ECDSA-AES128-GCM-SHA256:' +
     'ECDHE-RSA-AES128-GCM-SHA256:' +
     'ECDHE-ECDSA-AES256-GCM-SHA384:' +
-    'ECDHE-RSA-AES256-GCM-SHA384:' +
-    'DHE-RSA-AES128-GCM-SHA256:' +
-    'DHE-RSA-AES256-GCM-SHA384',
+    'ECDHE-RSA-AES256-GCM-SHA384',
     // with AES acceleration
     'ECDHE-ECDSA-AES128-GCM-SHA256:' +
     'ECDHE-RSA-AES128-GCM-SHA256:' +
     'ECDHE-ECDSA-AES256-GCM-SHA384:' +
     'ECDHE-RSA-AES256-GCM-SHA384:' +
     'ECDHE-ECDSA-CHACHA20-POLY1305:' +
-    'ECDHE-RSA-CHACHA20-POLY1305:' +
-    'DHE-RSA-AES128-GCM-SHA256:' +
-    'DHE-RSA-AES256-GCM-SHA384');
+    'ECDHE-RSA-CHACHA20-POLY1305');
 
 // see https://www.ibm.com/support/knowledgecenter/SSB23S_1.1.0.2020/gtps7/s5sple2.html
 
@@ -11250,6 +11271,15 @@ begin
   SSL_CTX_set_min_proto_version(fCtx, v);
   if Context.DisableTls13 then
     SSL_CTX_set_max_proto_version(fCtx, TLS1_2_VERSION); // stick to TLS 1.2
+  // SSL_MODE_ENABLE_PARTIAL_WRITE ($01): SSL_write returns partial count on
+  // partial send, so mORMot can advance the buffer pointer correctly and
+  // issue a fresh SSL_write for the remainder (no retry-same-buffer constraint)
+  // SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER ($02): allow retry with different
+  // buffer pointer after WANT_WRITE (mORMot copies pending data to fWr)
+  mode := SSL_MODE_ENABLE_PARTIAL_WRITE or SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER;
+  if Context.ReleaseBuffers then
+    mode := mode or SSL_MODE_RELEASE_BUFFERS; // save 34KB per idle TLS instance
+  SSL_CTX_set_mode(fCtx, mode);
 end;
 
 function AfterAcceptSNI(s: PSSL; ad: PInteger; arg: pointer): integer; cdecl;

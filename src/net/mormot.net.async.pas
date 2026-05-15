@@ -206,6 +206,12 @@ type
     /// read-only access to the handle number associated with this connection
     property Handle: TConnectionAsyncHandle
       read fHandle;
+    /// how many incoming bytes are currently pending in this connection memory buffer
+    property PendingRead: PtrInt
+      read fRd.Len;
+    /// how many outgoing bytes are currently pending in this connection memory buffer
+    property PendingWrite: PtrInt
+      read fWr.Len;
   end;
 
   /// thread-safe storage of several connections
@@ -1073,7 +1079,7 @@ type
     fInterningTix: cardinal;
     fExecuteEvent: TSynEvent;
     fClientSockets: THttpAsyncClientConnections; // allocated when needed
-    fHttpDateNowUtc: THttpDateNowUtc;
+    fHttpDateNowUtc: THttpDateNowUtc;            // set by IdleEverySecond
     function GetHttpQueueLength: cardinal; override;
     procedure SetHttpQueueLength(aValue: cardinal); override;
     function GetConnectionsActive: cardinal; override;
@@ -1188,10 +1194,9 @@ type
   // - hpoClientCacheSubFolder could be used with a lot of cached files, to
   // generate sub-folders following the first hash nibble (0..9/a..z)
   // - hpoClientIgnoreTlsError will ignore any HTTPS issue
-  // - hpoClientNoHead will disable the HEAD request to the server if there is a
-  // local cached file to be served - faster but won't detect any server change
   // - hpoClientAlllowWinApi will be used for THttpProxyUrl.RemoteClientHead()
-  // - hpoNoXProxyName will remove our custom 'X-Proxy-Name: xxxx' output header
+  // - hpoNoXProxyName will disable our custom 'X-Proxy-Name: xxxx' header
+  // - hpNoXCache will purge any X-Cache: X-Served-By: Via: Age: headers
   THttpProxyUrlOption = (
     hpoNoSubFolder,
     hpoNoFolderHtmlIndex,
@@ -1202,9 +1207,9 @@ type
     hpoDisable304,
     hpoClientCacheSubFolder,
     hpoClientIgnoreTlsError,
-    hpoClientNoHead,
     hpoClientAlllowWinApi,
-    hpoNoXProxyName);
+    hpoNoXProxyName,
+    hpNoXCache);
   /// store THttpProxyUrl.Settings options for a given URI
   THttpProxyUrlOptions = set of THttpProxyUrlOption;
 
@@ -1440,6 +1445,14 @@ type
     hpsEvent);
   THttpProxySources = set of THttpProxySource;
 
+  THeadCache = record
+    Headers: RawUtf8;
+    Size: Int64;
+    TimeMS: TUnixMSTime;
+    Status: integer;
+  end;
+  THeadCaches = array of THeadCache;
+
   /// process one remote content source for THttpProxyServer
   THttpProxyUrl = class(TSynPersistent)
   protected
@@ -1450,10 +1463,10 @@ type
     fRemoteUri: TUri;
     fMemCache: TSynDictionary;  // name:RawUtf8 / Content:RawByteString
     fHashCache: TSynDictionary; // name:RawUtf8 / hash[fAlgos]:TRawUtf8DynArray
-    fHeadCache: TSynDictionary; // name:RawUtf8 / header:RawUtf8
+    fHeadCache: TSynDictionary; // THash160 / THeadCache
     fReject: TUriMatch;
     fRemoteClient: IHttpClient;
-    fSafe: TOSLightLock; // non-reentrant lock for fRemoteClient + file access
+    fOsSafe: TOSLightLock; // non-reentrant lock for fRemoteClient + file access
     procedure BackgroundGet(Sender: TObject);
   public
     /// initialize this instance
@@ -1470,8 +1483,8 @@ type
       const name: RawUtf8; var fn: TFileName): integer;
     /// perform a HTTP HEAD on the remote proxy URI using a shared connection
     // - with an in-memory cache as set by THttpProxyUrlSettings.HttpHeadCacheSec
-    function RemoteClientHead(const uri: TUri; const name: RawUtf8;
-      var header: RawUtf8; var size: Int64; var time: TUnixTime): cardinal;
+    procedure RemoteClientHead(const uri: TUri; const hash: THash160;
+      var cache: THeadCache);
     /// perform a HTTP GET on the remote proxy URI using a shared connection
     function RemoteClientGet(const uri: TUri): RawByteString;
   published
@@ -1494,6 +1507,8 @@ type
     fLog: TSynLogClass;
     fSettingsOwned, fHasLog: boolean;
     fSources: THttpProxySources;
+    fUrlOptions: THttpProxyUrlOptions; // consolidated from all fUrl[].Options
+    fTempFilesTix: cardinal;
     fServer: THttpAsyncServer;
     fGC: TObjectDynArray;
     fPartials: THttpPartials;
@@ -1503,6 +1518,7 @@ type
     function OnExecute(Ctxt: THttpServerRequestAbstract): cardinal;
     function OnGetHeadLocalFolder(Ctxt: THttpServerRequest; const Uri: TUriMatchName): cardinal;
     function OnGetHeadRemoteUri(Ctxt: THttpServerRequest; const Uri: TUriMatchName): cardinal;
+    procedure OnBackgroundDeleteDeprecated(Sender: TObject);
   public
     /// initialize this forward proxy instance
     // - the supplied aSettings should be owned by the caller (e.g from a main
@@ -2814,8 +2830,7 @@ begin
     aThreadPoolCount := 1;
   ThreadCountAdjust(aThreadPoolCount); // e.g. WinARM PRISM
   {$ifndef USE_WINIOCP}
-  fThreadPollingWakeupLoad :=
-    (cardinal(aThreadPoolCount) div SystemInfo.dwNumberOfProcessors) * 8;
+  fThreadPollingWakeupLoad := (cardinal(aThreadPoolCount) div CpuThreads) * 8;
   if fThreadPollingWakeupLoad < 4 then
     fThreadPollingWakeupLoad := 4; // below 4, the whole algorithm seems pointless
   {$endif USE_WINIOCP}
@@ -5320,14 +5335,12 @@ procedure THttpAsyncServer.IdleEverySecond;
 var
   tix, cleaned: cardinal;
   T: TSynSystemTime;
-  tmp: ShortString;
 begin
   // no need to use the global HttpDateNowUtc and its GetTickCount64 API call
   if hsoIncludeDateHeader in fOptions then
   begin
-    T.FromNowUtc;
-    T.ToHttpDateShort(tmp, 'GMT'#13#10, 'Date: ');
-    fHttpDateNowUtc := tmp; // (almost) atomic set within CPU L1 cache line
+    FromGlobalTime(T, {local=}false);
+    T.ToHttpDateShort(fHttpDateNowUtc, 'GMT'#13#10, 'Date: ');
   end;
   // ensure log file(s) are flushed/consolidated if needed
   if fLogger <> nil then
@@ -5402,7 +5415,7 @@ begin
       fSock := fAsync.fServer;
       fAsync.DoLog(sllTrace, 'Execute: main loop', [], self);
       IdleEverySecond; // initialize idle process (e.g. fHttpDateNowUtc)
-      tix := mormot.core.os.GetTickCount64 shr 16; // delay=500 after 1 min idle
+      tix := GetTickSec shr 6; // delay=500 after 64s idle
       lasttix := tix;
       mscallbacks := 0;
       if fCallbackSendDelay <> nil then
@@ -5452,7 +5465,7 @@ begin
             fAsync.fSockets.ProcessWrite(notif, 0);
           if mscallbacks <> 0 then
           begin
-            tix := mormot.core.os.GetTickCount64 shr 16;
+            tix := GetTickSec shr 6;
             lasttix := tix;
           end;
         {$endif USE_WINIOCP}
@@ -5519,7 +5532,7 @@ constructor THttpProxyUrl.Create(aSettings: THttpProxyUrlSettings;
   aOwner: THttpProxyServer);
 begin
   inherited Create;
-  fSafe.Init;
+  fOsSafe.Init;
   fSettings := aSettings;
   fOwner := aOwner;
 end;
@@ -5531,7 +5544,7 @@ begin
   FreeAndNil(fHashCache);
   FreeAndNil(fHeadCache);
   // fSettings are owned by THttpProxyServerSettings.Url[]
-  fSafe.Done; // mandatory for TOSLightLock
+  fOsSafe.Done; // mandatory for TOSLightLock
 end;
 
 function THttpProxyUrl.ReturnHash(ctxt: THttpServerRequestAbstract;
@@ -5590,25 +5603,17 @@ begin
         inc(i);
 end;
 
-function THttpProxyUrl.RemoteClientHead(const uri: TUri; const name: RawUtf8;
-  var header: RawUtf8; var size: Int64; var time: TUnixTime): cardinal;
+procedure THttpProxyUrl.RemoteClientHead(const uri: TUri; const hash: THash160;
+  var cache: THeadCache);
 var
   keepalive: integer;
+  d: TUnixTime; // converted to cache.TimeMS: TUnixMSTime
   client: TSimpleHttpClient;
-begin // this method is protected by fSafe.Lock
+begin // this method is protected by fOsSafe.Lock
   // first try from in-memory cache
   if Assigned(fHeadCache) and
-     fHeadCache.FindAndCopy(name, header) then
-  begin
-    if header = '' then
-      result := HTTP_NOTFOUND // already identified as error
-    else
-    begin
-      GetHeaderInfo(header, size, time);
-      result := HTTP_SUCCESS; // return original cached HTTP headers
-    end;
+     fHeadCache.FindAndCopy(hash, cache) then
     exit;
-  end;
   // need to make a HEAD to retrieve needed resource information
   if fRemoteClient = nil then // initialize the connection
   begin
@@ -5625,159 +5630,181 @@ begin // this method is protected by fSafe.Lock
     if psoLogVerbose in fOwner.fSettings.Server.Options then
       client.OnLog := TSynLog.DoLog;
   end;
-  keepalive := fSettings.HttpKeepAlive * MilliSecsPerSec;
   // always first try with a clean HEAD request
-  result := fRemoteClient.Request(uri, 'HEAD', '', '', '', keepalive);
-  if StatusCodeIsSuccess(result) then
+  keepalive := fSettings.HttpKeepAlive * MilliSecsPerSec;
+  cache.Status := fRemoteClient.Request(uri, 'HEAD', '', '', '', keepalive);
+  if StatusCodeIsSuccess(cache.Status) then // 2xx..3xx range
     if HttpRequestLength(pointer(fRemoteClient.Headers)) = nil then
-      result := 0;
-  if result = 0 then // server has no length: try range GET trick
-    result := fRemoteClient.Request(uri, 'GET', 'Range: bytes=0-0', '', '', keepalive);
+      cache.Status := 0;
+  if cache.Status = 0 then // server has no length: try range GET trick
+    cache.Status := fRemoteClient.Request(uri, 'GET',
+      'Range: bytes=0-0', '', '', keepalive);
     // Apache+Varnish may return 'Content-Range: bytes 0-0/*' for some text/html :(
-  if StatusCodeIsSuccess(result) then
-  begin
-    header := fRemoteClient.Headers;
-    GetHeaderInfo(header, size, time);
-  end;
+  cache.Headers := fRemoteClient.Headers;
+  d := 0;
+  if StatusCodeIsSuccess(cache.Status) then // 2xx..3xx range
+    GetHeaderInfo(cache.Headers, cache.Size, d);
+  cache.TimeMS := d * MilliSecsPerSec;
   if Assigned(fHeadCache) and
-     (result < HTTP_SERVERERROR) and  // retry on pure server or client side
-     (size >= 0) then                 // only store if the size was known
-    fHeadCache.Add(name, header);     // may store '' on error (e.g. 302/404)
+     (cache.Status < HTTP_SERVERERROR) and  // retry on pure server or client side
+     (cache.Size >= 0) then                 // only store if the size was known
+    fHeadCache.Add(hash, cache);
   fOwner.fLog.Add.Log(sllTrace, 'RemoteClientHead(%)=% size=% lastmod=%',
-    [uri.Address, result, size, time], self);
+    [uri.Address, cache.Status, cache.Size, d], self);
 end;
 
 function THttpProxyUrl.RemoteClientGet(const uri: TUri): RawByteString;
 var
   status: integer;
-begin // this method is protected by fSafe.Lock
+begin // this method is protected by fOsSafe.Lock
   result := '';
   status := fRemoteClient.Request(uri, 'GET', '', '', '',
        fSettings.HttpKeepAlive * MilliSecsPerSec);
-  if StatusCodeIsSuccess(status) then
+  if StatusCodeIsSuccess(status) then // 2xx..3xx range
     result := fRemoteClient.Body;
   fOwner.fLog.Add.Log(sllTrace, 'RemoteClientGet(%)=% size=%',
     [uri.Address, status, length(result)], self);
 end;
 
 type
+  // state machine for HEAD + GET request methods to the remote server
   {$ifdef USERECORDWITHMETHODS}
   TStartProxyRequest = record
   {$else}
   TStartProxyRequest = object
   {$endif USERECORDWITHMETHODS}
     ctxt: THttpServerRequestAbstract;
-    proxy: THttpProxyUrl;
-    filename: TFileName;
-    name: RawUtf8;
-    size: Int64;
-    lastmod: TUnixMSTime;
-    loginfo: PUtf8Char;
-    remote: TUri;
-    hash: THashDigest;
-    // we need HEAD + GET requests to the remote server
-    function AskRemoteServer(const path: TUriMatchName): cardinal;
+    proxy: THttpProxyUrl;              // server proxy definition
+    b32hash: RawUtf8;                  // Base-32 encoded URI + etag/lastmod
+    filename: TFileName;               // full file name, including path
+    head: THeadCache;                  // remote headers retrieved from HASH
+    localsize: Int64;                  // local file size
+    localdate: TUnixMSTime;            // local file timestamp
+    loginfo: PUtf8Char;                // optional error message / log context
+    remote: TUri;                      // URI members of the remote resource
+    function MakeHeadAndComputeFilename: cardinal;
+    function MakeGet(const path: TUriMatchName): cardinal;
   end;
   TStartProxyRequestClient = class(THttpClientSocket)
   public
     // some additional internal parameters and methods for proper threading
     uri: RawUtf8;
     stream: TFileStreamEx;
-    filedate: TUnixTime;
   end;
 
 const
-  TOBEPURGEDPROXY: PUtf8Char =
+  PURGED_PROXY =
     'CONTENT-LENGTH:|CONTENT-RANGE:|CONTENT-ENCODING:|CONNECTION:|' +
-    'KEEP-ALIVE:|DATE:|';
+    'KEEP-ALIVE:|DATE:|TE:|TRAILER:|X-TIMER:|';
+  PURGED: array[{=hpNoXCache}boolean] of PUtf8Char = (
+    PURGED_PROXY,
+    PURGED_PROXY + 'VIA:|X-CACHE|X-SERVED-BY:|X-CLACKS-|AGE:|');
 
-function TStartProxyRequest.AskRemoteServer(const path: TUriMatchName): cardinal;
+function TStartProxyRequest.MakeHeadAndComputeFilename: cardinal;
 var
-  remotehead: RawUtf8;
-  headsiz: Int64;
+  h: THash160;  // binary version of remote TUri without etag/lastmod
+begin // this method is protected by proxy.fOsSafe.Lock
+  result := HTTP_BADREQUEST;
+  // hash the plain URI to identify the local header cache
+  if not HttpRequestHashBase32(remote, nil, nil, @h) then
+  begin
+    loginfo := 'wrong URI';
+    exit;
+  end;
+  // always perform a HEAD request to the original server (maybe from cache)
+  head.Size := 0;
+  proxy.RemoteClientHead(remote, h, head);
+  result := head.Status;
+  if not StatusCodeIsSuccess(result) then // 4xx.. range
+  begin
+    loginfo := 'error from HEAD';
+    exit;
+  end;
+  if head.Size < 0 then
+    // note: progressive download needs an eventual size (by now), but Apache
+    // may not provide Content-Length/Range on dynamic content (text/html)
+    if FindNameValue(pointer(head.Headers), 'CONTENT-TYPE: TEXT/HTM') = nil then
+    begin
+      result := HTTP_BADGATEWAY; // 502
+      loginfo := 'no HEAD size';
+      exit;
+    end;
+  // compute the base-32 encoded local file name from URI + etag/lastmod
+  if not HttpRequestHashBase32(remote, @b32hash, pointer(head.Headers)) then
+    exit; // e.g. not cacheable content: return filename=''
+  // compute the local file name from this base-32 hash
+  if hpoClientCacheSubFolder in proxy.Settings.Options then
+    filename := MakePath([ // hash partitioning into subfolders
+      proxy.Settings.DiskCache.Path, b32hash[1], b32hash])
+  else
+    filename := MakePath([proxy.Settings.DiskCache.Path, b32hash]);
+end;
+
+function TStartProxyRequest.MakeGet(const path: TUriMatchName): cardinal;
+var
   direct: RawByteString;
-  headlastmod: TUnixTime;
   background: TStartProxyRequestClient;
   log: TSynLogClass;
   id: THttpPartialID;
   stream: TFileStreamEx;
-  opt: THttpRequestExtendedOptions;
-begin // this method is protected by proxy.fSafe.Lock
-  headsiz := 0;
-  headlastmod := 0;
+  opt: THttpRequestExtendedOptions; // local copy since is modified by Open()
+begin // this method is protected by proxy.fOsSafe.Lock
+  result := HTTP_BADREQUEST;
   log := proxy.fOwner.fLog;
-  // always perform a HEAD request to the original server (maybe from cache)
-  result := proxy.RemoteClientHead(remote, name, remotehead, headsiz, headlastmod);
-  if not StatusCodeIsSuccess(result) then
-  begin
-    loginfo := 'head status';
-    exit;
-  end;
-  if headsiz < 0 then
-    // note: progressive download needs an eventual size (by now), but Apache
-    // may not provide Content-Length/Range on dynamic content (text/html)
-    if FindNameValue(pointer(remotehead), 'CONTENT-TYPE: TEXT/HTM') = nil then
-    begin
-      result := HTTP_BADGATEWAY; // 502
-      loginfo := 'no head size';
-      exit;
-    end;
-  // check the header against the local cached file (headlastmod may be 0)
-  ctxt.OutCustomHeaders := PurgeHeaders(remotehead, false, TOBEPURGEDPROXY);
-  if (lastmod <> 0) and
-     (size >= 0) then // check the local file
-    if ((headsiz < 0) or
-        (headsiz = size)) and
-       ((headlastmod = 0) or
-        UnixTimeEqualsMS(headlastmod, lastmod)) then
+  // check the header against the local cached file (headdate may be 0)
+  if localsize >= 0 then // check the local file
+    if (head.Size < 0) or
+       (head.Size = localsize) then
     begin
       // we can stream from local cache
       loginfo := 'cached';
-      result := proxy.ReturnFile(ctxt, name, filename, path, size, lastmod,
-                  {canbecached=}(headsiz >= 0));
+      result := proxy.ReturnFile(ctxt, b32hash, filename, path, localsize,
+                  head.TimeMS, {canbecached=}(head.Size >= 0));
       exit;
     end
     else
     begin
       // the local file seems invalid and should be removed
-      log.Add.Log(sllTrace, 'OnExecute: deprecate status=% head=% filename=% %=% %=%',
-        [result, ctxt.OutCustomHeaders, name, size, headsiz, lastmod, headlastmod],
-        proxy);
+      log.Add.Log(sllTrace,
+        'OnExecute: delete % status=% headers=% size=%=% local=% head=%',
+        [b32hash, result, ctxt.OutCustomHeaders, localsize, head.Size,
+         localdate, head.TimeMS], proxy);
       if not DeleteFile(filename) then // may fail on Windows: use previous
       begin
         log.Add.Log(sllLastError,
           'OnExecute: return existing % bytes after DeleteFile(%) failed as',
           [FileSize(filename), filename], proxy);
         loginfo := 'locked cache';
-        result := proxy.ReturnFile(ctxt, name, filename, path, size, lastmod,
-                    {canbecached=}(headsiz >= 0));
+        result := proxy.ReturnFile(ctxt, b32hash, filename, path, localsize,
+                    head.TimeMS, {canbecached=}(head.Size >= 0));
         exit;
       end;
     end;
   // no matching local file - but enough to implement a HEAD request
-  size := headsiz;
+  localsize := head.Size;
   if IsHead(ctxt.Method) then
   begin
     loginfo := 'HEAD needs no file'; // not in proxy.fOwner.fPartials yet
-    Ctxt.SetOutProgressiveFile(filename, size); // won't need file on disk
+    Ctxt.SetOutProgressiveFile(filename, localsize); // won't need file on disk
     result := HTTP_SUCCESS;
     exit;
   end;
   // no matching local file: need to download to return the GET body
-  if size < proxy.fSettings.HttpDirectGetKB shl 10 then
+  if (filename = '') or
+     (localsize = 0) or
+     (localsize < proxy.fSettings.HttpDirectGetKB shl 10) then
   begin
     // use the blocking connection for smallest files < 16KB (or without size)
-    if size <> 0 then
+    if localsize <> 0 then
       direct := proxy.RemoteClientGet(remote);
-    if (size = 0) or
+    if (localsize = 0) or
        (direct <> '') then
-      if ((size < 0) or // no length/range = retrieve full dynamic content
-          (length(direct) = size)) and
-         FileFromString(direct, filename) and
-         ((headlastmod = 0) or
-          FileSetDateFromUnixUtc(filename, headlastmod)) then
+      if ((localsize < 0) or // no length/range = retrieve full dynamic content
+          (length(direct) = localsize)) and
+         ((filename = '') or
+          FileFromString(direct, filename)) then
       begin
-        if size < 0 then
+        if localsize < 0 then
           loginfo := 'nosize get'
         else
           loginfo := 'small get';
@@ -5793,7 +5820,8 @@ begin // this method is protected by proxy.fSafe.Lock
   end;
   // big files need an asynchronous GET to the uri server
   stream := TFileStreamEx.Create(filename, fmCreate or fmShareRead);
-  id := proxy.fOwner.fPartials.Add(filename, size, @hash, Ctxt.ConnectionHttp);
+  id := proxy.fOwner.fPartials.Add(filename, localsize, {hash=}nil,
+    Ctxt.ConnectionHttp, {eventualtime=}0);
   if id = 0 then
   begin
     stream.Free;
@@ -5803,14 +5831,13 @@ begin // this method is protected by proxy.fSafe.Lock
   end;
   opt := proxy.fRemoteClient.Options^; // non-blocking same options reuse
   // connect and start background downloading (unlocked)
-  ctxt.SetOutProgressiveFile(filename, size);
+  ctxt.SetOutProgressiveFile(filename, localsize);
   try
     background := TStartProxyRequestClient.OpenOptions(remote, opt);
     background.stream := stream;
     background.uri := remote.Address;
-    background.filedate := headlastmod;
-    Make(['get-', id], remotehead);
-    TLoggedWorkThread.Create(log, remotehead, background, proxy.BackgroundGet);
+    TLoggedWorkThread.Create(log, Make(['get-', id]),
+                             background, proxy.BackgroundGet);
     loginfo := 'progressive new';
     result := HTTP_SUCCESS;
   except
@@ -5833,12 +5860,8 @@ begin
       nil, back.stream);
     fn := back.stream.FileName;
     FreeAndNil(back.stream);
-    if StatusCodeIsSuccess(status) then
-      if (back.filedate <= 0) or
-         FileSetDateFromUnixUtc(fn, back.filedate) then
-        msg := 'ok'
-      else
-        FormatUtf8('FileSetDate(%) failed as %', [back.filedate, OsErrorShort], msg)
+    if StatusCodeIsSuccess(status) then // 2xx..3xx range
+      msg := 'ok'
     else
       msg := 'GET error';
     fOwner.fLog.Add.Log(sllTrace, 'BackgroundGet=%: % [%] size=%',
@@ -5874,13 +5897,18 @@ begin
   // prepare file streaming as response
   with304 := not (hpoDisable304 in fSettings.Options);
   if lastmod = 0 then
-    // from hpsLocalFolder
+    // from hpsLocalFolder: check local file size+date attributes
     result := Ctxt.SetOutFile(filename, with304, '',
       fSettings.CacheControlMaxAgeSec, @size)
   else
-    // from hpsRemoteUri
+  begin
+    // from hpsRemoteUri: we have the resource size+date attributes
     result := Ctxt.SetOutFile(filename, with304,
       size, lastmod, fSettings.CacheControlMaxAgeSec);
+    if (result = HTTP_SUCCESS) or
+       (result = HTTP_NOTMODIFIED) then
+      FileSetDateFromUnixUtc(filename, UnixTimeUtc); // touch file timestamp
+  end;
   if (result <> HTTP_SUCCESS) or
      IsHead(ctxt.Method) or
      not Assigned(fMemCache) then
@@ -5899,7 +5927,7 @@ end;
 constructor THttpProxyServerMainSettings.Create;
 begin
   inherited Create;
-  fThreadCount := SystemInfo.dwNumberOfProcessors + 1;
+  fThreadCount := CpuThreads + 1;
   fPort := '8098';
 end;
 
@@ -5925,8 +5953,9 @@ begin
   inherited Create;
   // set default values in this main instance
   fDiskCache.Path := Executable.ProgramFilePath + 'proxycache';
+  fDiskCache.TimeoutSec := 4 * SecsPerHour; // TTL on disk = 4 hours
   fMemCache.MaxSizeKB := 4;
-  fMemCache.TimeoutSec := 15 * SecsPerMin;
+  fMemCache.TimeoutSec := 15 * SecsPerMin;  // TTL in memory = 15 minutes
 end;
 
 function THttpProxyServerSettings.AddUrl(
@@ -6129,6 +6158,7 @@ var
   i: PtrInt;
 begin
   fSources := [];
+  fUrlOptions := [];
   ObjArrayClear(fUrl);
   new := TUriRouter.Create(TUriTreeNode);
   try
@@ -6169,6 +6199,7 @@ begin
         continue;
       end;
       include(fSources, hps);
+      fUrlOptions := fUrlOptions + s.fOptions;
       // normalize cache settings
       nfo := '';
       if (hps <> hpsEvent) and
@@ -6192,10 +6223,9 @@ begin
           s.DiskCache.Path := EnsureDirectoryExists(s.DiskCache.Path);
           if s.DiskCache.TimeoutSec <= 0 then
             s.DiskCache.TimeoutSec := fSettings.DiskCache.TimeoutSec;
-          if (s.HttpHeadCacheSec > 0) and
-             not (hpoClientNoHead in s.Options) then
-            one.fHeadCache := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
-              TypeInfo(TRawUtf8DynArray), {caseins=}false, s.HttpHeadCacheSec);
+          if s.HttpHeadCacheSec > 0 then
+            one.fHeadCache := TSynDictionary.Create(TypeInfo(THash160DynArray),
+              TypeInfo(THeadCaches), {caseins=}false, s.HttpHeadCacheSec);
           Make([' in ', s.DiskCache.Path], nfo);
         end;
       end;
@@ -6241,9 +6271,11 @@ end;
 procedure THttpProxyServer.OnIdle(Sender: TObject; NowTix: Int64);
 var
   i, n: integer;
+  tixmin: cardinal;
   one: ^THttpProxyUrl;
+  tmp: TSynLogClass; // for Delphi 7 compilation
 begin
-  // delete any deprecated cached content - called every second
+  // delete any deprecated in-memory cached content - called every second
   n := 0;
   one := pointer(fUrl);
   for i := 1 to length(fUrl) do
@@ -6255,6 +6287,29 @@ begin
   end;
   if n <> 0 then
     fLog.Add.Log(sllTrace, 'OnIdle: cache gc=%', [n], self);
+  // delete deprecated file content in background thread - check every 2 minutes
+  if (fSettings.DiskCache.Path = '') or
+     (fSettings.DiskCache.TimeoutSec <= SecsPerHour) then
+    exit;
+  tixmin := (NowTix shr 27) + 1; // check folder every 128 seconds
+  if fTempFilesTix = tixmin then
+    exit;
+  fTempFilesTix := tixmin;
+  tmp := nil;
+  if DirectoryExists(fSettings.DiskCache.Path) then
+    TLoggedWorkThread.Create(tmp, 'cacheclean', nil, OnBackgroundDeleteDeprecated);
+end;
+
+procedure THttpProxyServer.OnBackgroundDeleteDeprecated(Sender: TObject);
+var
+  size: Int64;
+begin // folder timestamp check is called every 2 minutes, and may be slow
+  size := 0;
+  DirectoryDeleteOlderFiles(fSettings.DiskCache.Path,
+    fSettings.DiskCache.TimeoutSec / SecsPerDay, FILES_ALL,
+    {recursive=}hpoClientCacheSubFolder in fUrlOptions, @size);
+  if size <> 0 then // something changed on disk
+    fLog.Add.Log(sllTrace, 'OnIdle: deleted old=%', [KBNoSpace(size)], self);
 end;
 
 function THttpProxyServer.OnGetHeadLocalFolder(Ctxt: THttpServerRequest;
@@ -6278,8 +6333,9 @@ begin
   if hpoNoSubFolder in opt then
     if PosExChar(PathDelim, name) <> 0 then
       exit;
+  // stream the content from local file
   fn := MakePath([one.Settings.fLocalFolder, name]);
-  result := one.ReturnFile(Ctxt, name, fn, Uri, siz, 0); // stream from file
+  result := one.ReturnFile(Ctxt, name, fn, Uri, siz, {lastmod=}0);
   // additional response types
   case result of
     HTTP_NOTFOUND:
@@ -6305,7 +6361,7 @@ begin
         if Assigned(one.fHashCache) then
           result := one.ReturnHash(Ctxt, name, fn);
   end; // may be e.g. HTTP_NOTMODIFIED (304)
-  if not StatusCodeIsSuccess(result) then
+  if not StatusCodeIsSuccess(result) then // in 4xx.. range
     Ctxt.SetErrorMessage('serving %', [name]);
   if fHasLog then
     fLog.Add.Log(sllDebug, 'OnExecute: % % fn=% status=% size=% cached=%',
@@ -6331,56 +6387,58 @@ begin
       exit;
   req.remote := req.proxy.fRemoteUri;
   Append(req.remote.Address, Uri.Path.Text, Uri.Path.Len);
-  // check the local file (named from hashed URI)
-  req.name := HttpRequestHashBase32(req.remote, nil, 20, @req.hash);
-  if req.name = '' then
-    exit; // paranoid
-  if hpoClientCacheSubFolder in req.proxy.Settings.Options then // hash partitioning
-    req.filename := MakePath([req.proxy.Settings.DiskCache.Path, req.name[1], req.name])
-  else
-    req.filename := MakePath([req.proxy.Settings.DiskCache.Path, req.name]);
   // blocking to ensure file consistency and remote connection sharing
-  req.proxy.fSafe.Lock;
+  req.proxy.fOsSafe.Lock;
   try
-    if FileInfoByName(req.filename, req.size, req.lastmod) and
-       (req.size >= 0) then
+    // retrieve the headers, from cache or HEAD, and compute the local file name
+    result := req.MakeHeadAndComputeFilename;
+    Ctxt.OutCustomHeaders := PurgeHeaders(req.head.Headers, false,
+      PURGED[hpNoXCache in req.proxy.Settings.Options]);
+    if result < 300 then // StatusCodeIsSuccess = 2xx..3xx range
     begin
-      // we have a local cached file
-      if fPartials.HasFile(req.filename, @req.size, ctxt.ConnectionHttp) then
+      // check the local file (named from hashed URI + header etag/lastmod)
+      if FileInfoByName(req.filename, req.localsize, req.localdate) and
+         (req.localsize >= 0) then
       begin
-        // but it is already associated in progressive mode: join the team
-        Ctxt.SetOutProgressiveFile(req.filename, req.size);
-        req.loginfo := 'partial exists';
-        result := HTTP_SUCCESS;
+        // we have a local cached file
+        if fPartials.HasFile(req.filename, @req.localsize, Ctxt.ConnectionHttp) then
+        begin
+          // but it is already associated in progressive mode: join the team
+          Ctxt.SetOutProgressiveFile(req.filename, req.localsize);
+          req.loginfo := 'partial exists';
+          result := HTTP_SUCCESS;
+        end
+        else
+        begin
+          // assume file won't change on the server: return the current cache
+          result := req.proxy.ReturnFile(Ctxt,
+            req.b32hash, req.filename, Uri, req.localsize, req.head.TimeMS);
+          req.loginfo := 'direct';
+        end;
       end
-      else if hpoClientNoHead in req.proxy.Settings.Options then
+      else
       begin
-        // assume file won't change on the server: return the current cache
-        result := req.proxy.ReturnFile(
-          Ctxt, req.name, req.filename, Uri, req.size, req.lastmod);
-        req.loginfo := 'no head';
+        result := HTTP_NOTFOUND;
+        req.localsize := -1; // no local file
+        req.localdate := 0;
       end;
-    end
-    else
-    begin
-      req.size := -1; // no local file
-      req.lastmod := 0;
+      if not StatusCodeIsSuccess(result) then // in 4xx.. range
+        // no matching local file: need to initiate a GET proxy request
+        result := req.MakeGet(Uri);
     end;
-    if not StatusCodeIsSuccess(result) then
-      // no matching local file: need to initiate a HEAD + GET proxy request
-      result := req.AskRemoteServer(Uri);
   finally
-    req.proxy.fSafe.UnLock;
+    req.proxy.fOsSafe.UnLock;
   end;
   if (req.loginfo <> nil) and
-     not StatusCodeIsSuccess(result) then
+     not StatusCodeIsSuccess(result) then // in 4xx.. range
     Ctxt.SetErrorMessage('%', [req.loginfo])
-  else if not (hpoNoXProxyName in req.proxy.Settings.Options) then
-    Ctxt.AddOutHeader(['X-Proxy-Name: ', req.name]);
+  else if (req.b32hash <> '') and
+          not (hpoNoXProxyName in req.proxy.Settings.Options) then
+    Ctxt.AddOutHeader(['X-Proxy-Name: ', req.b32hash]);
   if fHasLog then
     fLog.Add.Log(LOG_INFOWARNING[not StatusCodeIsSuccess(result)],
       'OnExecute: % % fn=% status=% size=% info=% in %',
-      [Ctxt.Method, Ctxt.Url, req.name, result, req.size, req.loginfo,
+      [Ctxt.Method, Ctxt.Url, req.b32hash, result, req.localsize, req.loginfo,
        MicroSecFrom(start)], self);
 end;
 

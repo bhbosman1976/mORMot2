@@ -34,6 +34,8 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.search,
+  mormot.core.fmt,
   mormot.crypt.secure,
   mormot.core.rtti,
   mormot.core.log,
@@ -5701,13 +5703,16 @@ class function TSqlDBConnectionProperties.CreateFrom(
   aDefinition: TSynConnectionDefinition): TSqlDBConnectionProperties;
 var
   c: TSqlDBConnectionPropertiesClass;
+  pwd: SpiUtf8;
 begin
   c := ClassFrom(aDefinition);
   if c = nil then
     ESqlDBException.RaiseUtf8('%.CreateFrom: unknown % class - please ' +
       'add a reference to its implementation unit', [self, aDefinition.Kind]);
+  aDefinition.GetPasswordSafe(pwd);
   result := c.Create(aDefinition.ServerName, aDefinition.DatabaseName,
-    aDefinition.User, aDefinition.PassWordPlain);
+    aDefinition.User, pwd);
+  FillZero(pwd); // anti-forensic
 end;
 
 class function TSqlDBConnectionProperties.CreateFromJson(
@@ -6366,7 +6371,7 @@ begin
     ColumnToJson(col, W);
     W.AddComma;
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 procedure TSqlDBStatement.Execute(const aSql: RawUtf8; ExpectResults: boolean);
@@ -7871,24 +7876,32 @@ end;
 procedure TSqlDBConnectionPropertiesThreadSafe.DeleteDeprecated(secs: integer);
 var
   i: PtrInt;
+  c: TSqlDBConnectionThreadSafe;
   delete: TObjectDynArray; // outside non-reentrant lock
-  deletecount: integer;
+  deletecount: integer;    // not PtrInt
   log: ISynLog;
 begin // called at most every 32 seconds - ensured timeout <> 0 and secs <> 0
   if fConnectionPoolCount = 0 then
     exit;
+  // detect outdated connection instances into a local delete[] list
   deletecount := 0;
   fConnectionPoolSafe.Lock;
   try
     for i := fConnectionPoolMin to fConnectionPoolMax do
-      if (fConnectionPool[i] <> nil) and
-         fConnectionPool[i].IsOutdated(secs) then
-        ObjArrayAddCount(delete, fConnectionPool[i], deletecount);
+    begin
+      c := fConnectionPool[i];
+      if (c = nil) or
+         not c.IsOutdated(secs) then
+        continue;
+      ObjArrayAddCount(delete, c, deletecount);
+      fConnectionPool[i] := nil; // instance is owned by delete[] now
+    end;
   finally
     fConnectionPoolSafe.UnLock;
   end;
   if deletecount = 0 then
     exit;
+  // delete all deprecated connections outside of the lock
   SynDBLog.EnterLocal(log, 'DeleteDeprecated=%', [deletecount], self);
   ObjArrayClear(delete, {continueonexc=}true, @deletecount);
 end;
@@ -8399,7 +8412,7 @@ begin
     ColumnToJson(col, W);
     W.AddComma;
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 procedure TSqlDBStatementWithParamsAndColumns.ClearColumns;

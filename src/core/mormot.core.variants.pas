@@ -29,7 +29,7 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
-  mormot.core.data, // already included in mormot.core.json
+  mormot.core.data, // already included in mormot.core.json anyway
   mormot.core.buffers,
   mormot.core.rtti,
   mormot.core.json;
@@ -490,6 +490,13 @@ const
     [dvoReturnNullForUnknownProperty,
      dvoValueCopiedByReference,
      dvoAllowDoubleValue];
+
+  /// JSON_FAST_FLOAT with dvoInternNames option
+  JSON_FAST_FLOAT_INTERNING =
+    [dvoReturnNullForUnknownProperty,
+     dvoValueCopiedByReference,
+     dvoAllowDoubleValue,
+     dvoInternNames];
 
 var
   /// TDocVariant options which may be used for plain JSON parsing
@@ -2105,8 +2112,9 @@ type
     /// sort the document object values by value using a comparison function
     // - work for both dvObject and dvArray documents
     // - will sort by UTF-8 text (VariantCompare) if no custom aCompare is supplied
+    // - for dvObject, any SortFallbackName() would be used if SortCompare()=0
     procedure SortByValue(SortCompare: TVariantCompare = nil;
-      SortCompareReversed: boolean = false);
+      SortCompareReversed: boolean = false; SortFallbackName: TUtf8Compare = nil);
     /// sort the document object values by value using a comparison method
     // - work for both dvObject and dvArray documents
     // - you should supply a TVariantComparer callback method
@@ -2118,17 +2126,21 @@ type
     // - will sort by UTF-8 text (VariantCompare) if no custom aValueCompare is supplied
     // - this method is faster than SortByValue/SortByRow
     procedure SortArrayByField(const aItemPropName: RawUtf8;
-      aValueCompare: TVariantCompare = nil;
-      aValueCompareReverse: boolean = false;
+      aValueCompare: TVariantCompare = nil; aValueCompareReverse: boolean = false;
       aNameSortedCompare: TUtf8Compare = nil);
     /// sort the document array values by field(s) of some stored objet values
     // - allow up to 4 fields (aItemPropNames[0]..aItemPropNames[3])
     // - do nothing if the document is not a dvArray, or if the items are no dvObject
     // - will sort by UTF-8 text (VariantCompare) if no aValueCompareField is supplied
+    // - can optionally return all indexes of each unique value, e.g. for a grid
     procedure SortArrayByFields(const aItemPropNames: array of RawUtf8;
-      aValueCompare: TVariantCompare = nil;
-      const aValueCompareField: TVariantCompareField = nil;
-      aValueCompareReverse: boolean = false; aNameSortedCompare: TUtf8Compare = nil);
+      aValueCompare: TVariantCompare = nil; const aValueCompareField: TVariantCompareField = nil;
+      aValueCompareReverse: boolean = false; aNameSortedCompare: TUtf8Compare = nil;
+      aUniqueValueIndex: PIntegerDynArray = nil);
+    /// find an occurence in O(log(n)) after SortArrayByField() array sorting
+    function SearchSortedArrayByField(const aItemPropName: RawUtf8;
+      const aValue: variant; aValueCompare: TVariantCompare = nil;
+      aValueCompareReverse: boolean = false): PtrInt;
     /// inverse the order of Names and Values of this document
     // - could be applied after a content sort if needed
     procedure Reverse;
@@ -2231,6 +2243,8 @@ type
     // into {"arr.0":"a","arr.1":"b"}
     // - return FALSE if the TDocVariant did not change
     // - return TRUE if the TDocVariant has been flattened at least for some fields
+    // - to process all nested level, you could just run such a loop:
+    // $ while Doc.FlattenFromNestedObjects(aSepChar, aNestedArrayStartIndex) do ;
     function FlattenFromNestedObjects(aSepChar: AnsiChar = '.';
       aNestedArrayStartIndex: PtrInt = -1): boolean;
 
@@ -3015,9 +3029,13 @@ function JsonToVariantInPlace(var Value: Variant; Json: PUtf8Char;
 procedure MultiPartToDocVariant(const MultiPart: TMultiPartDynArray;
   var Doc: TDocVariantData; Options: PDocVariantOptions = nil);
 
-/// parse a "key<value" or "key<" expression for SortMatch() comparison
-function ParseSortMatch(Expression: PUtf8Char; out Key: RawUtf8;
+/// parse a "key<value" or "key<" expression for EvaluateVariantExpression()
+function ParseVariantExpression(Expression: PUtf8Char; out Key: RawUtf8;
   out Match: TCompareOperator; Value: PVariant): boolean;
+
+/// evaluate if a ParseVariantExpression() operator match two variant values
+function EvaluateVariantExpression(Comp: TVariantCompare;
+  const A, B: variant; Match: TCompareOperator): boolean;
 
 
 { ************** Variant Binary Serialization }
@@ -3141,7 +3159,7 @@ type
 
   /// low-level Enumerator as returned by IDocList.Objects
   // - warning: weak reference to the main IDocList/IDocDict, so you need to
-  // explicitly call IDocDict.Copy to use any returned value outside of the loop
+  // explicitly call Current.Copy to use any returned value outside of the loop
   TDocObjectEnumerator = record
   private
     CurrDict: IDocDict; // a single instance reused during whole iteration
@@ -3152,7 +3170,7 @@ type
     CompFunc: TVariantCompare;
     CompMatch: TCompareOperator;
     CompKeyHasPath: boolean;
-    CompKeyPrev: integer;
+    CompKeyPrev: integer; // not PtrInt
   public
     function MoveNext: boolean; { too complex to be inlined }
     function GetEnumerator: TDocObjectEnumerator;
@@ -4458,11 +4476,11 @@ const
     SortDynArrayInt64,           // 12
     SortDynArrayQWord,           // 13
     SortDynArrayWordBoolean,     // 14
-    {$ifdef CPUINTEL}
-    SortDynArrayAnsiString,      // 15
+    {$ifdef ASMINTEL}
+    SortDynArrayAnsiString,      // 15 - optimized asm
     {$else}
-    SortDynArrayRawByteString,
-    {$endif CPUINTEL}
+    SortDynArrayRawByteString,   // 15 - pure pascal vesion
+    {$endif ASMINTEL}
     SortDynArrayAnsiStringI,     // 16
     SortDynArrayUnicodeString,   // 17 about hashing: UTF-16 equal = UTF-8 equal
     SortDynArrayUnicodeStringI); // 18
@@ -5267,24 +5285,24 @@ begin
   Data := @V; // allow to modify a const argument
   case length(Arguments) of
     0:
-      if SameText(Name, 'Clear') then
+      if SameTextS(Name, 'Clear') then
       begin
         Data^.Reset;
         result := true;
       end;
     1:
-      if SameText(Name, 'Add') then
+      if SameTextS(Name, 'Add') then
       begin
         Data^.AddItem(variant(Arguments[0]));
         result := true;
       end
-      else if SameText(Name, 'Delete') then
+      else if SameTextS(Name, 'Delete') then
       begin
         Data^.Delete(Data^.GetValueIndex(ToUtf8(Arguments[0])));
         result := true;
       end;
     2:
-      if SameText(Name, 'Add') then
+      if SameTextS(Name, 'Add') then
       begin
         Data^.AddValue(ToUtf8(Arguments[0]), variant(Arguments[1]));
         result := true;
@@ -5303,12 +5321,12 @@ begin
   Data := @V; // allow to modify a const argument
   case length(Arguments) of
     1:
-      if SameText(Name, 'Exists') then
+      if SameTextS(Name, 'Exists') then
       begin
         variant(Dest) := Data.GetValueIndex(ToUtf8(Arguments[0])) >= 0;
         exit;
       end
-      else if SameText(Name, 'NameIndex') then
+      else if SameTextS(Name, 'NameIndex') then
       begin
         variant(Dest) := Data.GetValueIndex(ToUtf8(Arguments[0]));
         exit;
@@ -5316,12 +5334,12 @@ begin
       else if VariantToInteger(variant(Arguments[0]), ndx) then
       begin
         if (Name = '_') or
-           SameText(Name, 'Value') then
+           SameTextS(Name, 'Value') then
         begin
           Data.RetrieveValueOrRaiseException(ndx, variant(Dest), true);
           exit;
         end
-        else if SameText(Name, 'Name') then
+        else if SameTextS(Name, 'Name') then
         begin
           Data.RetrieveNameOrRaiseException(ndx, temp);
           RawUtf8ToVariant(temp, variant(Dest));
@@ -5329,7 +5347,7 @@ begin
         end;
       end
       else if (Name = '_') or
-              SameText(Name, 'Value') then
+              SameTextS(Name, 'Value') then
       begin
         temp := ToUtf8(Arguments[0]);
         Data.RetrieveValueOrRaiseException(pointer(temp), length(temp),
@@ -5403,7 +5421,7 @@ begin
         inc(nam);
         inc(val);
       until false;
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
   end
   else if dv^.IsArray then
   begin
@@ -7329,7 +7347,7 @@ function TDocVariantData.CompareObject(const ObjFields: array of RawUtf8;
   const Another: TDocVariantData; CaseInsensitive: boolean): integer;
 var
   f: PtrInt;
-  prev: integer;
+  prev: integer; // not PtrInt
   v1, v2: PVariant;
 begin
   if IsObject then
@@ -7896,7 +7914,7 @@ begin
     exit;
   ndx := -1;
   if aPreviousIndex <> nil then
-  begin // optimistic try if this field appears at the same position
+  begin // optimistic try if this field appears at the same position (common)
     ndx := aPreviousIndex^;
     if (PtrUInt(ndx) >= PtrUInt(n)) or
        (SortDynArrayAnsiStringByCase[not Has(dvoNameCaseSensitive)](
@@ -7918,7 +7936,7 @@ function TDocVariantData.SearchItemByProp(const aPropName, aPropValue: RawUtf8;
   aPropValueCaseSensitive: boolean; aStartIndex: PtrInt): integer;
 var
   v, prop: PVariant;
-  prev: integer;
+  prev: integer; // not PtrInt
 begin
   if IsObject then
   begin
@@ -7999,6 +8017,8 @@ type
     valueCompare: TVariantCompare;
     valueComparer: TVariantComparer;
     reversed: PtrInt;
+    function CompValueName(I, J: PtrInt; P: PVariant): PtrInt;
+      {$ifdef HASINLINE} inline; {$endif}
     procedure SortByName(L, R: PtrInt);
     procedure SortByValue(L, R: PtrInt);
   end;
@@ -8049,6 +8069,13 @@ begin
     until L >= R;
 end;
 
+function TQuickSortDocVariant.CompValueName(I, J: PtrInt; P: PVariant): PtrInt;
+begin
+  result := valueCompare(values[I], P^);
+  if result = 0 then
+    result := nameCompare(names[I], names[J]);
+end;
+
 procedure TQuickSortDocVariant.SortByValue(L, R: PtrInt);
 var
   I, J, P: PtrInt;
@@ -8061,15 +8088,22 @@ begin
       P := (L + R) shr 1;
       repeat
         pivot := @values[P];
-        if Assigned(valueCompare) then
-        begin // called from SortByValue
+        if Assigned(nameCompare) then
+        begin // called from SortByValue with a custom SortFallbackName function
+          while CompValueName(I, P, pivot) * reversed < 0 do
+            inc(I);
+          while CompValueName(J, P, pivot) * reversed > 0 do
+            dec(J);
+        end
+        else if Assigned(valueCompare) then
+        begin // called from SortByValue with SortFallbackName = nil
           while valueCompare(values[I], pivot^) * reversed < 0 do
             inc(I);
           while valueCompare(values[J], pivot^) * reversed > 0 do
             dec(J);
         end
         else
-        begin // called from SortByRow
+        begin // called from SortByRow with valueComparer as function of object
           while valueComparer(values[I], pivot^) * reversed < 0 do
             inc(I);
           while valueComparer(values[J], pivot^) * reversed > 0 do
@@ -8140,16 +8174,18 @@ begin
 end;
 
 procedure TDocVariantData.SortByValue(SortCompare: TVariantCompare;
-  SortCompareReversed: boolean);
+  SortCompareReversed: boolean; SortFallbackName: TUtf8Compare);
 var
   qs: TQuickSortDocVariant;
 begin
   if VCount <= 1 then
     exit;
-  if Assigned(SortCompare) then
-    qs.valueCompare := SortCompare
-  else
-    qs.valueCompare := @VariantCompare;
+  if not IsObject then
+    SortFallbackName := nil;
+  qs.nameCompare := SortFallbackName;
+  if not Assigned(SortCompare) then
+    SortCompare := @VariantCompare;
+  qs.valueCompare := SortCompare;
   qs.valueComparer := nil;
   qs.names := pointer(VName);
   qs.values := pointer(VValue);
@@ -8168,6 +8204,7 @@ begin
   if (VCount <= 1) or
      (not Assigned(SortComparer)) then
     exit;
+  qs.nameCompare := nil;
   qs.valueCompare := nil;
   qs.valueComparer := SortComparer;
   qs.names := pointer(VName);
@@ -8180,7 +8217,7 @@ begin
 end;
 
 type
-  TQuickSortByFieldLookup = array[0..3] of PVariant;
+  TQuickSortByFieldLookup = array[0..3] of PVariant; // 32 bytes on 64-bit
   PQuickSortByFieldLookup = ^TQuickSortByFieldLookup;
 
   {$ifdef USERECORDWITHMETHODS}
@@ -8198,24 +8235,42 @@ type
     Doc: PDocVariantData;
     TempExch: TQuickSortByFieldLookup;
     Reverse: boolean;
-    Depth: integer; // = high(Lookup)
-    procedure Init(const aPropNames: array of RawUtf8;
-      aNameSortedCompare: TUtf8Compare);
-    function DoComp(Value: PQuickSortByFieldLookup): PtrInt;
+    Depth: integer; // = high(Lookup) + 1
+    procedure InitSort(aDoc: PDocVariantData; aPropNames: PRawUtf8Array; aPropHi: PtrInt;
+      aValueCompare: TVariantCompare; const aValueCompareField: TVariantCompareField;
+      aValueCompareReverse: boolean; aNameSortedCompare: TUtf8Compare);
+    function DoCompare(Value: PQuickSortByFieldLookup): PtrInt;
+      {$ifndef CPUX86} inline; {$endif}
+    function DoCompareField(Value: PQuickSortByFieldLookup): PtrInt;
       {$ifndef CPUX86} inline; {$endif}
     procedure Sort(L, R: PtrInt);
+    procedure GetUniqueIndex(var ndx: TIntegerDynArray);
   end;
 
-procedure TQuickSortDocVariantValuesByField.Init(
-  const aPropNames: array of RawUtf8; aNameSortedCompare: TUtf8Compare);
+procedure TQuickSortDocVariantValuesByField.InitSort(aDoc: PDocVariantData;
+  aPropNames: PRawUtf8Array; aPropHi: PtrInt;
+  aValueCompare: TVariantCompare; const aValueCompareField: TVariantCompareField;
+  aValueCompareReverse: boolean; aNameSortedCompare: TUtf8Compare);
 var
   namecomp: TUtf8Compare;
-  v: pointer;
+  v, r: PVariant;
   row, f: PtrInt;
-  rowdata: PDocVariantData;
-  ndx: integer;
+  d: PDocVariantData;
+  ndx: integer; // not PtrInt
 begin
-  Depth := high(aPropNames);
+  Fields := aPropNames;
+  if Assigned(aValueCompareField) then
+  begin
+    Compare := nil;
+    CompareField := aValueCompareField;
+  end
+  else if Assigned(aValueCompare) then
+    Compare := aValueCompare
+  else
+    Compare := VariantCompare;
+  Doc := aDoc;
+  Reverse := aValueCompareReverse;
+  Depth := aPropHi;
   if (Depth < 0) or
      (Depth > high(TQuickSortByFieldLookup)) then
     EDocVariant.RaiseUtf8('TDocVariantData.SortByFields(%)', [Depth]);
@@ -8227,61 +8282,68 @@ begin
     namecomp := StrCompByCase[not Doc^.Has(dvoNameCaseSensitive)];
   for f := 0 to Depth do
   begin
-    if aPropNames[f] = '' then
+    if aPropNames[0] = '' then
       EDocVariant.RaiseUtf8('TDocVariantData.SortByFields(%=void)', [f]);
     ndx := -1;
+    r := pointer(Doc^.VValue);
     for row := 0 to Doc^.VCount - 1 do
     begin
-      rowdata := _Safe(Doc^.VValue[row]);
-      if (cardinal(ndx) < cardinal(rowdata^.VCount)) and
-         (namecomp(pointer(rowdata^.VName[ndx]), pointer(aPropNames[f])) = 0) then
-        v := @rowdata^.VValue[ndx] // get the value at the (likely) same position
+      d := _Safe(r^);
+      if d^.IsObject then // inlined GetObjectProp()
+        if (cardinal(ndx) < cardinal(d^.VCount)) and
+           (namecomp(pointer(d^.VName[ndx]), pointer(aPropNames[0])) = 0) then
+          v := @d^.VValue[ndx] // get the value at the (likely) same position
+        else
+        begin
+          v := pointer(d^.GetVarData(aPropNames[0], aNameSortedCompare, @ndx));
+          if v = nil then
+            v := @NullVarData;
+        end
       else
-      begin
-        v := rowdata^.GetVarData(aPropNames[f], aNameSortedCompare, @ndx);
-        if v = nil then
-          v := @NullVarData;
-      end;
+        v := @NullVarData;
       Lookup[row, f] := v;
+      inc(r);
     end;
+    aPropNames := @aPropNames[1];
   end;
 end;
 
-function TQuickSortDocVariantValuesByField.DoComp(
+function TQuickSortDocVariantValuesByField.DoCompare(
   Value: PQuickSortByFieldLookup): PtrInt;
 begin
-  if Assigned(Compare) then
+  result := Compare(Value[0]^, Pivot[0]^);
+  if (result = 0) and
+     (Depth > 0) then
   begin
-    result := Compare(Value[0]^, Pivot[0]^);
+    result := Compare(Value[1]^, Pivot[1]^);
     if (result = 0) and
-       (depth > 0) then
+       (Depth > 1) then
     begin
-      result := Compare(Value[1]^, Pivot[1]^);
+      result := Compare(Value[2]^, Pivot[2]^);
       if (result = 0) and
-         (depth > 1) then
-      begin
-        result := Compare(Value[2]^, Pivot[2]^);
-        if (result = 0) and
-           (depth > 2) then
-         result := Compare(Value[3]^, Pivot[3]^);
-      end;
+         (Depth > 2) then
+       result := Compare(Value[3]^, Pivot[3]^);
     end;
-  end
-  else
+  end;
+  if Reverse then
+    result := -result;
+end;
+
+function TQuickSortDocVariantValuesByField.DoCompareField(
+  Value: PQuickSortByFieldLookup): PtrInt;
+begin
+  result := CompareField(Fields[0], Value[0]^, Pivot[0]^);
+  if (result = 0) and
+     (Depth > 0) then
   begin
-    result := CompareField(Fields[0], Value[0]^, Pivot[0]^);
+    result := CompareField(Fields[1], Value[1]^, Pivot[1]^);
     if (result = 0) and
-       (depth > 0) then
+       (Depth > 1) then
     begin
-      result := CompareField(Fields[1], Value[1]^, Pivot[1]^);
+      result := CompareField(Fields[2], Value[2]^, Pivot[2]^);
       if (result = 0) and
-         (depth > 1) then
-      begin
-        result := CompareField(Fields[2], Value[2]^, Pivot[2]^);
-        if (result = 0) and
-           (depth > 2) then
-         result := CompareField(Fields[3], Value[3]^, Pivot[3]^);
-      end;
+         (Depth > 2) then
+       result := CompareField(Fields[3], Value[3]^, Pivot[3]^);
     end;
   end;
   if Reverse then
@@ -8299,10 +8361,20 @@ begin
       P := (L + R) shr 1;
       repeat
         Pivot := @Lookup[P];
-        while DoComp(@Lookup[I]) < 0 do
-          inc(I);
-        while DoComp(@Lookup[J]) > 0 do
-          dec(J);
+        if Assigned(Compare) then
+        begin
+          while DoCompare(@Lookup[I]) < 0 do
+            inc(I);
+          while DoCompare(@Lookup[J]) > 0 do
+            dec(J);
+        end
+        else
+        begin
+          while DoCompareField(@Lookup[I]) < 0 do
+            inc(I);
+          while DoCompareField(@Lookup[J]) > 0 do
+            dec(J);
+        end;
         if I <= J then
         begin
           if I <> J then
@@ -8335,6 +8407,38 @@ begin
     until L >= R;
 end;
 
+procedure TQuickSortDocVariantValuesByField.GetUniqueIndex(var ndx: TIntegerDynArray);
+var
+  n: PtrInt;
+  l: ^TQuickSortByFieldLookup;
+  v: PVariant;
+  i, cmp: integer;
+begin
+  SetLength(ndx, Doc^.VCount);
+  v := nil;
+  l := pointer(Lookup);
+  n := 0;
+  i := 0;
+  repeat
+    if v = nil then
+      cmp := 1
+    else if Assigned(Compare) then
+      cmp := Compare(v^, l^[0]^)
+    else
+      cmp := CompareField(Fields[0], v^, l^[0]^);
+    if cmp <> 0 then
+    begin
+      ndx[n] := i; // store the index of each new unique value
+      inc(n);
+      v := l^[0];
+    end;
+    inc(l); // next row
+    inc(i);
+  until i = Doc^.VCount;
+  if n <> Doc^.VCount then
+    SetLength(ndx, n);
+end;
+
 procedure TDocVariantData.SortArrayByField(const aItemPropName: RawUtf8;
   aValueCompare: TVariantCompare; aValueCompareReverse: boolean;
   aNameSortedCompare: TUtf8Compare);
@@ -8345,39 +8449,68 @@ begin
      (aItemPropName = '') or
      not IsArray then
     exit;
-  if not Assigned(aValueCompare) then
-    aValueCompare := VariantCompare;
-  QS.Compare := aValueCompare;
-  QS.Doc := @self;
-  QS.Init([aItemPropName], aNameSortedCompare);
-  QS.Reverse := aValueCompareReverse;
+  QS.InitSort(@self, @aItemPropName, 0,
+    aValueCompare, nil, aValueCompareReverse, aNameSortedCompare);
   QS.Sort(0, VCount - 1);
 end;
 
 procedure TDocVariantData.SortArrayByFields(
   const aItemPropNames: array of RawUtf8; aValueCompare: TVariantCompare;
-  const aValueCompareField: TVariantCompareField;
-  aValueCompareReverse: boolean; aNameSortedCompare: TUtf8Compare);
+  const aValueCompareField: TVariantCompareField; aValueCompareReverse: boolean;
+  aNameSortedCompare: TUtf8Compare; aUniqueValueIndex: PIntegerDynArray);
 var
   QS: TQuickSortDocVariantValuesByField;
 begin
+  if aUniqueValueIndex <> nil then
+    aUniqueValueIndex^ := nil;
   if (VCount <= 0) or
      not IsArray then
     exit;
-  if Assigned(aValueCompareField) then
-  begin
-    QS.Compare := nil;
-    QS.Fields := @aItemPropNames[0];
-    QS.CompareField := aValueCompareField;
-  end
-  else if Assigned(aValueCompare) then
-      QS.Compare := aValueCompare
-    else
-      QS.Compare := VariantCompare;
-  QS.Doc := @self;
-  QS.Init(aItemPropNames, aNameSortedCompare);
-  QS.Reverse := aValueCompareReverse;
+  QS.InitSort(@self, @aItemPropNames[0], high(aItemPropNames),
+    aValueCompare, aValueCompareField, aValueCompareReverse, aNameSortedCompare);
   QS.Sort(0, VCount - 1);
+  if aUniqueValueIndex <> nil then
+    QS.GetUniqueIndex(aUniqueValueIndex^);
+end;
+
+function TDocVariantData.SearchSortedArrayByField(const aItemPropName: RawUtf8;
+  const aValue: variant; aValueCompare: TVariantCompare;
+  aValueCompareReverse: boolean): PtrInt;
+var
+  L, R, cmp: PtrInt;
+  ndx: integer; // not PtrInt
+  v: PVariant;
+begin
+  result := -1;
+  R := VCount - 1;
+  if (R < 0) or
+     not IsArray then
+    exit;
+  if not Assigned(aValueCompare) then
+    aValueCompare := VariantCompare;
+  ndx := -1;
+  L := 0;
+  repeat // efficient O(log(n)) binary search
+    result := (L + R) shr 1;
+    if not _Safe(VValue[result])^.GetObjectProp(aItemPropName, v, @ndx) then
+      v := @NullVarData;
+    cmp := aValueCompare(v^, aValue);
+    if aValueCompareReverse then
+      cmp := -cmp;
+    if cmp = 0 then
+    begin
+      while (result > 0) and
+            _Safe(VValue[result - 1])^.GetObjectProp(aItemPropName, v, @ndx) and
+            (aValueCompare(v^, aValue) = 0) do
+        dec(result); // go down to the first occurence of aValue
+      exit;
+    end;
+    if cmp < 0 then
+      L := result + 1
+    else
+      R := result - 1;
+  until L > R;
+  result := -1
 end;
 
 procedure TDocVariantData.Reverse;
@@ -8440,7 +8573,7 @@ procedure TDocVariantData.ReduceFilter(const aKey: RawUtf8;
   const aValue: variant; aMatch: TCompareOperator; aCompare: TVariantCompare;
   aLimit: integer; aPathDelim: AnsiChar; var result: TDocVariantData);
 var
-  n, prev: integer;
+  n, prev: integer; // not PtrInt
   v, obj: PVariant;
   haspath: boolean;
   dv: PDocVariantData;
@@ -8463,7 +8596,7 @@ begin
     else
       dv^.GetObjectProp(aKey, obj, @prev);
     if (obj <> nil) and
-       SortMatch(aCompare({%H-}obj^, aValue), aMatch) then
+       EvaluateVariantExpression(aCompare, {%H-}obj^, aValue, aMatch) then
     begin
       if result.VCount = 0 then
         SetLength(result.VValue, n); // prepare for maximum capacity
@@ -8485,7 +8618,7 @@ var
   v: variant;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(aExpression), k, m, @v);
+  ParseVariantExpression(pointer(aExpression), k, m, @v);
   ReduceFilter(k, v, m, aCompare, aLimit, aPathDelim, result);
 end;
 
@@ -8515,7 +8648,7 @@ var
   k: RawUtf8;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(aExpression), k, m, nil);
+  ParseVariantExpression(pointer(aExpression), k, m, nil);
   ReduceFilter(k, aValue, m, aCompare, aLimit, aPathDelim, result);
 end;
 
@@ -8539,7 +8672,7 @@ procedure TDocVariantData.ReduceAsArray(const aPropName: RawUtf8;
   var result: TDocVariantData; const OnReduce: TOnReducePerItem);
 var
   ndx: PtrInt;
-  prev: integer;
+  prev: integer; // not PtrInt
   item: PDocVariantData;
   v: PVariant;
 begin
@@ -8568,7 +8701,7 @@ procedure TDocVariantData.ReduceAsArray(const aPropName: RawUtf8;
   var result: TDocVariantData; const OnReduce: TOnReducePerValue);
 var
   ndx: PtrInt;
-  prev: integer;
+  prev: integer; // not PtrInt
   v: PVariant;
 begin
   result.Init(VOptions, dvArray); // same options than the main document
@@ -8601,7 +8734,7 @@ function TDocVariantData.ReduceAsVariantArray(const aPropName: RawUtf8;
   aDuplicates: TSearchDuplicate): TVariantDynArray;
 var
   n, ndx: PtrInt;
-  prev: integer;
+  prev: integer; // not PtrInt
   v: PVariant;
 begin
   result := nil;
@@ -9474,7 +9607,7 @@ begin
       inc(nam);
       inc(val);
     until false;
-    wr.CancelLastComma('}');
+    wr.ReplaceLastComma('}');
     wr.SetText(result);
   finally
     wr.Free;
@@ -10743,9 +10876,8 @@ begin
     v64 := -v64;
   // 2. now v64, frac, digit, exp contain number parsed from Json
   if (frac = 0) and
-     (remdigit >= 0) then
+     (remdigit >= 0) then // return an integer or Int64 value
   begin
-    // return an integer or Int64 value
     Value.VInt64 := v64;
     if remdigit <= 9 then
       TSynVarData(Value).VType := varInt64
@@ -10753,16 +10885,14 @@ begin
       TSynVarData(Value).VType := varInteger;
   end
   else if (frac < 0) and
-          (frac >= -4) then
+          (frac >= -4) then // currency as ###.0123
   begin
-    // currency as ###.0123
     TSynVarData(Value).VType := varCurrency;
     Value.VInt64 := v64 * CURRENCY_FACTOR[frac]; // as round(CurrValue*10000)
   end
   else if AllowVarDouble and
           (frac > -324) then // 5.0 x 10^-324 .. 1.7 x 10^308
-  begin
-    // converted into a double value
+  begin // convert into a double value
     d64 := v64;
     {$ifdef CPUX86NOTPIC}
     f := frac;
@@ -10963,58 +11093,65 @@ begin
           'contenttype', ContentType]));
 end;
 
-function ParseSortMatch(Expression: PUtf8Char; out Key: RawUtf8;
+function ParseVariantExpression(Expression: PUtf8Char; out Key: RawUtf8;
   out Match: TCompareOperator; Value: PVariant): boolean;
 var
-  KB, KE, B: PUtf8Char;
+  exp: TTextExpression;
+  tmp: TChar64;
 begin
   result := false;
-  if Expression = nil then
+  if (Expression = nil) or
+     (ParseTextExpression(Expression, exp) = nil) then
     exit;
-  Expression := GotoNextNotSpace(Expression);
-  KB := Expression;
-  while jcJsonIdentifier in JSON_CHARS[Expression^] do // _-.[]$0..9a..zA..Z
-    inc(Expression);
-  if Expression^ = #0 then
-    exit;
-  KE := Expression;
-  Expression := GotoNextNotSpace(Expression);
-  B := Expression;
-  while Expression^ in ['<', '>', '='] do
-    inc(Expression);
-  case Expression - B of
-    1:
-      case B^ of
-        '=':
-          Match := coEqualTo;
-        '<':
-          Match := coLessThan;
-        '>':
-          Match := coGreaterThan
-      else
-        exit;
-      end;
-    2:
-      case cardinal(PWord(B)^) of
-        ord('=') + ord('=') shl 8: // c-style
-          Match := coEqualTo;
-        ord('!') + ord('=') shl 8, // c-style
-        ord('<') + ord('>') shl 8:
-          Match := coNotEqualTo;
-        ord('>') + ord('=') shl 8:
-          Match := coGreaterThanOrEqualTo;
-        ord('<') + ord('=') shl 8:
-          Match := coLessThanOrEqualTo;
-      else
-        exit;
-      end;
-  else
-    exit;
-  end;
-  FastSetString(Key, KB, KE - KB);
+  FastSetString(Key, exp.NameStart, exp.NameLen);
   if Value <> nil then
-    TextBufferToVariant(GotoNextNotSpace(Expression), {allowdouble=}true, Value^);
+    if (exp.ValueStart = nil) or
+       (exp.ValueLen >= SizeOf(tmp)) then // maybe ')' terminated
+      RawUtf8ToVariant(exp.ValueStart, exp.ValueLen, Value^)
+    else
+    begin
+      MoveFast(exp.ValueStart^, tmp, exp.ValueLen);
+      tmp[exp.ValueLen] := #0;
+      TextBufferToVariant(@tmp, {allowdouble=}true, Value^);
+    end;
+  Match := exp.Match;
   result := true;
+end;
+
+function EvaluateVariantExpression(Comp: TVariantCompare;
+  const A, B: variant; Match: TCompareOperator): boolean;
+var
+  au, bu: TTempUtf8; // almost never allocated
+  dummy: boolean;
+begin // same logic than EvaluateTextExpression() in mormot.core.unicode
+  if Match < coEqualCaseInsens then
+    result := SortMatch(Comp(A, B), Match)
+  else
+  begin
+    VariantToTempUtf8(A, au, dummy);
+    VariantToTempUtf8(B, bu, dummy);
+    case Match of
+      coEqualCaseInsens, coNotEqualCaseInsens:
+        result := (Match = coEqualCaseInsens) =
+                  (Utf8ILComp(au.Text, bu.Text, au.Len, bu.Len) = 0);
+      coContains, coNotContains:
+        result := (Match = coContains) =
+                  (StrPosL(bu.Text, au.Text, bu.Len, au.Len) <> nil);
+      coContainsCaseInsens, coNotContainsCaseInsens:
+        result := (Match = coContainsCaseInsens) =
+                  (StrPosIL(bu.Text, au.Text, bu.Len, au.Len) <> nil);
+      coGlob, coNotGlob:
+        result := Assigned(GlobBuffer) and ((Match = coGlob) =
+                  GlobBuffer(bu.Text, au.Text, bu.Len, au.Len, {ci=}false));
+      coGlobCaseInsens, coNotGlobCaseInsens:
+        result := Assigned(GlobBuffer) and ((Match = coGlobCaseInsens) =
+                  GlobBuffer(bu.Text, au.Text, bu.Len, au.Len, {ci=}true));
+    else
+      result := false; // paranoid
+    end;
+    TempUtf8Done(au);
+    TempUtf8Done(bu);
+  end;
 end;
 
 
@@ -11359,7 +11496,7 @@ begin
       end
       else if not dv^.GetObjectProp(CompKey, o, @CompKeyPrev) then
         continue;
-      if not SortMatch(CompFunc({%H-}o^, CompValue), CompMatch) then
+      if not EvaluateVariantExpression(CompFunc, {%H-}o^, CompValue, CompMatch) then
         continue;
     end;
     if CurrDict = nil then
@@ -12304,7 +12441,7 @@ var
   v: variant;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(expression), k, m, @v);
+  ParseVariantExpression(pointer(expression), k, m, @v);
   result := Objects(k, v, m, nil);
 end;
 
@@ -12314,7 +12451,7 @@ var
   k: RawUtf8;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(expression), k, m, nil);
+  ParseVariantExpression(pointer(expression), k, m, nil);
   result := Objects(k, value, m, nil);
 end;
 
@@ -12910,9 +13047,9 @@ end;
 
 const
   // _CMP2SORT[] comparison of simple types - as copied to _VARDATACMP[]
-  _VARDATACMPNUM1: array[varEmpty..varDate] of byte = (
+  _VARDATACMPNUM1: array[varEmpty .. varDate] of byte = (
     1, 1, 2, 3, 4, 5, 6, 7);
-  _VARDATACMPNUM2: array[varShortInt..varWord64] of byte = (
+  _VARDATACMPNUM2: array[varShortInt .. varWord64] of byte = (
     8, 9, 10, 11, 12, 13);
 
 procedure InitializeUnit;
@@ -12931,19 +13068,19 @@ begin
   DocVariantVType := vt;
   SetJsonVTypes(@JSON_, vt, @JSON_VTYPE);
   PCardinal(@DV_FAST[dvUndefined])^ := vt;
-  PCardinal(@DV_FAST[dvArray])^ := vt;
-  PCardinal(@DV_FAST[dvObject])^ := vt;
+  PCardinal(@DV_FAST[dvArray])^     := vt;
+  PCardinal(@DV_FAST[dvObject])^    := vt;
   assert({%H-}SynVariantTypes[0].VarType = vt);
   PDocVariantData(@DV_FAST[dvUndefined])^.VOptions := JSON_FAST;
-  PDocVariantData(@DV_FAST[dvArray])^.VOptions := JSON_FAST + [dvoIsArray];
-  PDocVariantData(@DV_FAST[dvObject])^.VOptions := JSON_FAST + [dvoIsObject];
+  PDocVariantData(@DV_FAST[dvArray    ])^.VOptions := JSON_FAST + [dvoIsArray];
+  PDocVariantData(@DV_FAST[dvObject   ])^.VOptions := JSON_FAST + [dvoIsObject];
   // FPC allows to define variables with absolute JSON_[...] but Delphi doesn't
-  JSON_FAST_STRICT := JSON_[mFastStrict];
-  JSON_FAST_EXTENDED := JSON_[mFastExtended];
+  JSON_FAST_STRICT         := JSON_[mFastStrict];
+  JSON_FAST_EXTENDED       := JSON_[mFastExtended];
   JSON_FAST_EXTENDEDINTERN := JSON_[mFastExtendedIntern];
-  JSON_NAMEVALUE := PDocVariantOptionsBool(@JSON_[mNameValue])^;
-  JSON_NAMEVALUEINTERN := PDocVariantOptionsBool(@JSON_[mNameValueIntern])^;
-  JSON_OPTIONS := PDocVariantOptionsBool(@JSON_[mDefault])^;
+  JSON_NAMEVALUE           := PDocVariantOptionsBool(@JSON_[mNameValue])^;
+  JSON_NAMEVALUEINTERN     := PDocVariantOptionsBool(@JSON_[mNameValueIntern])^;
+  JSON_OPTIONS             := PDocVariantOptionsBool(@JSON_[mDefault])^;
   // redirect to the feature complete variant wrapper functions
   VariantClearSeveral     := @_VariantClearSeveral;
   _VariantSaveJson        := @__VariantSaveJson;
@@ -12959,10 +13096,10 @@ begin
     for i := low(_VARDATACMPNUM2) to high(_VARDATACMPNUM2) do
       _VARDATACMP[i, ins] := _VARDATACMPNUM2[i];
   end;
-  _VARDATACMP[varString, false] := 15;
-  _VARDATACMP[varString, true]  := 16;
-  _VARDATACMP[varOleStr, false] := 17;
-  _VARDATACMP[varOleStr, true]  := 18;
+  _VARDATACMP[varString, false]  := 15;
+  _VARDATACMP[varString, true]   := 16;
+  _VARDATACMP[varOleStr, false]  := 17;
+  _VARDATACMP[varOleStr, true]   := 18;
   {$ifdef HASVARUSTRING}
   _VARDATACMP[varUString, false] := 17;
   _VARDATACMP[varUString, true]  := 18;

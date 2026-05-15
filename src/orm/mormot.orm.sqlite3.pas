@@ -544,7 +544,7 @@ begin
     modname := module.ModuleName;
   if (module = nil) or
      (module.DB.DB <> DB) or
-     (StrIComp(pointer(modname), argv[0]) <> 0) then
+     not StrIEqual(pointer(modname), argv[0]) then
   begin
     Notify('vt_Create(%<>%)', [argv[0], modname]);
     result := SQLITE_ERROR;
@@ -963,7 +963,7 @@ begin
   if FilePath <> '' then
     // if a file path is specified (e.g. by SynDBExplorer) -> always use this
     result := inherited FileName(aTableName)
-  else if SameText(DB.FileName, SQLITE_MEMORY_DATABASE_NAME) then
+  else if SameTextS(DB.FileName, SQLITE_MEMORY_DATABASE_NAME) then
     // in-memory databases virtual tables should remain in memory
     result := ''
   else
@@ -1153,7 +1153,7 @@ begin
     if fShardOffset < 0 then
       fShardOffset := num;
     dec(num, fShardOffset);
-    if not SameText(DBFileName(num), db[f].Name) then
+    if not SameTextS(DBFileName(num), db[f].Name) then
       EOrmException.RaiseUtf8('%.InitShards(%)', [self, db[f].Name]);
     if f = high(db) then
       fInitShardsIsLast := true;
