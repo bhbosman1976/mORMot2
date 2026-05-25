@@ -691,10 +691,8 @@ type
     {$ifdef OSWINDOWS}
     fNoEnvironmentVariable: boolean;
     {$endif OSWINDOWS}
-    {$ifndef NOEXCEPTIONINTERCEPT}
     fHandleExceptions, fExceptionIgnoreLibrary: boolean;
     fOnBeforeException: TOnBeforeException;
-    {$endif NOEXCEPTIONINTERCEPT}
     fAutoFlushTimeOut: cardinal;
     fArchiveAfterDays: integer;
     fArchivePath: TFileName;
@@ -787,7 +785,6 @@ type
     // filtering of all exceptions
     property ExceptionIgnore: TSynList
       read fExceptionIgnore;
-    {$ifndef NOEXCEPTIONINTERCEPT}
     /// allow to (temporarly) ignore exceptions in the current thread
     // - this property will affect all TSynLogFamily instances, for the
     // current thread
@@ -795,10 +792,12 @@ type
     // to a third-party service, or during a particular process
     // - see also ExceptionIgnore property - which is also checked in addition
     // to this flag
+    // - do nothing if exceptions are not intercepted on this target platform
     property ExceptionIgnoreCurrentThread: boolean
       index tiExceptionIgnore read GetCurrentThreadFlag write SetCurrentThreadFlag;
     /// set true will log exceptions only from the main executable, not from library
     // - will follow IsMainExecutable() result
+    // - do nothing if exceptions are not intercepted on this target platform
     property ExceptionIgnoreLibrary: boolean
       read fExceptionIgnoreLibrary write fExceptionIgnoreLibrary;
     /// allow to temporarly avoid logging in the current thread
@@ -810,6 +809,7 @@ type
     // ! finally
     // !   TSynLog.Family.DisableCurrentThread := false;
     // ! end;
+    // - do nothing if exceptions are not intercepted on this target platform
     property DisableCurrentThread: boolean
       index tiTemporaryDisable read GetCurrentThreadFlag write SetCurrentThreadFlag;
     /// you can let exceptions be ignored from a callback
@@ -817,9 +817,9 @@ type
     // - execution of this event handler is protected via the logs global lock
     // - may be handy e.g. when working with code triggerring a lot of
     // exceptions (e.g. Indy), where ExceptionIgnore could be refined
+    // - do nothing if exceptions are not intercepted on this target platform
     property OnBeforeException: TOnBeforeException
       read fOnBeforeException write fOnBeforeException;
-    {$endif NOEXCEPTIONINTERCEPT}
     /// event called to archive - i.e. compress and delete - .log files
     // - called by TSynLogFamily.Destroy with files older than ArchiveAfterDays,
     // or by TSynLog.PerformRotation when some rotated files need to be deleted
@@ -1488,6 +1488,9 @@ var
 const
   ptIdentifiedInOnFile = ptIdentifiedInOneFile;
 {$endif PUREMORMOT2}
+
+// mostly published for regression tests
+procedure CleanThreadName(var name: RawUtf8);
 
 
 { ************** High-Level Logs and Exception Related Features }
@@ -5354,34 +5357,11 @@ begin
   for i := 1 to length(name) do
     if name[i] < ' ' then
       name[i] := ' '; // ensure on same line
-  name := TrimU(StringReplaceAll(name, [
-    'TSqlRest',        '',
-    'TRest',           '',
-    'TSql',            '',
-    'TSQLRest',        '',
-    'TSQL',            '',
-    'TOrmRest',        '',
-    'TOrm',            '',
-    'TWebSocket',      'WS',
-    'TServiceFactory', 'SF',
-    'TSyn',            '',
-    'Thread',          '',
-    'Process',         '',
-    'Background',      'Bgd',
-    'WebSocket',       'WS',
-    'Asynch',          'A',
-    'Async',           'A',
-    'Parallel',        'Prl',
-    'Timer',           'Tmr',
-    'Thread',          'Thd',
-    'Database',        'DB',
-    'Backup',          'Bak',
-    'Server',          'Srv',
-    'Client',          'Cli',
-    'synopse',         'syn',
-    'memory',          'mem',
-    '  ',              ' '
-    ]));
+  name := TrimU(StringReplaceCsv(name,
+    'TSqlRest=,TRest=,TSql=,TSQLRest=,TSQL=,TOrmRest=,TOrm=,TWebSocket=WS,' +
+    'TServiceFactory=SF,TSyn=,Thread=,Process=,Background=Bgd,WebSocket=WS,' +
+    'Asynch=A,Async=A,Parallel=Prl,Timer=Tmr,Thread=Thd,Database=DB,Backup=Bak,' +
+    'Server=Srv,Client=Cli,synopse=syn,memory=mem,  = '));
 end;
 
 procedure _SetThreadName(ThreadID: TThreadID; const Format: RawUtf8;

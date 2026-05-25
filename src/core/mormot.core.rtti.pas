@@ -2620,7 +2620,7 @@ type
     // initialize from fProps, with no associated RTTI - and calls DoRegister()
     // - creates a "fake" rkRecord/rkDynArray/rkArray PRttiInfo (TypeName may be '')
     procedure NoRttiSetAndRegister(ParserType: TRttiParserType;
-      const TypeName: RawUtf8; NoRegister: boolean = false);
+      TypeName: RawUtf8; NoRegister: boolean = false);
     // called by ValueFinalize() for dynamic array defined from text
     procedure NoRttiArrayFinalize(Data: PAnsiChar);
     /// initialize this Value process for Parser and Parser Complex kinds
@@ -7690,11 +7690,14 @@ const
   _TypeNames: PAnsiChar = // fast brute force search in L1 cache
     #7'RawUtf8'#5'array'#6'record'#5'TDate'#5'TGuid'#6'PtrInt'#7'PtrUInt' +
     {$ifdef FPC} #6'string'#7'integer'#8'cardinal' {$else}
-                 #7'longint'#8'longword' {$endif} + #9'TFileName';
-  _TypeParser: array[0 .. 10 {$ifdef FPC} + 1 {$endif} ] of TRttiParserType = (
+                 #7'longint'#8'longword' {$endif} + #9'TFileName' +
+    #7'RawBlob'#7'SpiUtf8' +
+    {$ifdef UNICODE} #13'UnicodeString' {$else} #10'AnsiString' {$endif};
+  _TypeParser: array[0 .. 13 {$ifdef FPC} + 1 {$endif} ] of TRttiParserType = (
     ptNone, ptRawUtf8, ptArray, ptRecord, ptDateTime, ptGuid,
     {$ifdef CPU64} ptInt64, ptQWord, {$else} ptInteger, ptCardinal, {$endif}
-    {$ifdef FPC} ptString, {$endif} ptInteger, ptCardinal, ptString);
+    {$ifdef FPC} ptString, {$endif} ptInteger, ptCardinal, ptString,
+    ptRawByteString, ptRawUtf8, ptString);
 
 function KnownTypeName(Name: PUtf8Char; NameLen: PtrInt): TRttiParserType;
   {$ifdef HASINLINE}inline;{$endif}
@@ -7707,7 +7710,6 @@ end;
 function GuessTypeInfoToStandardParserType(Info: PRttiInfo;
   Complex: PRttiParserComplexType): TRttiParserType;
 var
-  c: TRttiParserComplexType;
   ndx: PtrInt;
   cp: integer;
 begin                                            
@@ -7724,142 +7726,136 @@ begin
     if not (result in ptComplexTypes) then
       exit;
   end;
-  for c := succ(low(c)) to high(c) do
-    if PTC_INFO[c] = Info then // complex ORM types as set by mormot.orm.base
+  ndx := PtrUIntScanIndex(@PTC_INFO, length(PTC_INFO), PtrUInt(Info));
+  if ndx >= 0 then
+  begin
+    result := PTC_PT[TRttiParserComplexType(ndx)];
+    if result <> ptNone then
     begin
-      result := PTC_PT[c];
-      if result <> ptNone then
-      begin
-        if Complex <> nil then
-          Complex^ := c;
-        exit;
-      end;
-      break;
+      if Complex <> nil then
+        Complex^ := TRttiParserComplexType(ndx);
+      exit;
     end;
+  end;
   // array/record keywords, integer/cardinal FPC types, T*ID pattern
   result := KnownTypeName(@Info^.RawName[1], ord(Info^.RawName[0]));
-  if result <> ptNone then
-    exit; // found by name
-  if (Complex <> nil) and
-     (Info^.Kind = rkInt64) and
-     (Info^.RawName[1] = 'T') and
-     (PCardinal(@Info^.RawName[ord(Info^.RawName[0]) - 1])^ and $dfdf = _ID16) then
-  begin
-    result := ptOrm;
-    Complex^ := pctSpecificClassID; // T...ID pattern in name
-    exit;
-  end;
-  // fallback to the closed known type, using RTTI
-  case Info^.Kind of
-  {$ifdef FPC}
-    rkLStringOld,
-  {$endif FPC}
-    rkLString: // PT_INFO[ptRawUtf8/ptRawJson] have been found above
-      begin
-        cp := Info^.AnsiStringCodePage;
-        if cp = CP_UTF8 then
-          result := ptRawUtf8
-        else if cp = CP_WINANSI then
-          result := ptWinAnsi
-        else if cp >= CP_RAWBLOB then
-          result := ptRawByteString
-        {$ifndef UNICODE}
-        else if (cp = CP_ACP) or
-                (cp = Unicode_CodePage) then
-          result := ptString
-        {$endif UNICODE}
-        else
-          result := ptRawUtf8; // fallback to UTF-8 string
-      end;
-    rkWString:
-      result := ptWideString;
-  {$ifdef HASVARUSTRING}
-    rkUString:
-      result := ptUnicodeString;
-  {$endif HASVARUSTRING}
-  {$ifdef FPC_OR_UNICODE}
-    {$ifdef UNICODE}
-    rkProcedure,
-    {$endif UNICODE}
-    rkClassRef,
-    rkPointer:
-      result := ptPtrInt;
-  {$endif FPC_OR_UNICODE}
-    rkVariant:
-      result := ptVariant;
-    rkArray:
-      result := ptArray;
-    rkDynArray:
-      result := ptDynArray;
-    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
-    rkRecord:
-      result := ptRecord;
-    rkChar:
-      result := ptByte;
-    rkWChar:
-      result := ptWord;
-    rkMethod:
-      result := {$ifdef CPU64} ptHash128 {$else} ptInt64 {$endif}; // 2*pointer
-    rkInterface:
-      result := ptInterface;
-    rkInteger:
-      case Info^.RttiOrd of
-        roSByte,
-        roUByte:
-          result := ptByte;
-        roSWord,
-        roUWord:
-          result := ptWord;
-        roSLong:
-          result := ptInteger;
-        roULong:
-          result := ptCardinal;
-      {$ifdef FPC_NEWRTTI}
-        roSQWord:
+  if result = ptNone then
+    case Info^.Kind of // fallback to the closed known type, using RTTI
+    {$ifdef FPC}
+      rkLStringOld,
+    {$endif FPC}
+      rkLString: // PT_INFO[ptRawUtf8/ptRawJson] have been found above
+        begin
+          cp := Info^.AnsiStringCodePage;
+          if cp = CP_UTF8 then
+            result := ptRawUtf8
+          else if cp = CP_WINANSI then
+            result := ptWinAnsi
+          else if cp >= CP_RAWBLOB then
+            result := ptRawByteString
+          {$ifndef UNICODE}
+          else if (cp = CP_ACP) or
+                  (cp = Unicode_CodePage) then
+            result := ptString
+          {$endif UNICODE}
+          else
+            result := ptRawUtf8; // fallback to UTF-8 string
+        end;
+      rkWString:
+        result := ptWideString;
+    {$ifdef HASVARUSTRING}
+      rkUString:
+        result := ptUnicodeString;
+    {$endif HASVARUSTRING}
+    {$ifdef FPC_OR_UNICODE}
+      {$ifdef UNICODE}
+      rkProcedure,
+      {$endif UNICODE}
+      rkClassRef,
+      rkPointer:
+        result := ptPtrInt;
+    {$endif FPC_OR_UNICODE}
+      rkVariant:
+        result := ptVariant;
+      rkArray:
+        result := ptArray;
+      rkDynArray:
+        result := ptDynArray;
+      {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
+      rkRecord:
+        result := ptRecord;
+      rkChar:
+        result := ptByte;
+      rkWChar:
+        result := ptWord;
+      rkMethod:
+        result := {$ifdef CPU64} ptHash128 {$else} ptInt64 {$endif}; // 2*pointer
+      rkInterface:
+        result := ptInterface;
+      rkInteger:
+        case Info^.RttiOrd of
+          roSByte,
+          roUByte:
+            result := ptByte;
+          roSWord,
+          roUWord:
+            result := ptWord;
+          roSLong:
+            result := ptInteger;
+          roULong:
+            result := ptCardinal;
+        {$ifdef FPC_NEWRTTI}
+          roSQWord:
+            result := ptInt64;
+          roUQWord:
+            result := ptQWord;
+        {$endif FPC_NEWRTTI}
+        end;
+      rkInt64:
+        if (Complex <> nil) and
+           (Info^.RawName[1] = 'T') and
+           (PCardinal(@Info^.RawName[ord(Info^.RawName[0]) - 1])^ and $dfdf = _ID16) then
+        begin
+          result := ptOrm;
+          Complex^ := pctSpecificClassID; // T...ID pattern in name
+        end
+      {$ifdef ISDELPHI}
+        else if Info^.IsQWord then
+          result := ptQWord
+      {$endif ISDELPHI}
+        else // PT_INFO[ptOrm/ptTimeLog/ptUnixTime] have been found above
           result := ptInt64;
-        roUQWord:
-          result := ptQWord;
-      {$endif FPC_NEWRTTI}
-      end;
-    rkInt64:
-    {$ifdef ISDELPHI}
-      if Info^.IsQWord then
-        result := ptQWord
-      else
-    {$endif ISDELPHI}
-      // PT_INFO[ptOrm/ptTimeLog/ptUnixTime] have been found above
-      result := ptInt64;
-  {$ifdef FPC}
-    rkQWord:
-      result := ptQWord;
-    rkBool:
-      result := ptBoolean;
-  {$endif FPC}
-    rkEnumeration:
-    {$ifdef ISDELPHI}
-      if Info^.IsBoolean then
-        result := ptBoolean
-      else
-    {$endif ISDELPHI}
-        result := ptEnumeration;
-    rkSet:
-      result := ptSet;
-    rkClass:
-      result := ptClass;
-    rkFloat:
-      case Info^.RttiFloat of
-        rfSingle:
-          result := ptSingle;
-        rfDouble:
-          // TDateTime/TDateTimeMS/TDate have been found above
-          result := ptDouble;
-        rfCurr:
-          result := ptCurrency;
-        rfExtended:
-          result := ptExtended;
-        // rfComp: not implemented yet
-      end;
-  end;
+    {$ifdef FPC}
+      rkQWord:
+        result := ptQWord;
+      rkBool:
+        result := ptBoolean;
+    {$endif FPC}
+      rkEnumeration:
+      {$ifdef ISDELPHI}
+        if Info^.IsBoolean then
+          result := ptBoolean
+        else
+      {$endif ISDELPHI}
+          result := ptEnumeration;
+      rkSet:
+        result := ptSet;
+      rkClass:
+        result := ptClass;
+      rkFloat:
+        case Info^.RttiFloat of
+          rfSingle:
+            result := ptSingle;
+          rfDouble:
+            // TDateTime/TDateTimeMS/TDate have been found above
+            result := ptDouble;
+          rfCurr:
+            result := ptCurrency;
+          rfExtended:
+            result := ptExtended;
+          // rfComp: not implemented yet
+        end;
+    end;
 end;
 
 function ItemSizeToDynArrayKind(size: integer): TRttiParserType;
@@ -9181,11 +9177,16 @@ begin
   SetPropsFromText(P, eeNothing, {NoRegister=}true);
 end;
 
+var
+  _RttiCount: integer; // genuine internal type name
+
 procedure TRttiCustom.NoRttiSetAndRegister(ParserType: TRttiParserType;
-  const TypeName: RawUtf8; NoRegister: boolean);
+  TypeName: RawUtf8; NoRegister: boolean);
 var
   def: PTypeData;
 begin
+  if TypeName = '' then
+    Make(['#', InterlockedIncrement(_RttiCount)], TypeName); // not void
   if (fNoRttiInfo <> nil) or
      not (rcfWithoutRtti in fFlags) then
     ERttiException.RaiseUtf8('Unexpected %.NoRttiSetAndRegister(%)',
@@ -9240,10 +9241,7 @@ begin
   SetLength(fNoRttiInfo, length(TypeName) + 64); // all filled with zeros
   fCache.Info := pointer(fNoRttiInfo);
   fCache.Info.Kind := fCache.Kind;
-  if TypeName = '' then // we need some name to search for
-    fCache.Info.RawName := PointerToHexShort(self)
-  else
-    fCache.Info.RawName := TypeName;
+  fCache.Info.RawName := TypeName;
   def := GetTypeData(fCache.Info); // points after Info.Kind + Info.RawName
   case fCache.Kind of // cross-platform minimal RTTI field(s)
     rkRecord:
@@ -9695,9 +9693,6 @@ begin
   result := self;
 end;
 
-var
-  RttiArrayCount: integer;
-
 function TRttiCustom.SetBinaryType(BinSize: integer): TRttiCustom;
 begin
   if self <> nil then
@@ -9728,6 +9723,7 @@ procedure TRttiCustom.SetPropsFromText(var P: PUtf8Char;
 var
   prop: TIntegerDynArray;
   propcount: integer;
+  noreg: boolean;
   propname, typname, atypname: RawUtf8;
   aname: PUtf8Char;
   ee: TRttiCustomFromTextExpectedEnd;
@@ -9753,8 +9749,7 @@ begin
         break;
     end
     else if not GetNextFieldProp(P, propname) then
-      // expect regular Object Pascal identifier (i.e. 0..9,a..z,A..Z,_)
-      break;
+      break; // expect regular Object Pascal identifier (i.e. 0..9,a..z,A..Z,_)
     if P^ = ',' then
     begin
       // a,'b,b',c: integer
@@ -9799,25 +9794,26 @@ begin
       c := Rtti.RegisterTypeFromName(typname, @pt);
       if c = nil then
       case pt of
-        ptArray:
-          // array of ...
+        ptArray: // array of ...
           begin
-            if IdemPChar(P, 'OF') then
+            if PCardinal(P)^ and $ffdfdf = ord('O') + ord('F') shl 8 + 32 shl 16 then
             begin
               // array of ....   or   array of record ... end
-              P := GotoNextNotSpace(P + 2);
-              if not GetNextFieldProp(P, atypname) or
-                 (P = nil) then
-                ERttiException.RaiseUtf8('Missing % array field type', [typname]);
-              FormatUtf8('[%%]', [atypname, RttiArrayCount], typname);
-              LockedInc32(@RttiArrayCount); // ensure genuine type name
-              ac := Rtti.RegisterTypeFromName(atypname, @apt);
-              if ac = nil then
-                if apt = ptRecord then
-                  // array of record ... end
-                  ee := eeEndKeyWord
+              typname := '';
+              P := GotoNextNotSpace(P + 3);
+              if not GetNextFieldProp(P, atypname) then
+                P := nil;
+              if P <> nil then
+              begin
+                ac := Rtti.RegisterTypeFromName(atypname, @apt);
+                if ac = nil then
+                  if apt = ptRecord then
+                    ee := eeEndKeyWord // array of record ... end
+                  else
+                    P := nil
                 else
-                  P := nil;
+                  Join(['[', ac.Name, ']'], typname); // normalize for reuse
+              end;
             end
             else
               P := nil;
@@ -9826,8 +9822,7 @@ begin
                 '"array of record" or "array of KnownType" for %', [propname]);
             pt := ptDynArray;
           end;
-        ptRecord:
-          // record ... end
+        ptRecord: // record ... end
           ee := eeEndKeyWord;
         ptNone:
           // unknown type name -> try from TArray<*>/T*DynArray/T*s patterns
@@ -9837,11 +9832,15 @@ begin
             begin
               // try generic syntax TArray<##>
               inc(P);
-              if GetNextFieldProp(P, typname) and
+              if GetNextFieldProp(P, atypname) and
                  (P^ = '>') then
               begin
+                // normalize as array of KnownType
                 inc(P);
-                ac := Rtti.RegisterTypeFromName(typname);
+                ac := Rtti.RegisterTypeFromName(atypname);
+                if ac = nil then
+                  ERttiException.RaiseUtf8('Unknown %: TArray<%>', [propname, atypname]);
+               Join(['[', ac.Name, ']'], typname);
               end;
             end
             else
@@ -9854,7 +9853,7 @@ begin
                   IdemPropName('ObjArray', aname + alen - 8, 8)) then
                 dec(alen, 8)
               else if (alen > 3) and
-                      (aname[aLen] in ['s', 'S']) then // e.g. TBytes
+                      (aname[aLen - 1] in ['s', 'S']) then // e.g. TBytes
                 dec(alen)
               else
                 alen := 0;
@@ -9887,23 +9886,29 @@ begin
       if NoRegister then
         PtrArrayAdd(Rtti.fOwnedRtti, nested);
       if pt = ptRecord then
-        // rec: record .. end  or  rec: { ... }
-        c := nested
+        c := nested   // rec: record .. end  or  rec: { ... }
       else
-        // arr: [ ... ]   or  arr: array of record .. end
-        ac := nested;
+        ac := nested; // arr: [ ... ]   or  arr: array of record .. end
     end;
     if ac <> nil then
     begin
+      // manual "array of" type registration
       if (c <> nil) or
          (pt <> ptDynArray) then // paranoid
         ERttiException.RaiseUtf8('Unexpected array % %', [c, ToText(pt)^]);
-      c := Rtti.GlobalClass.Create;
-      c.FromRtti(nil);
-      c.fArrayRtti := ac; // before NoRttiSetAndRegister()
-      c.NoRttiSetAndRegister(ptDynArray, typname, NoRegister);
-      if NoRegister then
-        PtrArrayAdd(Rtti.fOwnedRtti, c);
+      if (typname <> '') and
+         (typname[1] = '[') then
+        c := Rtti.RegisterTypeFromName(typname); // e.g. [RawUtf8] [integer]
+      if c = nil then
+      begin
+        c := Rtti.GlobalClass.Create;
+        c.FromRtti(nil);
+        c.fArrayRtti := ac; // before NoRttiSetAndRegister()
+        noreg := NoRegister or (typname = ''); // transient type definition
+        c.NoRttiSetAndRegister(ptDynArray, typname, noreg);
+        if noreg then
+          PtrArrayAdd(Rtti.fOwnedRtti, c);
+      end;
     end;
     // set type for all prop[]
     for i := 0 to propcount - 1 do

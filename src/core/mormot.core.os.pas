@@ -1858,15 +1858,17 @@ type
     sbiBatteryChemistry,
     sbiOem
   );
-
   /// the text fields stored by GetSmbios/DecodeSmbios functions
   TSmbiosBasicInfos = array[TSmbiosBasicInfo] of RawUtf8;
+
+/// check if a string value should be ignored when parsed e.g. from SMBIOS fields
+function IsDefaultString(p: pointer; l: PtrInt): boolean;
 
 /// decode basic SMBIOS information as text from a TRawSmbiosInfo binary blob
 // - see DecodeSmbiosInfo() in mormot.core.perf.pas for a more complete decoder
 // - returns the total size of DMI/SMBIOS information in raw.data (may be lower)
 // - will also adjust raw.Length and truncate raw.Data to the actual useful size
-function DecodeSmbios(var raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): PtrInt;
+function DecodeSmbios(var raw: TRawSmbiosInfo; var info: TSmbiosBasicInfos): PtrInt;
 
 // some global definitions for proper caching and inlining of GetSmbios()
 procedure ComputeGetSmbios;
@@ -3422,6 +3424,12 @@ function GetFileNameWithoutExtOrPath(const FileName: TFileName): RawUtf8;
 // - like calling GetFileNameWithoutExt() and AnsiCompareFileName()
 function SortDynArrayFileName(const A, B): integer;
 
+/// check if two TFileName are equal, checking backward from the last bytes
+// - most filenames have similar paths, but unique file names
+// - warning: a and b should be <> '' - to be used e.g. inlined in a loop
+function EqualFileNameNotNull(const a, b: TFileName): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
 {$ifdef ISDELPHI20062007}
 /// compatibility function defined to avoid hints on buggy Delphi 2006/2007
 function AnsiCompareFileName(const S1, S2 : TFileName): integer;
@@ -3481,7 +3489,7 @@ function DirectoryDeleteAll(const Directory: TFileName): boolean;
 function DirectoryDeleteOlderFiles(const Directory: TFileName;
   TimePeriod: TDateTime; const Mask: TFileName = FILES_ALL;
   Recursive: boolean = false; TotalSize: PInt64 = nil;
-  DeleteFolders: boolean = false): boolean;
+  DeleteFolders: boolean = false; DeletedCount: PInteger = nil): boolean;
 
 type
   /// recursively search a folder and its nested sub-folders via methods
@@ -7972,6 +7980,23 @@ begin
   _toutf8(GetFileNameWithoutExt(ExtractFileName(FileName)), result);
 end;
 
+function EqualFileNameNotNull(const a, b: TFileName): boolean;
+var
+  l: PtrInt;
+begin
+  result := false;
+  l := PStrLen(PAnsiChar(pointer(b)) - _STRLEN)^;
+  if PStrLen(PAnsiChar(pointer(a)) - _STRLEN)^ <> l then
+    exit;
+  l := l * SizeOf(Char); // from WideChar to bytes (no-op for AnsiChar)
+  repeat
+    dec(l, SizeOf(TStrLen)); // backwards - may compare Length header bytes
+    if PStrLen(@PByteArray(a)[l])^ <> PStrLen(@PByteArray(b)[l])^ then
+      exit;
+  until l <= 0;
+  result := true;
+end;
+
 function PosExtString(Str: PChar): PChar; // work on AnsiString + UnicodeString
 var
   i: PtrInt;
@@ -8053,7 +8078,7 @@ type // state machine for DirectoryDeleteOlderFiles() / DirectoryDeleteAll()
 function TDirectoryDelete.OnFile(const FileInfo: TSearchRec;
   const FullFileName: TFileName): boolean;
 begin
-  if (fDeleteBefore = 0) or
+  if (PInt64(@fDeleteBefore)^ = 0) or
      (SearchRecToDateTimeUtc(FileInfo) < fDeleteBefore) then
     if DeleteFile(FullFileName) then
     begin
@@ -8097,7 +8122,7 @@ end;
 
 function DirectoryDeleteOlderFiles(const Directory: TFileName;
   TimePeriod: TDateTime; const Mask: TFileName; Recursive: boolean;
-  TotalSize: PInt64; DeleteFolders: boolean): boolean;
+  TotalSize: PInt64; DeleteFolders: boolean; DeletedCount: PInteger): boolean;
 var
   browse: TDirectoryDelete;
 begin
@@ -8109,6 +8134,8 @@ begin
     browse.Run;
     if TotalSize <> nil then
       TotalSize^ := browse.fTotalSize;
+    if DeletedCount <> nil then
+      DeletedCount^ := browse.fDeletedCount;
     result := not browse.fDeleteError;
   finally
     browse.Free;
@@ -10207,20 +10234,28 @@ begin
   UuidToText(uid, dest);
 end;
 
-function DecodeSmbios(var raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): PtrInt;
+const
+  TO_IGNORE: TShort15 = 'Default string';
+
+function IsDefaultString(p: pointer; l: PtrInt): boolean;
+begin
+  result := PropNameEquals(@TO_IGNORE[1], p, 14, l); // properly inlined on FPC
+end;
+
+function DecodeSmbios(var raw: TRawSmbiosInfo; var info: TSmbiosBasicInfos): PtrInt;
 var
-  lines: array[byte] of TSmbiosBasicInfo; // single pass efficient decoding
+  temp: array[byte] of TSmbiosBasicInfo;
   len, trimright: PtrInt;
   cur: ^TSmbiosBasicInfo;
   s, sEnd: PByteArray;
-begin
+begin // single pass efficient decoding
   result := 0;
   Finalize(info);
   s := pointer(raw.Data);
   if s = nil then
     exit;
   sEnd := @s[length(raw.Data)];
-  FillCharFast(lines, SizeOf(lines), ord(sbiUndefined));
+  FillCharFast(temp, SizeOf(temp), ord(sbiUndefined)); // fast lookup
   repeat
     if (s[0] = 127) or // type (127=EOT)
        (s[1] < 4) or   // length
@@ -10232,9 +10267,9 @@ begin
     case s[0] of
       0: // Bios Information (type 0)
         begin
-          lines[s[4]] := sbiBiosVendor;
-          lines[s[5]] := sbiBiosVersion;
-          lines[s[8]] := sbiBiosDate;
+          temp[s[4]] := sbiBiosVendor;
+          temp[s[5]] := sbiBiosVersion;
+          temp[s[8]] := sbiBiosDate;
           if s[1] >= $17 then // 2.4+
           begin
             _fmt('%d.%d', [s[$14], s[$15]], info[sbiBiosRelease]);
@@ -10243,56 +10278,67 @@ begin
         end;
       1: // System Information (type 1)
         begin
-          lines[s[4]] := sbiManufacturer;
-          lines[s[5]] := sbiProductName;
-          lines[s[6]] := sbiVersion;
-          lines[s[7]] := sbiSerial;
+          temp[s[4]] := sbiManufacturer;
+          temp[s[5]] := sbiProductName;
+          temp[s[6]] := sbiVersion;
+          temp[s[7]] := sbiSerial;
           if s[1] >= $18 then // 2.1+
           begin
             DecodeSmbiosUuid(@s[8], info[sbiUuid], raw);
             if s[1] >= $1a then // 2.4+
             begin
-              lines[s[$19]] := sbiSku;
-              lines[s[$1a]] := sbiFamily;
+              temp[s[$19]] := sbiSku;
+              temp[s[$1a]] := sbiFamily;
             end;
           end;
         end;
       2: // Baseboard (or Module) Information (type 2) - keep only the first
         begin
-          lines[s[4]] := sbiBoardManufacturer;
-          lines[s[5]] := sbiBoardProductName;
-          lines[s[6]] := sbiBoardVersion;
-          lines[s[7]] := sbiBoardSerial;
-          lines[s[8]] := sbiBoardAssetTag;
-          lines[s[10]] := sbiBoardLocation;
+          temp[s[4]] := sbiBoardManufacturer;
+          temp[s[5]] := sbiBoardProductName;
+          temp[s[6]] := sbiBoardVersion;
+          temp[s[7]] := sbiBoardSerial;
+          temp[s[8]] := sbiBoardAssetTag;
+          temp[s[10]] := sbiBoardLocation;
         end;
       4: // Processor Information (type 4) - keep only the first
         begin
-          lines[s[7]] := sbiCpuManufacturer;
-          lines[s[$10]] := sbiCpuVersion;
+          temp[s[7]] := sbiCpuManufacturer;
+          temp[s[$10]] := sbiCpuVersion;
           if s[1] >= $22 then // 2.3+
           begin
-            lines[s[$20]] := sbiCpuSerial;
-            lines[s[$21]] := sbiCpuAssetTag;
-            lines[s[$22]] := sbiCpuPartNumber;
+            temp[s[$20]] := sbiCpuSerial;
+            temp[s[$21]] := sbiCpuAssetTag;
+            temp[s[$22]] := sbiCpuPartNumber;
           end;
         end;
-      11: // OEM Strings (Type 11) - keep only the first
-        if s[4] <> 0 then
-          lines[1] := sbiOem; // e.g. 'vboxVer_6.1.36'
+      11: // OEM Strings (Type 11) are arrays
+        begin
+          s := @s[s[1]]; // e.g. 'vboxVer_6.1.36'
+          repeat
+            len := StrLen(s);
+            if (len <> 0) and
+               (info[sbiOem] = '') and // keep only the first
+               not IsDefaultString(s, len) then
+              FastSetString(info[sbiOem], s, len);
+            s := @s[len + 1]; // next string
+          until s[0] = 0;
+          inc(PByte(s)); // go to next structure
+          continue;
+        end;
       22: // Portable Battery (type 22) - keep only the first
         if s[1] >= $0f then // 2.1+
         begin
-          lines[s[4]] := sbiBatteryLocation;
-          lines[s[5]] := sbiBatteryManufacturer;
-          lines[s[8]] := sbiBatteryName;
-          lines[s[$0e]] := sbiBatteryVersion;
+          temp[s[4]] := sbiBatteryLocation;
+          temp[s[5]] := sbiBatteryManufacturer;
+          temp[s[8]] := sbiBatteryName;
+          temp[s[$0e]] := sbiBatteryVersion;
           if s[1] >= $14 then // 2.2+
-            lines[s[$14]] := sbiBatteryChemistry;
+            temp[s[$14]] := sbiBatteryChemistry;
         end;
     end;
     s := @s[s[1]]; // go to string table
-    cur := @lines[1];
+    cur := @temp[1];
     if s[0] = 0 then
       inc(PByte(s)) // no string table
     else
@@ -10306,11 +10352,10 @@ begin
             while (trimright <> 0) and
                   (s[trimright - 1] <= ord(' ')) do
               dec(trimright);
-            FastSetString(info[cur^], s, trimright);
-            if info[cur^] = 'Default string' then
-              FastAssignNew(info[cur^]);
+            if not IsDefaultString(s, trimright) then
+              FastSetString(info[cur^], s, trimright);
           end;
-          cur^ := sbiUndefined; // reset slot in lines[]
+          cur^ := sbiUndefined; // reset slot in temp[]
         end;
         s := @s[len + 1]; // next string
         inc(cur);

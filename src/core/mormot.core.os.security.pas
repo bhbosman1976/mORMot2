@@ -1893,11 +1893,11 @@ function SecurityDescriptorToText(const sd: RawSecurityDescriptor;
 { ****************** Kerberos KeyTab File Support }
 
 const
-  ENCTYPE_DES3_CBC_SHA1              = $10;
-  ENCTYPE_AES128_CTS_HMAC_SHA1_96    = $11; // RFC 3962
-  ENCTYPE_AES256_CTS_HMAC_SHA1_96    = $12;
-  ENCTYPE_AES128_CTS_HMAC_SHA256_128 = $13; // RFC 8009 - libktb5 1.15+
-  ENCTYPE_AES256_CTS_HMAC_SHA384_192 = $14;
+  ENCTYPE_DES3_CBC_SHA1              = $10; // =16 (deprecated)
+  ENCTYPE_AES128_CTS_HMAC_SHA1_96    = $11; // =17 from RFC 3962
+  ENCTYPE_AES256_CTS_HMAC_SHA1_96    = $12; // =18
+  ENCTYPE_AES128_CTS_HMAC_SHA256_128 = $13; // =19 from RFC 8009 - libktb5 1.15+
+  ENCTYPE_AES256_CTS_HMAC_SHA384_192 = $14; // =20
 
   /// the standard KeyTab encoding names - do not change
   ENCTYPE_NAME: array[$11 .. $14] of RawUtf8 = (
@@ -2101,8 +2101,9 @@ procedure AsnEncOidItem(Value: PtrUInt; var Result: ShortString);
 /// create an ASN.1 ObjectID from '1.x.x.x.x' text
 function AsnEncOid(OidText: PUtf8Char): TAsnObject;
 
-/// encode the len of a ASN.1 binary item
-function AsnEncLen(Len: cardinal; dest: PHash128): PtrInt;
+/// encode the len of a ASN.1 binary item into a temporary 1..5 bytes buffer
+function AsnEncLen(Len: cardinal; var dest: TQWordRec): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// create an ASN.1 binary from the aggregation of several binaries
 function Asn(AsnType: integer;
@@ -2174,7 +2175,7 @@ procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject);
 procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject;
   AsnType: integer); overload;
 
-/// decode the len of a ASN.1 binary item
+/// decode the len of a ASN.1 binary item from a TAsnObject instance
 function AsnDecLen(var Start: integer; const Buffer: TAsnObject): cardinal;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -2190,7 +2191,7 @@ function AsnDecInt(var Start: integer; const Buffer: TAsnObject;
   AsnSize: integer): Int64;
 
 /// decode an OID ASN.1 value into human-readable text
-function AsnDecOid(Pos, EndPos: PtrInt; const Buffer: TAsnObject): RawUtf8;
+procedure AsnDecOid(Pos, EndPos: PtrInt; const Buffer: TAsnObject; var Dest: RawUtf8);
 
 /// decode an OCTSTR ASN.1 value into its raw bynary buffer
 // - returns plain input value if was not a valid ASN1_OCTSTR
@@ -6492,44 +6493,47 @@ begin
   FastSetRawByteString(result, @tmp[1], ord(tmp[0]));
 end;
 
-function AsnEncLen(Len: cardinal; dest: PHash128): PtrInt;
+function AsnEncLen(Len: cardinal; var dest: TQWordRec): PtrInt;
 begin
   if Len <= $7f then
   begin
-    dest^[0] := Len; // most simple case
+    dest.B[0] := Len; // most simple case
     result := 1;
-    exit;
-  end;
-  result := 0;
-  repeat
-    dest^[high(dest^) - result] := byte(Len); // prepare big endian storage
-    inc(result);
+  end
+  else if Len <= $ff then
+  begin
+    dest.B[0] := $81;
+    dest.B[1] := Len;
+    result := 2;
+  end
+  else if Len <= $ffff then
+  begin
+    dest.B[0] := $82;
+    dest.B[2] := Len;
     Len := Len shr 8;
-  until Len = 0;
-  dest^[0] := byte(result) or $80; // first byte is following bytes count + $80
-  inc(PByte(dest));
-  MoveFast(dest^[high(dest^) - result], dest^[0], result);
-  inc(result);
+    dest.B[1] := Len;
+    result := 3;
+  end
+  else
+  begin
+    dest.B[0] := $84;
+    PCardinal(@dest.B[1])^ := bswap32(Len); // seldom called
+    result := 5;
+  end;
 end;
 
 function AsnDecLen(var Start: integer; const Buffer: TAsnObject): cardinal;
 var
-  n: byte;
+  p: PByteArray;
 begin
-  result := cardinal(Buffer[Start]);
+  p := @PByteArray(Buffer)[Start - 1];
+  result := p^[0];
   inc(Start);
   if result <= $7f then
     exit;
-  n := result and $7f; // first byte is number of following bytes + $80
-  result := 0;
-  repeat
-    result := result shl 8;
-    inc(result, cardinal(Buffer[Start]));
-    if integer(result) < 0 then
-      exit; // 31-bit overflow: clearly invalid input
-    inc(Start);
-    dec(n);
-  until n = 0;
+  result := result and $7f; // $8x means x bytes of length
+  inc(Start, result);
+  result := bswapN(@p^[1], result);
 end;
 
 function AsnEncInt(Value: Int64): TAsnObject;
@@ -6618,14 +6622,14 @@ end;
 
 function Asn(AsnType: integer; const Content: array of TAsnObject): TAsnObject;
 var
-  tmp: THash128;
+  tmp: TQWordRec;
   i, len, al: PtrInt;
   p: PByte;
 begin
   len := ord(AsnType = ASN1_BITSTR);
   for i := 0 to high(Content) do
     inc(len, length(Content[i]));
-  al := AsnEncLen(len, @tmp);
+  al := AsnEncLen(len, tmp);
   p := FastNewRawByteString(result, al + len + 1);
   p^ := AsnType;         // type
   inc(p);
@@ -6646,12 +6650,12 @@ end;
 
 function AsnTyped(const Data: RawByteString; AsnType: integer): TAsnObject;
 var
-  tmp: THash128;
+  tmp: TQWordRec;
   len, al: PtrInt;
   p: PByte;
 begin
   len := ord(AsnType = ASN1_BITSTR) + length(Data);
-  al := AsnEncLen(len, @tmp);
+  al := AsnEncLen(len, tmp);
   p := FastNewRawByteString(result, al + len + 1);
   p^ := AsnType;         // type
   inc(p);
@@ -6797,7 +6801,7 @@ begin
   AsnAdd(Data, AsnTyped(Buffer, AsnType));
 end;
 
-function AsnDecOid(Pos, EndPos: PtrInt; const Buffer: TAsnObject): RawUtf8;
+procedure AsnDecOid(Pos, EndPos: PtrInt; const Buffer: TAsnObject; var Dest: RawUtf8);
 var
   b: byte;
   x, y: cardinal;
@@ -6823,7 +6827,7 @@ begin
     {%H-}AppendShortCharSafe('.', tmp);
     AppendShortCardinal(x, tmp);
   end;
-  FastSetString(result, @tmp[1], ord(tmp[0]));
+  FastSetString(Dest, @tmp[1], ord(tmp[0])); // last: Buffer may be = Dest
 end;
 
 function AsnDecOctStr(const input: RawByteString): RawByteString;
@@ -6942,7 +6946,7 @@ begin
   // we need to decode and return the Value^
   if (result and ASN1_CL_CTR) <> 0 then
     // constructed (e.g. SEQ/SETOF): return whole data, but keep Pos after header
-    Value^ := copy(Buffer, Pos, asnsize)
+    FastSetRawByteString(Value^, @PByteArray(Buffer)[Pos - 1], asnsize)
   else
     // decode Value^ as text - use AsnNextRaw() to avoid the decoding
     case result of
@@ -6955,7 +6959,7 @@ begin
         end;
       ASN1_OBJID:
         begin
-          Value^ := AsnDecOid(Pos, Pos + asnsize, Buffer);
+          AsnDecOid(Pos, Pos + asnsize, Buffer, PRawUtf8(Value)^);
           inc(Pos, asnsize);
         end;
       ASN1_NULL:
@@ -6964,8 +6968,7 @@ begin
       // ASN1_UTF8STRING, ASN1_OCTSTR or unknown - return as CP_UTF8 for FPC
       if asnsize > 0 then
       begin
-        Value^ := copy(Buffer, Pos, asnsize);
-        FakeCodePage(Value^, CP_UTF8);
+        FastSetString(PRawUtf8(Value)^, @PByteArray(Buffer)[Pos - 1], asnsize);
         inc(Pos, asnsize);
       end;
     end;

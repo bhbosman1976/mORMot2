@@ -690,7 +690,7 @@ type
         {$endif STRCNT32}
         {$endif HASCODEPAGE}
         refCnt: TStrCnt; // =SizeInt on older FPC, =integer since FPC 3.4
-        length: TStrLen;
+        length: TStrLen; // =SizeInt on FPC, =integer on Delphi
       );
     {$ifdef HASCODEPAGE}
     1: (
@@ -3545,6 +3545,10 @@ function bswap16(a: cardinal): cardinal;
 /// convert the endianness of a given unsigned 32-bit integer
 function bswap32(a: cardinal): cardinal;
   {$ifndef ASMINTEL}inline;{$endif}
+
+/// convert the endianness of a given unsigned integer from 0..4 bytes input
+function bswapN(b: PByte; len: cardinal): cardinal;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// in-place convert the endianness of several unsigned 32-bit integers
 // - n is required to be > 0
@@ -10322,6 +10326,20 @@ end;
 function bswap16(a: cardinal): cardinal; // inlining is good enough
 begin
   result := ((a and 255) shl 8) or (a shr 8);
+end;
+
+function bswapN(b: PByte; len: cardinal): cardinal;
+begin
+  result := 0;
+  if len > 0 then
+    repeat
+      inc(result, b^);
+      dec(len);
+      if len = 0 then
+        break;
+      inc(b);
+      result := result shl 8;
+    until false;
 end;
 
 procedure MoveSwap(dst, src: PByte; n: PtrInt);

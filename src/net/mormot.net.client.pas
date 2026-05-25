@@ -178,6 +178,8 @@ type
     // - TCurlHttp would only check for RedirectMax > 0 with no exact count
     // - TWinINet won't support this parameter
     RedirectMax: integer;
+    /// force THttpClientSocket to close and reopen its socket on idle connection
+    RecreateConnectionAfterSecs: cardinal;
     /// allow to customize the User-Agent header
     // - for TWinHttp, should be set at constructor level
     UserAgent: RawUtf8;
@@ -590,6 +592,7 @@ type
   THttpClientSocket = class(THttpSocket)
   protected
     fExtendedOptions: THttpRequestExtendedOptions;
+    fLastRequestTix: cardinal; // GetTickSec for RecreateConnectionAfterSecs
     fReferer: RawUtf8;
     fAccept: RawUtf8;
     fProcessName: RawUtf8;
@@ -1846,7 +1849,8 @@ type
     // - you can then set the needed HttpOptions^, then call the Connected method
     // to check if it is actually connected
     constructor Create(const aServerAddress: RawUtf8; const aBaseUri: RawUtf8 = '';
-      aKeepAlive: integer = 5000); reintroduce; virtual;
+      aKeepAlive: integer = 5000; aOnlyUseSocket: boolean = ONLY_CLIENT_SOCKET);
+      reintroduce; virtual;
     /// finalize the instance, and its associated lock
     destructor Destroy; override;
     /// raw access to the HTTP options for the connection, e.g. TLS or Auth
@@ -2254,15 +2258,36 @@ end;
 
 function THttpPartials.FromFile(const FileName: TFileName): PHttpPartial;
 var
-  i: PtrInt;
-begin
+  n, l: PtrInt;
+  p: PAnsiChar;
+begin // very ugly but very efficient code
   result := pointer(fDownload);
-  for i := 1 to length(fDownload) do
-    if (result^.ID <> 0) and // not a recycled slot
-       (result^.PartFile = FileName) then
-      exit
-    else
+  if result = nil then
+    exit;
+  if FileName <> '' then
+  begin
+    l := PStrLen(PAnsiChar(pointer(FileName)) - _STRLEN)^;
+    n := PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF;
+    repeat
+      if result^.ID <> 0 then // not a recycled slot
+      begin // inlined EqualFileNameNotNull() - comparing backwards
+        p := pointer(result^.PartFile);
+        if PStrLen(p - _STRLEN)^ = l then
+        begin
+          l := l * SizeOf(Char); // from WideChar to bytes (no-op for AnsiChar)
+          repeat
+            dec(l, SizeOf(TStrLen)); // may compare Length header bytes
+            if PStrLen(p + l)^ <> PStrLen(@PByteArray(FileName)[l])^ then
+              break;
+            if l <= 0 then
+              exit; // found exact filename
+          until false;
+        end;
+      end;
       inc(result);
+      dec(n);
+    until n = 0;
+  end;
   result := nil;
 end;
 
@@ -2430,8 +2455,11 @@ begin
     if p = nil then
       exit;
     result := true;
-    id := p^.ID;
-    fn := p^.PartFile;
+    if Assigned(OnLog) then
+    begin
+      id := p^.ID;
+      fn := p^.PartFile;
+    end;
     n := RawAssociate(Http, p);
   finally
     Safe.WriteUnLock;
@@ -2458,10 +2486,9 @@ begin
     Ctxt.ProgressiveTix := tix + STATICFILE_PROGTIMEOUTSEC; // first seen
   // retrieve the file name to be processed
   fn := FindReadLocked(Ctxt.ProgressiveID);
-  if fn = '' then // e.g. after THttpPartials.DoneLocked()
-    exit;
-  // process this file within the read lock
+  if fn <> '' then // e.g. after THttpPartials.DoneLocked()
   try
+    // process this file within the read lock
     src := FileOpen(fn, fmOpenReadShared); // partial file access
     if ValidHandle(src) then
     try
@@ -2921,7 +2948,7 @@ procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
     AppendLine(fRequestContext, ['DoRetry ',  msg]);
     //writeln('DoRetry ',byte(ctxt.Retry), ' ', FatalErrorCode, ' / ', msg);
     if Assigned(OnLog) then
-       OnLog(sllTrace, 'DoRetry % socket=% fatal=% retry=%',
+       OnLog(sllTrace, 'DoRetry % socket=% fatal=% twice=%',
          [msg, fSock.Socket, FatalErrorCode, BOOL_STR[rMain in ctxt.Retry]], self);
     if Aborted then
       ctxt.Status := HTTP_CLIENTERROR
@@ -2935,6 +2962,7 @@ procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
         OpenBind(fServer, fPort, {bind=}false, ServerTls);
         HttpStateReset;
         include(ctxt.Retry, rMain);
+        fLastRequestTix := 0;
         RequestInternal(ctxt); // retry once
       except
         on E: Exception do
@@ -2951,25 +2979,38 @@ var
   res: TNetResult;
   bodystream: TStream;
   loerr, buflen: integer;
+  tix, idle: cardinal;
   dat: RawByteString;
   start: Int64;
 begin
+  idle := 0;
+  tix := fExtendedOptions.RecreateConnectionAfterSecs;
+  if tix <> 0 then
+  begin
+    tix := GetTickSec;
+    if fLastRequestTix <> 0 then
+      idle := tix - fLastRequestTix;
+  end;
   if Assigned(OnLog) then
   begin
     QueryPerformanceMicroSeconds(start);
-    OnLog(sllTrace, 'RequestInternal % %:%/% flags=% retry=%', [ctxt.Method,
-      fServer, fPort, ctxt.Url, ToText(Http.HeaderFlags), byte(ctxt.Retry)], self);
+    OnLog(sllTrace, 'RequestInternal % %:%/% flags=% idle=% retry=%',
+      [ctxt.Method, fServer, fPort, ctxt.Url, ToText(Http.HeaderFlags),
+       idle, byte(ctxt.Retry)], self);
   end;
   Http.Content := '';
   if Aborted then
     ctxt.Status := HTTP_CLIENTERROR
   else if (hfConnectionClose in Http.HeaderFlags) or
           not SockIsDefined then
-    DoRetry('connection closed (keepalive timeout or max)', [])
-  else if not fSock.Available(@loerr) then
+    DoRetry('connection closed', [])
+  else if (idle <> 0) and
+          (idle > fExtendedOptions.RecreateConnectionAfterSecs) then
+    DoRetry('connection %s idle', [idle])
+  else if not fSock.Available(@loerr, {nowait=}false) then // from TCP keepalive
     DoRetry('connection broken (socketerror=%)', [NetErrorText(loerr)])
   else if not SockConnected then
-    DoRetry('getpeername() failed', [])
+    DoRetry('getpeername() failed', []) // paranoid
   else
   try
     // send request - we use SockSend because writeln() is calling flush()
@@ -3106,6 +3147,9 @@ begin
       // successfully sent -> reset some fields for the next request
       if ctxt.Status in HTTP_GET_OK then
         RequestClear;
+      // reset the RecreateConnectionAfterSecs TTL flag
+      if tix <> 0 then
+        fLastRequestTix  := GetTickSec;
     except
       on E: Exception do
         if E.InheritsFrom(ENetSock) or
@@ -3522,7 +3566,7 @@ begin
   // try to get from local HashCacheDir
   if (params.HashCacheDir <> '') and
      DirectoryExists(params.HashCacheDir) then
-    cached := MakePath([params.HashCacheDir, ExtractFileName(result)]);
+    MakePath([params.HashCacheDir, ExtractFileName(result)], cached);
   if (destfile <> '') and
      Assigned(params.Hasher) and
      (params.Hash <> '') then
@@ -5230,6 +5274,7 @@ end;
 constructor TSimpleHttpClient.Create(aOnlyUseClientSocket: boolean);
 begin
   fConnectOptions.RedirectMax := 4; // seems fair enough
+  fConnectOptions.RecreateConnectionAfterSecs := 30; // 30 secs idle -> reopen
   {$ifdef USEHTTPREQUEST}
   fOnlyUseClientSocket := aOnlyUseClientSocket or
                           not MainHttpClass.IsAvailable;
@@ -5641,14 +5686,14 @@ end;
 { TJsonClient }
 
 constructor TJsonClient.Create(const aServerAddress, aBaseUri: RawUtf8;
-  aKeepAlive: integer);
+  aKeepAlive: integer; aOnlyUseSocket: boolean);
 begin
   inherited Create;
   if not fServerUri.From(aServerAddress) then
     EJsonClient.RaiseUtf8('Unexpected %.Create(%)', [self, aServerAddress]);
   fBaseUri := IncludeTrailingUriDelimiter(aBaseUri);
   fKeepAlive := aKeepAlive;
-  fHttp := TSimpleHttpClient.Create;
+  fHttp := TSimpleHttpClient.Create(aOnlyUseSocket);
   fDefaultHeaders := ('Accept: ' + JSON_CONTENT_TYPE);
   fOptions := [jcoParseTolerant, jcoHttpErrorRaise];
   fUrlEncoder := [ueEncodeNames, ueSkipVoidString];

@@ -831,6 +831,8 @@ procedure TTestCoreBase.FastStringCompare;
     result := StrIEqualW(pointer(p1), pointer(p2));
   end;
 
+var
+  fn: TFileName;
 begin
   CheckEqual(CompareText('', ''), 0);
   Check(CompareText('abcd', '') > 0);
@@ -944,6 +946,22 @@ begin
   Check(not HasOnlyChar('eabab', ['a' .. 'c']));
   Check(not HasOnlyChar('ababe', ['a' .. 'c']));
   Check(HasOnlyChar('ababe', ['a' .. 'e']));
+  CheckEqual(GetFileNameWithoutExtOrPath(''), '');
+  CheckEqual(GetFileNameWithoutExtOrPath('toto.ext'), 'toto');
+  CheckEqual(GetFileNameWithoutExtOrPath('toto'), 'toto');
+  {$ifdef OSWINDOWS}
+  CheckEqual(GetFileNameWithoutExtOrPath('c:\temp\toto.ext'), 'toto');
+  CheckEqual(GetFileNameWithoutExtOrPath('c:\temp\toto'), 'toto');
+  {$else}
+  CheckEqual(GetFileNameWithoutExtOrPath('/var/tmp/toto.ext'), 'toto');
+  CheckEqual(GetFileNameWithoutExtOrPath('/var/tmp/toto'), 'toto');
+  {$endif OSWINDOWS}
+  fn := '/var/toto.ext';
+  Check(EqualFileNameNotNull(fn, fn));
+  Check(EqualFileNameNotNull(fn, '/var/toto.ext'));
+  Check(not EqualFileNameNotNull(fn, '/var/toto.ex2'));
+  Check(not EqualFileNameNotNull(fn, '/var/toto.ex'));
+  Check(not EqualFileNameNotNull(fn, '/Var/toto.ext'));
 end;
 
 procedure TTestCoreBase.IniFiles;
@@ -5700,6 +5718,12 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
     CheckEqual(t, TrimRight(c));
   end;
 
+  procedure CheckCleanThreadName(s, exp: RawUtf8);
+  begin
+    CleanThreadName(s);
+    CheckEqual(s, exp);
+  end;
+
 var
   i, j, k, len, len120, lenup100, CP, L, lcid: integer;
   bak, bakj: AnsiChar;
@@ -5709,6 +5733,7 @@ var
   WU: array[0..3] of WideChar;
   str: string;
   ss: ShortString;
+  fn: TFileName;
   up4: RawUcs4;
   U, U1, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
   arr, arr2: TRawUtf8DynArray;
@@ -6253,6 +6278,26 @@ begin
   Check(CsvContains('aa,bb,cc', 'cC', ',', false));
   Check(not CsvContains('aa,bb,cc', 'cb', ',', false));
   Check(not CsvContains('aa,bb,cc', 'a', ',', false));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"3a8-64cf88076aae1"', 19, ',', {casesens=}true, {trim=}true));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"a828414ff6"', 12, ',', true, true));
+  Check(CsvContains(' "3a8-64cf88076aae1" , "a828414ff6" ',
+    '"3a8-64cf88076aae1"', 19, ',', true, true));
+  Check(CsvContains(' "3a8-64cf88076aae1" , "a828414ff6" ',
+    '"a828414ff6"', 12, ',', true, true));
+  Check(CsvContains('"3a8-64cf88076aae1","a828414ff6" ',
+    '"a828414ff6"', 12, ',', true, true));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"3a8-64cf88076aae1"', 34, 19, ',', {casesens=}true, {trim=}true));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"a828414ff6"', 34, 12, ',', true, true));
+  U1 := ' "3a8-64cf88076aae1" , "a828414ff6" ds46';
+  L := length(U1) - 4; // should stop at ds46 ending chars
+  Check(CsvContains(pointer(U1), '"3a8-64cf88076aae1"645', L, 19, ',', true, true));
+  Check(CsvContains(pointer(U1), '"a828414ff6"275', L, 12, ',', true, true));
+  Check(CsvContains('"3a8-64cf88076aae1","a828414ff6"  321',
+    '"a828414ff6"46', 34, 12, ',', true, true));
   CheckEqual(GetFirstCsvItem(''), '');
   CheckEqual(GetFirstCsvItem('a'), 'a');
   CheckEqual(GetFirstCsvItem('ab'), 'ab');
@@ -6277,6 +6322,10 @@ begin
   Check(MakePath(['1/', 2, 3], true, '/') = '1/2/3/');
   Check(MakePath([1, 2, '3/'], true, '/') = '1/2/3/');
   Check(MakePath([1, '', 2, '3/'], true, '/') = '1/2/3/');
+  MakePath([1, 2, '3'], fn, false, '/');
+  Check(fn = '1/2/3');
+  MakePath(['1', 2, 3], fn, true, '/');
+  Check(fn = '1/2/3/');
   Check(MakeFileName([]) = '');
   Check(MakeFileName(['toto', 'doc']) = 'toto.doc');
   {$ifdef OSWINDOWS}
@@ -6912,6 +6961,9 @@ begin
   CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C', true), 'abCabCabC');
   CheckEqual(StringReplaceAll('abcabcabc', 'c', '', true), 'ababab');
   CheckEqual(StringReplaceAll('abcabcabc', 'C', '', true), 'ababab');
+  CheckCleanThreadName('', '');
+  CheckCleanThreadName('toto', 'toto');
+  CheckCleanThreadName('TWebSockettotoTSqlRestServerTOrmRestmemory', 'WStotoSrvmem');
   CheckEqual(LogEscapeFull(''), '');
   CheckEqual(LogEscapeFull(' abc'), ' abc');
   CheckEqual(LogEscapeFull('abc'), 'abc');
@@ -8140,6 +8192,13 @@ begin
   CheckEqual(SizeOf(TSmbiosBiosFlags), 8);
   CheckEqual(SizeOf(TSmbiosMemory) - 7 * SizeOf(RawUtf8), 11);
   CheckEqual(SizeOf(TSmbiosMemoryArray) - 2 * SizeOf(pointer), 5);
+  Check(not IsDefaultString(pointer(s), length(s)));
+  s := 'Default string';
+  Check(IsDefaultString(pointer(s), length(s)));
+  s := 'Default String';
+  Check(IsDefaultString(pointer(s), length(s)));
+  s := 'Default 5tring';
+  Check(not IsDefaultString(pointer(s), length(s)));
   // validate actual retrieval from this computer
   GetComputerUuid(uid); // retrieve main SMBIOS and its UUID, or generate it
   Check(_SmbiosRetrieved);

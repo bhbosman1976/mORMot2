@@ -41,36 +41,38 @@ uses
 function IdemPCharAndGetNextItem(var source: PUtf8Char; const searchUp: RawUtf8;
   var Item: RawUtf8; Sep: AnsiChar = #13): boolean;
 
-/// return next CSV string from P
-// - P=nil after call when end of text is reached
+/// return next CSV string from P until P = nil
 function GetNextItem(var P: PUtf8Char; Sep: AnsiChar = ','): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// return next CSV string from P
-// - P=nil after call when end of text is reached
+/// return next CSV string from P until P = nil
 procedure GetNextItem(var P: PUtf8Char; Sep: AnsiChar;
   var result: RawUtf8); overload;
 
-/// return next CSV string (unquoted if needed) from P
-// - P=nil after call when end of text is reached
+/// return next CSV string (unquoted if needed) from P until P = nil
 procedure GetNextItem(var P: PUtf8Char; Sep, Quote: AnsiChar;
   var result: RawUtf8); overload;
 
-/// return next CSV string from P from several separator characters
-// - P=nil after call when end of text is reached
+/// return next CSV string from P until P = nil from several separator characters
 // - returns the character which ended the result string, i.e. #0 or one of Sep
 function GetNextItemMultiple(var P: PUtf8Char; const Sep: RawUtf8;
   var Next: RawUtf8): AnsiChar; overload;
 
-/// return trimmed next CSV string from P
-// - P=nil after call when end of text is reached
+/// return trimmed next CSV string from P until P = nil
 procedure GetNextItemTrimed(var P: PUtf8Char; Sep: AnsiChar;
   var result: RawUtf8);
 
-/// return trimmed next CSV string buffer and length from P
-// - P=nil after call when end of text is reached
+/// return trimmed next CSV string buffer and length from P until P = nil
 function GetNextItemTrimedBuffer(var P: PUtf8Char; Sep: AnsiChar;
   out Item: PUtf8Char): PtrInt;
+
+/// return next CSV string buffer and length from P until P = nil
+function GetNextItemBuffer(var P: PUtf8Char; Sep: AnsiChar; out Item: PUtf8Char): PtrInt;
+  {$ifdef ASMX64}inline;{$endif}
+
+/// return next CSV string buffer and length from P until P = nil
+function GetNextItemBufferLen(var P: PUtf8Char; var PL: PtrInt; Sep: AnsiChar;
+  out Item: PUtf8Char; TrimValue: boolean): PtrInt;
 
 /// return trimmed next CSV string from P, ending value at #0 .. #13
 // - typically usage is to parse HTTP headers
@@ -83,8 +85,7 @@ procedure GetNextItemTrimedLine(var P: PUtf8Char; Sep: AnsiChar;
 function GetNextItemTrimedLineBuffer(var P: PUtf8Char; Sep: AnsiChar;
   out Item: PUtf8Char): PtrInt;
 
-/// return trimmed next CSV string from P, ignoring any Escaped char
-// - P=nil after call when end of text is reached
+/// return trimmed next CSV string from P until P = nil, ignoring any Escaped char
 procedure GetNextItemTrimedEscaped(var P: PUtf8Char; Sep, Esc: AnsiChar;
   var result: RawUtf8);
 
@@ -94,7 +95,7 @@ procedure GetNextItemTrimedEscaped(var P: PUtf8Char; Sep, Esc: AnsiChar;
 // - P=nil after call when end of text is reached
 procedure GetNextItemTrimedCRLF(var P: PUtf8Char; var result: RawUtf8);
 
-/// return next CSV string from P, nil if no more
+/// return next CSV string from P until P = nil
 // - this function returns the RTL string type of the compiler, and
 // therefore can be used with ready to be displayed text (e.g. for the UI)
 function GetNextItemString(var P: PChar; Sep: Char = ','): string;
@@ -108,11 +109,15 @@ function GetNextItemString(var P: PChar; Sep: Char = ','): string;
 // - see also SameExt() from mormot.core.os.pas
 function GetFileNameExtIndex(const FileName, CsvExt: TFileName): integer;
 
-/// return next CSV string from P, nil if no more
+/// return next CSV string from P until P = nil
 // - output text would be trimmed from any left or right space
 // - will always append a #0 terminator - excluded from Dest length (0..254)
 procedure GetNextItemShortString(var P: PUtf8Char; Dest: PShortString;
   Sep: AnsiChar = ',');
+
+/// fast version of several cascaded StringReplaceAll() as old=new,... parameters
+function StringReplaceCsv(const S: RawUtf8; OldNewPatternPairs: PUtf8Char;
+  CaseInsensitive: boolean = false): RawUtf8;
 
 /// append some text lines with the supplied Values[]
 // - if any Values[] item is '', no line is added
@@ -221,7 +226,15 @@ function GetLastCsvItem(const Csv: RawUtf8; Sep: AnsiChar = ','): RawUtf8;
 
 /// quickly check if Value is in Csv with no temporary memory allocation
 function CsvContains(const Csv, Value: RawUtf8; Sep: AnsiChar = ',';
-  CaseSensitive: boolean = true): boolean;
+  CaseSensitive: boolean = true): boolean; overload;
+
+/// quickly check if Value is in Csv with no temporary memory allocation
+function CsvContains(Csv, Value: PUtf8Char; ValueLen: PtrInt;
+  Sep: AnsiChar; CaseSensitive, TrimValue: boolean): boolean; overload;
+
+/// quickly check if Value is in Csv with no temporary memory allocation
+function CsvContains(Csv, Value: PUtf8Char; CsvLen, ValueLen: PtrInt;
+  Sep: AnsiChar; CaseSensitive, TrimValue: boolean): boolean; overload;
 
 /// return the index of a Value in a CSV string
 // - start at Index=0 for first one
@@ -1983,7 +1996,11 @@ procedure AppendLine(var Text: RawUtf8; const Args: array of const;
 // - similar to os.path.join() in the Python RTL
 // - e.g. on Windows: MakePath(['abc', 1, 'toto.json']) = 'abc\1\toto.json'
 function MakePath(const Part: array of const; EndWithDelim: boolean = false;
-  Delim: AnsiChar = PathDelim): TFileName;
+  Delim: AnsiChar = PathDelim): TFileName; overload;
+
+/// append some path parts into a single file name with proper path delimiters
+procedure MakePath(const Part: array of const; var Dest: TFileName;
+  EndWithDelim: boolean = false; Delim: AnsiChar = PathDelim); overload;
 
 /// a wrapper around ExpandFileName(MakePath(Part))
 function MakeExpandedPath(const Part: array of const;
@@ -2741,6 +2758,20 @@ begin
   end;
 end;
 
+function StringReplaceCsv(const S: RawUtf8; OldNewPatternPairs: PUtf8Char;
+  CaseInsensitive: boolean): RawUtf8;
+var
+  old, new: RawUtf8;
+begin
+  result := S;
+  while OldNewPatternPairs <> nil do
+  begin
+    GetNextItem(OldNewPatternPairs, '=', old);
+    GetNextItem(OldNewPatternPairs, ',', new);
+    result := StringReplaceAll(result, old, new, CaseInsensitive);
+  end;
+end;
+
 function GetNextItemMultiple(var P: PUtf8Char; const Sep: RawUtf8;
   var Next: RawUtf8): AnsiChar;
 var
@@ -2787,26 +2818,84 @@ function GetNextItemTrimedBuffer(var P: PUtf8Char; Sep: AnsiChar;
 var
   S: PUtf8Char;
 begin
+  result := 0;
   S := P;
   if (S = nil) or
      (Sep <= ' ') then
-  begin
-    result := 0;
     exit;
-  end;
   while (S^ <= ' ') and
         (S^ <> #0) do
     inc(S); // trim left
   Item := S;
-  result := PosChar0(S, Sep) - S; // use fast SSE2 asm on x86_64
+  S := PosChar0(S, Sep); // use fast SSE2 asm on x86_64
+  if S^ = #0 then
+    P := nil
+  else
+    P := S + 1;
+  result := S - Item;
+  S := Item;
   while (result <> 0) and
-        (S[result] in [#1 .. ' ']) do
-    dec(result);
+        (S[result - 1] <= ' ') do
+    dec(result); // trim right
+end;
+
+function GetNextItemBuffer(var P: PUtf8Char; Sep: AnsiChar; out Item: PUtf8Char): PtrInt;
+var
+  S: PUtf8Char;
+begin
+  result := 0;
+  S := P;
+  if (S = nil) or
+     (Sep <= ' ') then
+    exit;
+  Item := S;
+  result := PosChar0(S, Sep) - S; // use fast SSE2 asm on x86_64
   inc(S, result);
   if S^ = #0 then
     P := nil
   else
     P := S + 1;
+end;
+
+function GetNextItemBufferLen(var P: PUtf8Char; var PL: PtrInt; Sep: AnsiChar;
+  out Item: PUtf8Char; TrimValue: boolean): PtrInt;
+var
+  S, E: PUtf8Char;
+begin
+  result := 0;
+  S := P;
+  if (S = nil) or
+     (PL <= 0) or
+     (Sep <= ' ') then
+    exit;
+  if TrimValue and
+     (S^ <= ' ') then
+  begin
+    E := S + PL;
+    repeat
+      inc(S) // trim left
+    until (S >= E) or
+          (S^ > ' ');
+    PL := E - S;
+  end;
+  Item := S;
+  result := ByteScanIndex(pointer(S), PL, ord(Sep)); // SSE2 asm on x86_64
+  if result < 0 then
+  begin
+    P := nil;
+    result := PL;
+  end
+  else
+  begin
+    inc(result); // let P/PL point after Sep
+    dec(PL, result);
+    P := S + result;
+    dec(result);
+  end;
+  if TrimValue then
+    while (result <> 0) and
+          (S[result - 1] <= ' ') do
+      dec(result);
 end;
 
 procedure GetNextItemTrimed(var P: PUtf8Char; Sep: AnsiChar; var result: RawUtf8);
@@ -3447,49 +3536,56 @@ begin
       result := GetNextItemString(P, Sep);
 end;
 
-function CsvContains(const Csv, Value: RawUtf8; Sep: AnsiChar;
-  CaseSensitive: boolean): boolean;
+function CsvContains(Csv, Value: PUtf8Char; ValueLen: PtrInt;
+  Sep: AnsiChar; CaseSensitive, TrimValue: boolean): boolean;
 var
-  i, l: PtrInt;
-  p, s: PUtf8Char;
-  match: TIdemPropNameUSameLen;
+  o: PUtf8Char;
+  l: PtrInt;
 begin
-  if (Csv = '') or
-     (Value = '') then
-  begin
-    result := false;
-    exit;
-  end;
-  // note: all search sub-functions do use fast SSE2 asm on i386 and x86_64
-  match := IdemPropNameUSameLen[CaseSensitive];
-  p := pointer(Csv);
-  l := PStrLen(PAnsiChar(pointer(Value)) - _STRLEN)^;
-  if l >= PStrLen(p - _STRLEN)^ then
-    result := (l = PStrLen(p - _STRLEN)^) and
-              match(p, pointer(Value), l)
-  else
-  begin
-    i := PosExChar(Sep, Csv);
-    if i <> 0 then
-    begin
-      result := true;
-      s := p + i - 1;
-      repeat
-        if (s - p = l) and
-           match(p, pointer(Value), l) then
+  result := (Csv <> nil) and
+            (ValueLen > 0);
+  if result then
+    repeat // use fast SSE2 asm on x86_64
+      if TrimValue then
+        l := GetNextItemTrimedBuffer(Csv, Sep, o)
+      else
+        l := GetNextItemBuffer(Csv, Sep, o);
+      if l = ValueLen then
+        if CaseSensitive then
+        begin
+          if CompareMem(o, Value, l) then
+            exit;
+        end else if IdemPropNameUSameLenNotNull(o, Value, l) then
           exit;
-        p := s + 1;
-        s := PosChar(p, Sep); // use fast SSE2 asm on x86_64
-        if s <> nil then
-          continue;
-        if (PStrLen(PAnsiChar(pointer(Csv)) - _STRLEN)^ - (p - pointer(Csv)) = l) and
-           match(p, pointer(Value), l) then
+    until Csv = nil;
+  result := false;
+end;
+
+function CsvContains(const Csv, Value: RawUtf8; Sep: AnsiChar; CaseSensitive: boolean): boolean;
+begin
+  result := CsvContains(pointer(Csv), pointer(Value), length(Value), Sep, CaseSensitive, false);
+end;
+
+function CsvContains(Csv, Value: PUtf8Char; CsvLen, ValueLen: PtrInt;
+  Sep: AnsiChar; CaseSensitive, TrimValue: boolean): boolean;
+var
+  o: PUtf8Char;
+  l: PtrInt;
+begin
+  result := (Csv <> nil) and
+            (ValueLen > 0);
+  if result then
+    repeat // use fast SSE2 asm on x86_64
+      l := GetNextItemBufferLen(Csv, CsvLen, Sep, o, TrimValue);
+      if l = ValueLen then
+        if CaseSensitive then
+        begin
+          if CompareMem(o, Value, l) then
+            exit;
+        end else if IdemPropNameUSameLenNotNull(o, Value, l) then
           exit;
-        break;
-      until false;
-    end;
-    result := false;
-  end;
+    until Csv = nil;
+  result := false;
 end;
 
 function FindCsvIndex(Csv: PUtf8Char; const Value: RawUtf8; Sep: AnsiChar;
@@ -9100,9 +9196,38 @@ type
     function WriteMax(Dest: PUtf8Char; Max: PtrUInt): PUtf8Char;
   end;
 
+procedure TFormatUtf8.Init;
+begin
+  L := 0;
+  last := @blocks;
+end;
+
 procedure TooManyArgs;
 begin
   ESynException.RaiseU('TFormatUtf8: too many arguments');
+end;
+
+procedure TFormatUtf8.AddVarRec(Arg: PVarRec; ArgCount: PtrUInt);
+var
+  d: PTempUtf8;
+begin
+  if ArgCount = 0 then
+    exit;
+  d := last;
+  inc(d, ArgCount);
+  if PtrUInt(d) > PtrUInt(@blocks[high(blocks)]) then
+    TooManyArgs;
+  d := last;
+  repeat
+    if VarRecToTempUtf8(Arg, d^) then
+    begin
+      inc(L, d^.Len);
+      inc(d);
+    end;
+    inc(Arg);
+    dec(ArgCount)
+  until ArgCount = 0;
+  last := d;
 end;
 
 procedure TFormatUtf8.WriteAll(Dest: PUtf8Char; d: PTempUtf8);
@@ -9218,35 +9343,6 @@ begin // in our internal usage, we know that SomeText is <> ''
     TempRawUtf8 := nil;
   end;
   inc(last);
-end;
-
-procedure TFormatUtf8.AddVarRec(Arg: PVarRec; ArgCount: PtrUInt);
-var
-  d: PTempUtf8;
-begin
-  if ArgCount = 0 then
-    exit;
-  d := last;
-  inc(d, ArgCount);
-  if PtrUInt(d) > PtrUInt(@blocks[high(blocks)]) then
-    TooManyArgs;
-  d := last;
-  repeat
-    if VarRecToTempUtf8(Arg, d^) then
-    begin
-      inc(L, d^.Len);
-      inc(d);
-    end;
-    inc(Arg);
-    dec(ArgCount)
-  until ArgCount = 0;
-  last := d;
-end;
-
-procedure TFormatUtf8.Init;
-begin
-  L := 0;
-  last := @blocks;
 end;
 
 procedure TFormatUtf8.DoAppend(var Text: RawUtf8; Arg: PVarRec; ArgCount: PtrInt);
@@ -9660,6 +9756,15 @@ begin
   f.WriteString(string(result));
 end;
 
+procedure MakePath(const Part: array of const; var Dest: TFileName;
+  EndWithDelim: boolean; Delim: AnsiChar);
+var
+  f: TFormatUtf8;
+begin
+  {%H-}f.DoDelim(@Part[0], length(Part), EndWithDelim, Delim);
+  f.WriteString(string(Dest));
+end;
+
 function MakeExpandedPath(const Part: array of const; EndWithDelim: boolean): TFileName;
 begin
   result := ExpandFileName(MakePath(Part, EndWithDelim));
@@ -9690,7 +9795,7 @@ begin
     if FolderName = '' then
       Utf8ToFileName(fn, FileName)
     else
-      FileName := MakePath([FolderName, fn]);
+      MakePath([FolderName, fn], FileName);
 end;
 
 function FileExistsMake(const Part: array of const;
@@ -9698,7 +9803,7 @@ function FileExistsMake(const Part: array of const;
 var
   filename: TFileName;
 begin
-  filename := MakePath(Part);
+  MakePath(Part, filename);
   result := FileExists(filename);
   if result and
      (SetIfFound <> nil) then
@@ -9710,7 +9815,7 @@ function DirectoryExistsMake(const Part: array of const;
 var
   folder: TFileName;
 begin
-  folder := MakePath(Part);
+  MakePath(Part, folder);
   result := DirectoryExists(folder);
   if result and
      (SetIfFound <> nil) then
